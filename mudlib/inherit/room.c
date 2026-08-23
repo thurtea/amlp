@@ -1,20 +1,21 @@
 // mudlib:  library
 // file:    /inherit/room.c
 // purpose: a small mixin giving a static room real, navigable exits.
-//          Before this, the only room this mudlib had (/single/
-//          start_room.c) was a dead end -- there was nowhere to walk to
-//          at all. A concrete room opts in by calling set_exits() from
-//          its own create() (a mapping of direction name -> destination
-//          room path, e.g. (["north": ROOM_CHAMBER_A])) and, if it also
-//          defines its own init() the way start_room.c already does
-//          (for its wand hand-out), by calling "room::init();" once its
-//          own logic is done so both run.
+//          Before this, the only room this mudlib had (the gatehouse,
+//          /single/gatehouse.c) was a dead end -- there was nowhere to
+//          walk to at all. A concrete room opts in by calling
+//          set_exits() from its own create() (a mapping of direction
+//          name -> destination room path, e.g. (["north":
+//          ROOM_WATCH_ROOM])) and, if it also defines its own init() the
+//          way gatehouse.c already does (for its rod hand-out), by
+//          calling "room::init();" once its own logic is done so both
+//          run.
 //
-// Deliberately plain, not folded into /inherit/base.c: start_room.c
-// never inherited BASE either (matching wand_of_creation.c's own "no
-// inherits at all" style for a driver-apply-only file), so this stays a
-// second, separate mixin a room explicitly opts into rather than
-// pulling in BASE's own unrelated living/inventory conventions.
+// Deliberately plain, not folded into /inherit/base.c: gatehouse.c never
+// inherited BASE either (matching wand_of_creation.c's own "no inherits
+// at all" style for a driver-apply-only file), so this stays a second,
+// separate mixin a room explicitly opts into rather than pulling in
+// BASE's own unrelated living/inventory conventions.
 
 private mapping room_exits;
 

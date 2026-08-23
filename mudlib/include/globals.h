@@ -29,7 +29,12 @@
 // all). This mudlib has one real starting room instead, so login.c's
 // own post-setup move() (and master.c's destruct_environment_of()
 // safety fallback) both target this instead of a true void.
-#define START_LOC  "/single/start_room"
+//
+// 2026-08-23: the starting area is now a real place, not "a test
+// entrance hall" -- the gatehouse at the edge of the ruined settlement
+// of Stonewick (see /single/gatehouse.c's own header comment for the
+// full setting).
+#define START_LOC  "/single/gatehouse"
 
 #define ROOT_UID     "Root"
 #define BACKBONE_UID "Backbone"
@@ -38,15 +43,21 @@
 #define OVERRIDES_FILE  "/single/simul_efun"
 
 // /inherit/room.c's own mixin (exits/movement) -- see that file's own
-// header comment. ROOM_CHAMBER_* are the three additional static rooms
-// reachable from START_LOC, added so this test mudlib has more than one
-// room to move between at all (see room.c and each ROOM_CHAMBER_* file's
-// own header comment for the small 2x2 layout this forms with
-// START_LOC).
-#define ROOM_BASE       "/inherit/room"
-#define ROOM_CHAMBER_A  "/single/room_chamber_a"
-#define ROOM_CHAMBER_B  "/single/room_chamber_b"
-#define ROOM_CHAMBER_C  "/single/room_chamber_c"
+// header comment. The three additional static rooms reachable from
+// START_LOC (the gatehouse), forming a small 2x2 layout with it: the
+// watch room above the gatehouse, the flooded market square east of it,
+// and the granary loft reachable from either. Named 2026-08-23 for what
+// they actually are in Stonewick's ruins, replacing the earlier
+// "room_chamber_a/b/c" placeholder names -- see each room file's own
+// header comment for the full setting.
+#define ROOM_BASE          "/inherit/room"
+#define ROOM_WATCH_ROOM    "/single/watch_room"
+#define ROOM_SUNKEN_COURT  "/single/sunken_court"
+#define ROOM_GRANARY_LOFT  "/single/granary_loft"
+
+// /clone/old_mabb.c -- the scavenger squatting in the watch room. See
+// that file's own header comment.
+#define NPC_OLD_MABB "/clone/old_mabb"
 
 #define COMMAND_PREFIX "/command/"
 
@@ -54,7 +65,12 @@
 #define M_STATUS "status"
 #define M_SAY    "say"
 
-#define WAND_OB "/clone/wand_of_creation"
+// In-fiction this is "the reeve's rod" (see /clone/wand_of_creation.c's
+// own header comment for why the file itself keeps its old name and
+// path -- real regression tests in test/test_lexer.cpp read this exact
+// file off disk by path, and renaming it would be a pure liability with
+// no player-visible benefit, since a player never sees a filename).
+#define REEVES_ROD_OB "/clone/wand_of_creation"
 
 // notes/ACCOUNT_LOGIN_PLAN.md's own first build slice: a real login/
 // account system, greenlit 2026-08-19, this daemon and its per-account

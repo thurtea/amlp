@@ -19627,7 +19627,11 @@ static void testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld
     bool claimed = harness.vm.dispatchCommand(player, "clone /clone/wand_of_creation");
     assert(claimed);
     std::string out = readAvailable(fds[1]);
-    assert(out.find("You are not holding the wand of creation.") != std::string::npos);
+    // 2026-08-23: the held()-denial message was reflavored to name the
+    // rod's real in-fiction identity (see wand_of_creation.c's own
+    // header comment on this exact, deliberate change) -- updated here
+    // in lockstep, same as that file's own change, not left stale.
+    assert(out.find("You are not holding the reeve's rod.") != std::string::npos);
 
     amlp::OutputContext::set(nullptr);
     ::close(fds[1]);

@@ -9,6 +9,85 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-23 (a further session, same day): bundled test mudlib given a
+real setting, replacing the earlier session's own "test entrance
+hall"/"chamber A/B/C" scaffolding, at the user's explicit request.**
+Mudlib content only, no driver code changed except one regression test's
+own expected string (see below).
+
+World: a half-collapsed old kingdom, low-magic and grounded. Stonewick,
+a settlement gutted thirty-odd years back by the Long Burn -- a real,
+mundane dry-summer granary fire, not a curse or a prophecy -- after
+which the garrison never recovered its numbers and the town was mostly
+abandoned to scavengers, deserters, and whatever has since moved into
+the flooded cellars and rotten granary lofts. The starting area is the
+Ashgate, the old east-wall gatehouse (`/single/gatehouse.c`, replacing
+`start_room.c`), not a bare "entrance hall." The same 2x2 exit topology
+from the previous session is kept exactly (it already worked and was
+tested), just renamed and re-described: the watch room
+(`/single/watch_room.c`, was `room_chamber_a.c`), the sunken court
+(`/single/sunken_court.c`, was `room_chamber_b.c`, a flooded former
+market square), and the granary loft (`/single/granary_loft.c`, was
+`room_chamber_c.c`, where Mabb's own dialogue warns something has grown
+in the grain-rot).
+
+New NPC: Old Mabb (`/clone/old_mabb.c`), a scavenger squatting in the
+watch room, placed there once at that room's own `create()` time (not
+re-cloned per visitor). Real dialogue via a genuine `add_action`-driven
+`talk <name> [about <topic>]` command, not a static description block:
+a bare greeting, plus real per-topic answers about the tower, the rod,
+the granary's rot, and the Long Burn itself (this last one explicit
+about the fire being ordinary bad luck, "wasn't magic, wasn't a curse"
+-- matching the user's own explicit "keep the catastrophe mundane, not
+high fantasy prophecy stuff" instruction), plus an honest fallback for
+anything else.
+
+The wand of creation gained a real in-fiction identity: the reeve's
+rod, the old garrison stores-reeve's requisition tool, left untouched on
+the gatehouse's own requisition desk since the reeve died or fled with
+everyone else, picked up by a new arrival the same way the previous
+session's wand hand-out already worked mechanically. The underlying file
+deliberately keeps its old name and path, `/clone/wand_of_creation.c`
+(new constant `REEVES_ROD_OB` in `globals.h` for other files to refer to
+it by) -- real regression tests in `test/test_lexer.cpp` read this exact
+file off disk by path, and a player never sees a filename, so renaming
+it on disk would have been pure risk for no in-fiction benefit. The
+`clone`/`purge`/`create` command verbs themselves are unchanged (no good
+specific reason to rename what a player types), and so is almost every
+message they print -- only the held()-denial message actually named the
+old item ("You are not holding the wand of creation.") and was changed
+("You are not holding the reeve's rod."), with the one real regression
+test asserting that exact string updated in the same lockstep, not left
+to drift or worked around by burying the old name in unrelated text.
+`short()`/`long()`/`id()` were rewritten in full.
+
+Login banner/`/etc/motd`/`help.c` rewritten to match: no more "Welcome
+to Library," a plain framing of Stonewick and the gatehouse, the real
+runnable command list including the new `talk` command, kept in sync
+across all three files the same way the previous session's rewrite
+already established.
+
+1 regression test string updated (`testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld`,
+`test/test_lexer.cpp`) to match the reflavored denial message; no new
+regression tests added (mudlib content, not driver code -- this row's
+own verification is the live session below, matching the previous
+mudlib-rewrite session's own precedent). 747 tests passing, unchanged
+from the prior session, zero regressions.
+
+Live-verified over a real TCP session against the real running driver
+and the rewritten mudlib end to end: fresh account/character creation;
+the full four-room loop (gatehouse -> watch room -> granary loft ->
+sunken court -> gatehouse) with correct new room names/descriptions at
+every stop; all five real `talk mabb about <topic>` topics plus the bare
+greeting and the unknown-topic fallback, all producing their own real,
+distinct text; `clone`/`create`/`purge` all still working under the
+reeve's rod identity (`Cloned into your inventory: /command/help`,
+`Created and placed here: a rusty tin cup`, `Purged: a rusty tin cup`);
+and character persistence unbroken by the rename, `quit` then a fresh
+reconnect as the same account correctly reporting `login_count` 1 then
+2. Test account/character files and the one generated `/data/created/`
+file from the live `create` test deleted afterward.
+
 **2026-08-23 (a later session, same day): rows 2.2/2.3/2.4 re-scoped
 against the real shipped row 2.1 code, not the pre-2.1 abstract plan;
 row 2.4 built.** Re-read `StateSerializer.cpp`/`EfunTable.cpp` directly

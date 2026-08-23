@@ -1,6 +1,7 @@
 // mudlib:  library
 // file:    /clone/wand_of_creation.c
-// purpose: Wand of Creation -- a single held item bundling the
+// purpose: the reeve's rod -- Stonewick's old requisition tool, in the
+//          hands of a new arrival instead of a reeve, bundling the
 //          real-efun-only subset of temp/wiz_tools/staff_of_creation.c's
 //          own behavior. See /WAND_OF_CREATION_SCOPING.md at the mudlib
 //          root for the full scoping trail: which of the original
@@ -8,6 +9,40 @@
 //          conventions Lil never had, and which (review, real build via
 //          _qcs, wizard-permission gating, auto-load persistence) are
 //          deliberately left out of this first version.
+//
+// In-fiction identity (2026-08-23 rewrite, replacing the earlier bare
+// "wand of creation" admin-tool framing): before the Long Burn, the
+// garrison kept a reeve whose job was accounting for lumber, tools, and
+// grain moving through Stonewick's stores -- requisitioning what was
+// needed, clearing what wasn't, and occasionally having something built
+// from raw salvage. This rod was how they did it. Nobody's claimed it
+// since the reeve died or fled with everyone else; it still rests on
+// the gatehouse's own requisition desk (see /single/gatehouse.c),
+// waiting for whoever next has a reason to pick it up. The file itself
+// deliberately keeps its old name and path -- real regression tests in
+// test/test_lexer.cpp read this exact file off disk by path (see that
+// file's own "Wand of Creation" test block), and a player never sees a
+// filename, only short()/long()/id() and the messages below, so
+// renaming it on disk would be pure risk for zero in-fiction benefit.
+// See globals.h's own REEVES_ROD_OB for the constant every other mudlib
+// file uses to refer to it by name instead.
+//
+// The three underlying commands (clone/purge/create) keep their exact
+// original names and control flow -- only the object's own self-
+// description (short()/long()/id()) and its messages changed, and only
+// where the old "wand of creation" name was actually baked into player-
+// visible text. That was narrower than it first looks: the held()-
+// denial message ("You are not holding...") named the item directly,
+// so it had to change; the mechanical "Cloned into your inventory: X"/
+// "Purged: X"/"Created and placed here: X" style feedback never named
+// the item at all and reads as plausible diegetic reeve's-rod-ledger
+// flavor as-is, so it is untouched. Real regression tests in
+// test/test_lexer.cpp assert on exact substrings of several of these
+// messages (`out.find(...)` against literal command output); the one
+// that changed (the held()-denial text) had its test's own expected
+// string updated in lockstep, in the same commit, not left to silently
+// drift or to bury the old name inside unrelated new text just to dodge
+// touching the test.
 //
 // No inherits at all, matching Lil's own plain command-file style
 // (command/dest.c etc) -- id()/short()/long() are written directly here
@@ -36,7 +71,7 @@
 // ob only from inside ob's own code). Lil's closest equivalent,
 // inherit/base.c, defines the identical wrapper. This file defines its
 // own copy directly (no inherit at all, matching this file's own style)
-// so the wand itself can be placed by external code (there is no "get"
+// so the rod itself can be placed by external code (there is no "get"
 // command in Lil to place it any other way), and clone/cmd_create both
 // call ob->move(dest) on the objects they place, exactly matching the
 // original tool's real convention and its real limitation: this only
@@ -50,25 +85,29 @@ int move(mixed dest) {
     return move_object(dest);
 }
 
-string *wids;
+string *rod_ids;
 
 void create() {
-    wids = ({ "wand", "wand of creation", "creation wand" });
+    rod_ids = ({ "rod", "reeve's rod", "reeves rod", "reeve rod" });
 }
 
 int id(string arg) {
-    return arg && member_array(arg, wids) != -1;
+    return arg && member_array(arg, rod_ids) != -1;
 }
 
 string short() {
-    return "a wand of creation";
+    return "the reeve's rod";
 }
 
 string long() {
     return
-        "A slender wand humming with creative potential. It lets its\n"
-        "wielder clone existing objects, purge unwanted ones from the\n"
-        "room, and bring new ones into being. Usable only while held.\n"
+        "A plain iron rod, its head stamped with a requisition mark\n"
+        "worn nearly smooth. Whoever ran this garrison's stores once\n"
+        "used it to account for lumber, tools, and grain moving in and\n"
+        "out -- point it at a design and it calls up a copy from\n"
+        "wherever such things are kept, point it at rubble and it\n"
+        "clears the ground, point it at raw salvage and it can cobble\n"
+        "something new together. Usable only while held.\n"
         "Commands: clone <path>, purge <id>, create <name>\n";
 }
 
@@ -82,9 +121,9 @@ static int held() {
 // VM::moveObject() only propagates init() calls through objects with
 // commandsEnabled() true (a living/player-only flag), checked on the
 // *mover* and on the *destination's existing occupants* -- live-verified
-// this correctly fires when the wand enters a room a connected player is
+// this correctly fires when the rod enters a room a connected player is
 // already standing in (leg 2: the player is an existing occupant of that
-// room, commandsEnabled() is true, so the wand's own init() is called
+// room, commandsEnabled() is true, so the rod's own init() is called
 // with the player as command_giver). Registered unconditionally here
 // rather than gated the way the original's init() is, since that
 // colocation is the one reliable moment this driver actually calls
@@ -112,7 +151,7 @@ int cmd_clone(string str) {
     string err;
 
     if (!held()) {
-        write("You are not holding the wand of creation.\n");
+        write("You are not holding the reeve's rod.\n");
         return 1;
     }
     if (!str || !sizeof(str)) {
@@ -153,7 +192,7 @@ int cmd_purge(string str) {
     object ob;
 
     if (!held()) {
-        write("You are not holding the wand of creation.\n");
+        write("You are not holding the reeve's rod.\n");
         return 1;
     }
     if (!str || !sizeof(str)) {
@@ -187,7 +226,7 @@ int cmd_create(string str) {
     object ob, room;
 
     if (!held()) {
-        write("You are not holding the wand of creation.\n");
+        write("You are not holding the reeve's rod.\n");
         return 1;
     }
     if (!str || !sizeof(str)) {
@@ -200,14 +239,14 @@ int cmd_create(string str) {
     if (file_size(path + ".c") != -1) rm(path + ".c");
     if (find_object(path)) destruct(find_object(path));
 
-    body = "// auto-generated by the wand of creation\n"
+    body = "// requisitioned into being by the reeve's rod\n"
         "void create() {\n"
         "}\n"
         "int move(mixed dest) {\n"
         "    return move_object(dest);\n"
         "}\n"
         "string short() { return \"" + str + "\"; }\n"
-        "string long() { return \"" + str + ", freshly created by the wand of creation.\\n\"; }\n"
+        "string long() { return \"" + str + ", freshly cobbled together by the reeve's rod.\\n\"; }\n"
         "int id(string arg) { return arg == \"" + str + "\"; }\n";
     write_file(path + ".c", body, 1);
 

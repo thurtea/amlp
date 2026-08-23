@@ -46,7 +46,7 @@ query_cwd()
 void
 logon()
 {
-	write("AMLP LPC driver -- test session.\n> ");
+	write("Stonewick's gatehouse, same as always.\n> ");
 }
 
 // query_name: called by various objects needing to know this user's name.

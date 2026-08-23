@@ -1,8 +1,8 @@
 // mudlib:  library
 // file:    /command/help.c
-// purpose: prints the real, runnable command list for this test mudlib.
-//          Kept in exact sync with /etc/motd (the same list is shown at
-//          login) -- if one changes, change the other.
+// purpose: prints the real, runnable command list for Stonewick's
+//          gatehouse. Kept in exact sync with /etc/motd (the same list
+//          is shown at login) -- if one changes, change the other.
 
 #include <command.h>
 
@@ -22,12 +22,18 @@ main(string arg)
         "Movement (each room's own description lists its real exits):\n"
         "  north / south / east / west\n"
         "\n"
-        "Once you are holding the wand of creation (handed to you\n"
-        "automatically in the entrance hall):\n"
-        "  clone <path>   clone an existing .c file into this room or\n"
-        "                 your inventory\n"
-        "  purge <name>   destruct a named object in the room\n"
-        "  create <name>  generate and place a brand-new, minimal object\n"
+        "Talking to people:\n"
+        "  talk <name>               start a conversation\n"
+        "  talk <name> about <topic> ask about something specific\n"
+        "\n"
+        "Once you are holding the reeve's rod (left on the gatehouse's\n"
+        "own requisition desk, and handed to you automatically when you\n"
+        "arrive):\n"
+        "  clone <path>   requisition a copy of an existing design into\n"
+        "                 this room or your pack\n"
+        "  purge <name>   clear away an unwanted object in the room\n"
+        "  create <name>  cobble together something new from raw\n"
+        "                 salvage\n"
     );
     return 1;
 }

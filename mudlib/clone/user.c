@@ -46,7 +46,7 @@ query_cwd()
 void
 logon()
 {
-	write("Welcome to Library.\n> ");
+	write("AMLP LPC driver -- test session.\n> ");
 }
 
 // query_name: called by various objects needing to know this user's name.

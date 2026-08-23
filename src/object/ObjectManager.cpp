@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <vector>
 
 namespace amlp {
@@ -1008,6 +1009,14 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj,
     obj->setEnvironment(std::weak_ptr<LpcObject>());
 
     loaded_.erase(obj->filename());
+    restoredObjects_.erase(std::remove(restoredObjects_.begin(), restoredObjects_.end(), obj),
+                            restoredObjects_.end());
+}
+
+void ObjectManager::retainRestoredObjects(std::vector<std::shared_ptr<LpcObject>> objs) {
+    restoredObjects_.insert(restoredObjects_.end(),
+                             std::make_move_iterator(objs.begin()),
+                             std::make_move_iterator(objs.end()));
 }
 
 void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj,

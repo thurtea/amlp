@@ -9,6 +9,58 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-23: row 2.1 (world statedump) v1 first slice built, exactly the
+2026-08-22 scoping session's own design, no more.** New `StateSerializer`
+(`src/persist`), an id-table, two-pass whole-world dump/restore extending
+`EfunTable.cpp`'s existing `serializeValue()`/`deserializeValue()` tag
+scheme with `O<id>` (object reference) and `C` (closure) instead of
+replacing it. New `dump_state(string)`/`restore_state(string)` efuns,
+gated the same `checkValidPath()` way every other file efun already is.
+One real gap found and fixed while building this, not in the original
+design note: a freshly restored object with nothing yet referencing it
+was silently freed the instant `restoreState()` returned (`cloneObject()`
+has never added a clone to any persistent registry) -- fixed with a new
+`ObjectManager::retainRestoredObjects()`, erased again on an explicit
+later `destruct()` so it does not pin memory forever. 3 new regression
+tests (746 total, up from 743), including the row's own core reference-
+identity guarantee tested directly (a room, two inventory items, one
+holding a plain object-typed variable pointing back at the room, dumped
+and restored into a completely separate `ObjectManager`/`VM`). Live-
+verified across two genuinely separate driver processes over two real
+TCP sessions: process 1's real login flow, wand hand-out, and
+`dump_state()`; process 1 killed outright; a fresh process 2's
+`restore_state()` and a follow-up `eval` walking `objects()`/
+`environment()`/`all_inventory()` confirming the real two-level
+environment/inventory chain (wand in restored player in room)
+reconstructed correctly. Still open, as designed: call_outs/heartbeats,
+actions/shadow/snoop, parse-info, reset/cleanup timing. See ROADMAP.md's
+own row 2.1 "v1 built" note for the full detail.
+
+Also this session, separately (mudlib content, not driver code): the
+bundled test mudlib's login banner and `/etc/motd` were rewritten at the
+user's explicit request -- the old "Welcome to Library! ... only
+commands in this little mudlib are: dest, update, ed, eval, efun, rm..."
+text advertised several commands (`dest`/`update`/`ed`/`efun`/`rm`) that
+were never actually wired to anything real in this pared-down mudlib
+(only `eval`/`quit`/`say`/`shutdown`/`who` under `mudlib/command/` are
+real), and named the mud by name in a way the user asked removed
+entirely, not just softened. Replaced with a plain "AMLP LPC driver --
+test session" banner and a `motd`/new `help` command (kept in sync)
+listing only the commands that actually work. Also added real,
+navigable multi-room movement, which did not exist before this session
+at all (the mudlib had exactly one room and no way to leave it): a new
+`/inherit/room.c` mixin (`set_exits()`/`do_go()`/`room::init()`) and
+three new static rooms (`/single/room_chamber_{a,b,c}.c`) forming a 2x2
+loop with the existing entrance hall (`/single/start_room.c`, updated to
+inherit the same mixin) -- `north`/`south`/`east`/`west`, each room's own
+`init()` printing its description on entry (no `look` command exists in
+this mudlib) and registering its own real exits. Live-verified over a
+real TCP session: the full four-room loop (north, east, south, west)
+returns to the entrance hall with the correct description at each stop,
+and the new `help` command prints the real command list. Test account/
+character files created during both live-verification passes deleted
+afterward.
+
 **2026-08-22 (a later session, same day): fresh full-project status
 sweep, requested after row 1.7's own remaining `call_out_info()`/
 `input_to()` privilege-gate follow-on landed. Docs-only session --

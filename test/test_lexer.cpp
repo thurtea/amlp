@@ -7,6 +7,7 @@
 #include "amlp/vm/VM.hpp"
 #include "amlp/object/LpcObject.hpp"
 #include "amlp/object/ObjectManager.hpp"
+#include "amlp/object/LiveObjectRegistry.hpp"
 #include "amlp/config/Config.hpp"
 #include "amlp/efun/EfunTable.hpp"
 #include "amlp/efun/ParserPackage.hpp"
@@ -18,6 +19,7 @@
 #include "amlp/net/InteractiveRegistry.hpp"
 #include "amlp/net/SocketRegistry.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
+#include "amlp/persist/StateSerializer.hpp"
 #include "amlp/dialect/LpcDialect.hpp"
 #include "amlp/dialect/FluffOsBootApi.hpp"
 #include "amlp/dialect/LdmudBootApi.hpp"
@@ -10743,6 +10745,186 @@ static void testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline() {
     assert(std::get<std::string>(s.data) == "she said \"hi\" then a\\b then a\nnewline");
 
     std::cout << "testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline OK\n";
+}
+
+// ROADMAP.md row 2.1's own v1 first slice: StateSerializer, a whole-
+// world counterpart to save_object()/restore_object() above. This is
+// the row's own core reference-identity guarantee, tested directly: a
+// room with two items placed in its inventory (move_object()), one of
+// which also holds a plain object-typed variable pointing back at the
+// room, dumped and then restored into a completely separate
+// ObjectManager/VM (harness2, not harness1), so this proves genuine
+// reconstruction with correct cross-references, not merely reading the
+// same live objects back in the same process.
+static void testDumpStateRestoreStatePreservesObjectGraphReferenceIdentity() {
+    const std::string roomSrc = "void init() {}\n";
+    const std::string itemASrc =
+        "object home;\n"
+        "void set_home(object o) { home = o; }\n"
+        "object get_home() { return home; }\n"
+        "void go(object dest) { move_object(dest); }\n";
+    const std::string itemBSrc =
+        "void go(object dest) { move_object(dest); }\n";
+
+    ObjectVarHarness harness1;
+    harness1.writeFile("/ss_room.c", roomSrc);
+    harness1.writeFile("/ss_item_a.c", itemASrc);
+    harness1.writeFile("/ss_item_b.c", itemBSrc);
+
+    auto room = harness1.objects.cloneObject("/ss_room");
+    auto itemA = harness1.objects.cloneObject("/ss_item_a");
+    auto itemB = harness1.objects.cloneObject("/ss_item_b");
+    assert(room != nullptr && itemA != nullptr && itemB != nullptr);
+
+    harness1.vm.callFunction(itemA, "go", {amlp::Value(room)});
+    harness1.vm.callFunction(itemB, "go", {amlp::Value(room)});
+    harness1.vm.callFunction(itemA, "set_home", {amlp::Value(room)});
+    assert(room->inventory().size() == 2);
+
+    std::string dumpPath = harness1.tempDir + "/state.dump";
+    amlp::StateSerializer dumper(harness1.objects);
+    assert(dumper.dumpState(dumpPath));
+
+    ObjectVarHarness harness2;
+    harness2.writeFile("/ss_room.c", roomSrc);
+    harness2.writeFile("/ss_item_a.c", itemASrc);
+    harness2.writeFile("/ss_item_b.c", itemBSrc);
+
+    amlp::StateSerializer restorer(harness2.objects);
+    assert(restorer.restoreState(dumpPath));
+
+    // Find harness2's own reconstructed objects by filename, explicitly
+    // excluding harness1's own still-live originals -- both harnesses'
+    // objects share the one process-wide LiveObjectRegistry, so this is
+    // the only unambiguous way to tell them apart.
+    std::shared_ptr<amlp::LpcObject> restoredRoom, restoredItemA, restoredItemB;
+    for (auto& obj : amlp::LiveObjectRegistry::all()) {
+        if (obj == room || obj == itemA || obj == itemB) continue;
+        if (obj->filename() == "/ss_room") restoredRoom = obj;
+        else if (obj->filename() == "/ss_item_a") restoredItemA = obj;
+        else if (obj->filename() == "/ss_item_b") restoredItemB = obj;
+    }
+    assert(restoredRoom != nullptr && restoredItemA != nullptr && restoredItemB != nullptr);
+
+    // Placement round-tripped correctly...
+    assert(restoredItemA->environment().lock() == restoredRoom);
+    assert(restoredItemB->environment().lock() == restoredRoom);
+    assert(restoredRoom->inventory().size() == 2);
+    assert(std::find(restoredRoom->inventory().begin(), restoredRoom->inventory().end(), restoredItemA)
+           != restoredRoom->inventory().end());
+    assert(std::find(restoredRoom->inventory().begin(), restoredRoom->inventory().end(), restoredItemB)
+           != restoredRoom->inventory().end());
+
+    // ...and so did the ordinary object-typed variable reference: this
+    // is the core guarantee row 2.1 exists for -- get_home() must return
+    // the exact same restored room instance the environment/inventory
+    // placement above already resolved to, not a second, independent
+    // reload of the same file.
+    amlp::Value home = harness2.vm.callFunction(restoredItemA, "get_home", {});
+    auto* homePtr = std::get_if<std::shared_ptr<amlp::LpcObject>>(&home.data);
+    assert(homePtr != nullptr && *homePtr == restoredRoom);
+    assert(*homePtr != room); // genuinely reconstructed, not the original
+
+    // This test deliberately built a real shared_ptr reference cycle
+    // (room->inventory() holds itemA/itemB strongly, itemA's own "home"
+    // variable holds room strongly right back) on both the original and
+    // restored graphs -- an accurate reflection of a real "item that
+    // remembers its own room" mudlib shape, not a test artifact, and
+    // exactly the kind of cycle this driver's own shared_ptr-based
+    // object model cannot free on its own (ROADMAP.md row 3.3, real
+    // mark-sweep GC, still open). Left alone, both cycles would leak for
+    // the rest of this test binary's process lifetime and silently
+    // pollute every later test's own dump_state() (LiveObjectRegistry::
+    // all() is process-wide, not scoped per ObjectManager). Broken here,
+    // explicitly, the same "clean up state this test itself created"
+    // discipline STATUS.md's live-verification sessions already use for
+    // on-disk test accounts.
+    room->inventory().clear();
+    itemA->variables()[0] = amlp::Value{};
+    restoredRoom->inventory().clear();
+    restoredItemA->variables()[0] = amlp::Value{};
+
+    std::cout << "testDumpStateRestoreStatePreservesObjectGraphReferenceIdentity OK\n";
+}
+
+// restoreState() must reject a file lacking this format's own magic/
+// version header cleanly (return false) instead of half-parsing
+// garbage input -- see StateSerializer::restoreState()'s own comment.
+static void testRestoreStateRejectsAFileWithoutTheMagicHeader() {
+    ObjectVarHarness harness;
+    std::string path = harness.tempDir + "/garbage.dump";
+    std::ofstream f(path);
+    f << "not a real statedump file\n";
+    f.close();
+
+    amlp::StateSerializer serializer(harness.objects);
+    assert(serializer.restoreState(path) == false);
+
+    std::cout << "testRestoreStateRejectsAFileWithoutTheMagicHeader OK\n";
+}
+
+// Confirms the efun wiring (dump_state()/restore_state(), EfunTable.cpp)
+// end to end from real LPC code, not just the C++ StateSerializer class
+// directly. restore_state() reconstructs brand-new objects from the
+// dumped file -- by design it does not, and should not, retroactively
+// mutate an already-live object's own variables in place (its real
+// intended use is rebuilding the whole world fresh at startup, not
+// refreshing a still-live object mid-session) -- so this looks for the
+// freshly reconstructed clone via LiveObjectRegistry rather than
+// expecting the original `obj` to change.
+//
+// The probe is placed inside a room, not left as a bare top-level
+// clone -- a genuine finding while writing this test, worth recording
+// plainly: a reconstructed object with nothing at all referencing it
+// (no environment, no other object's variable) is kept alive by
+// nothing but StateSerializer::restoreState()'s own local id table, and
+// is correctly freed the instant restoreState() returns, same as any
+// other unreferenced shared_ptr in this driver. This matches this
+// driver's own existing, pre-existing model exactly (cloneObject()
+// itself never adds a clone to any persistent registry either -- see
+// ObjectManager::cloneObject()'s own header comment -- a clone has
+// always stayed alive only via whatever LPC-level reference points at
+// it), not a new gap this row introduces; a restored object needs the
+// same kind of real reference an ordinary live one would, which a room
+// placement provides here.
+static void testDumpStateAndRestoreStateEfunsRoundTripAnObjectVariable() {
+    ObjectVarHarness harness;
+    harness.writeFile("/se_room.c", "void init() {}\n");
+    harness.writeFile("/se_probe.c",
+        "int n;\n"
+        "void set_n(int v) { n = v; }\n"
+        "int get_n() { return n; }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "int dump(string path) { return dump_state(path); }\n"
+        "int restore(string path) { return restore_state(path); }\n");
+    auto room = harness.objects.cloneObject("/se_room");
+    auto obj = harness.objects.cloneObject("/se_probe");
+    assert(room != nullptr && obj != nullptr);
+
+    harness.vm.callFunction(obj, "go", {amlp::Value(room)});
+    harness.vm.callFunction(obj, "set_n", {amlp::Value(int64_t{99})});
+
+    amlp::Value dumpResult = harness.vm.callFunction(obj, "dump", {amlp::Value(std::string("/se.state"))});
+    assert(std::holds_alternative<int64_t>(dumpResult.data));
+    assert(std::get<int64_t>(dumpResult.data) == 1);
+
+    amlp::Value restoreResult = harness.vm.callFunction(obj, "restore", {amlp::Value(std::string("/se.state"))});
+    assert(std::holds_alternative<int64_t>(restoreResult.data));
+    assert(std::get<int64_t>(restoreResult.data) == 1);
+
+    std::shared_ptr<amlp::LpcObject> restoredRoom, restored;
+    for (auto& live : amlp::LiveObjectRegistry::all()) {
+        if (live == room || live == obj) continue;
+        if (live->filename() == "/se_room") restoredRoom = live;
+        else if (live->filename() == "/se_probe") restored = live;
+    }
+    assert(restoredRoom != nullptr && restored != nullptr);
+    assert(restored->environment().lock() == restoredRoom);
+
+    amlp::Value n = harness.vm.callFunction(restored, "get_n", {});
+    assert(std::get<int64_t>(n.data) == 99);
+
+    std::cout << "testDumpStateAndRestoreStateEfunsRoundTripAnObjectVariable OK\n";
 }
 
 static void testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCaller() {
@@ -24074,6 +24256,9 @@ int main() {
     testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting();
     testRestoreObjectSkipsRealFormatCommentHeaderLineAndParsesEmptyContainers();
     testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline();
+    testDumpStateRestoreStatePreservesObjectGraphReferenceIdentity();
+    testRestoreStateRejectsAFileWithoutTheMagicHeader();
+    testDumpStateAndRestoreStateEfunsRoundTripAnObjectVariable();
     testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCaller();
     testLoadObjectFallsBackToCompileObjectOnMissingSourceFile();
     testLoadVirtualObjectRebindsFilenameToVirtualPath();

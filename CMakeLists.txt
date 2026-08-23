@@ -18,6 +18,7 @@ add_subdirectory(src/vm)
 add_subdirectory(src/object)
 add_subdirectory(src/net)
 add_subdirectory(src/scheduler)
+add_subdirectory(src/persist)
 add_subdirectory(src/efun)
 add_subdirectory(src/apply)
 add_subdirectory(src/dialect)
@@ -26,7 +27,7 @@ add_executable(amlp src/main.cpp)
 target_include_directories(amlp PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(amlp
     PRIVATE
-        core config compiler vm object efun apply dialect net scheduler
+        core config compiler vm object efun apply dialect net scheduler persist
 )
 
 if(AMLP_BUILD_TESTS)

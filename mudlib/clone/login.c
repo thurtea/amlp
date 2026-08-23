@@ -127,7 +127,6 @@ logon()
 #ifdef __NO_ADD_ACTION__
     set_this_player(this_object());
 #endif
-    write("Welcome to Library!\n\n");
     cat("/etc/motd");
     write("\nWhat account name do you wish? ");
 #ifdef __PACKAGE_UIDS__

@@ -37,6 +37,17 @@
 #define BASE            "/inherit/base"
 #define OVERRIDES_FILE  "/single/simul_efun"
 
+// /inherit/room.c's own mixin (exits/movement) -- see that file's own
+// header comment. ROOM_CHAMBER_* are the three additional static rooms
+// reachable from START_LOC, added so this test mudlib has more than one
+// room to move between at all (see room.c and each ROOM_CHAMBER_* file's
+// own header comment for the small 2x2 layout this forms with
+// START_LOC).
+#define ROOM_BASE       "/inherit/room"
+#define ROOM_CHAMBER_A  "/single/room_chamber_a"
+#define ROOM_CHAMBER_B  "/single/room_chamber_b"
+#define ROOM_CHAMBER_C  "/single/room_chamber_c"
+
 #define COMMAND_PREFIX "/command/"
 
 // classes for message() efun.

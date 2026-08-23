@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include "amlp/object/LpcObject.hpp"
 
 namespace amlp {
@@ -42,6 +43,27 @@ public:
     // 1 instead of 0) does. See the find_object efun in EfunTable.cpp
     // for how both are exposed from this one lookup.
     std::shared_ptr<LpcObject> lookupLoadedObject(const std::string& filename) const;
+
+    // ROADMAP.md row 2.1 (world statedump): a real gap found while
+    // building StateSerializer::restoreState(), not part of the
+    // original design note, recorded here rather than silently worked
+    // around. cloneObject() itself never adds a clone to any persistent
+    // registry (see its own header comment) -- an ordinary live clone
+    // stays alive only because *some* LPC-reachable reference points at
+    // it (a variable, an environment's inventory, ...), exactly this
+    // driver's existing model. A restoreState() call reconstructs a
+    // whole graph of objects from nothing, in one pass, with nothing
+    // yet holding a reference to any of it once the call returns -- an
+    // isolated restored object (or an acyclic restored graph) would
+    // otherwise be correctly, and silently, freed the instant
+    // restoreState() returns, before the caller ever gets to use it.
+    // This method exists so restoreState() has somewhere real to put
+    // its own reconstructed objects' ownership, mirroring how loaded_
+    // below already keeps every blueprint alive for this same
+    // ObjectManager's own lifetime -- not a change to ordinary
+    // clone_object()'s own ownership semantics anywhere else in this
+    // driver, only used by StateSerializer.
+    void retainRestoredObjects(std::vector<std::shared_ptr<LpcObject>> objs);
 
     // onDestructed, if set, is called exactly once for every object this
     // call *actually* destructs -- both obj itself and, for the real
@@ -216,6 +238,11 @@ private:
     // detected (out of scope for this row: see ROADMAP.md's 0.15 note).
     std::unordered_map<std::string, std::string> programSource_;
     std::unordered_map<std::string, std::shared_ptr<LpcObject>> loaded_;
+    // See retainRestoredObjects()'s own header comment. destructObject()
+    // below erases an entry from here too, so an explicit later
+    // destruct() of a restored object still actually frees it instead of
+    // pinning it in memory forever.
+    std::vector<std::shared_ptr<LpcObject>> restoredObjects_;
     // Filenames currently mid-compile, so an inherit cycle (A inherits B
     // inherits A) is caught as a compile error instead of infinite
     // recursion. See compile()'s recursive inherit resolution.

@@ -1,7 +1,24 @@
-The only commands in this little mudlib are:
+AMLP LPC driver -- test session
 
-	dest, update, ed, eval, efun, rm, say, who, quit, and shutdown.
+This mudlib exists to exercise real driver functionality (movement,
+commands, persistence, the eval command) end to end over a live
+connection. It is not a themed game.
 
-All of update, dest, ed, and rm require full pathnames as arguments.
+Commands you can actually run here:
+  say <text>     speak to everyone in your room
+  who            list connected players
+  eval <code>    compile and run one LPC statement, e.g.
+                 eval return 1 + 1;
+  help           show this list again
+  quit           save and disconnect
+  shutdown       stop the whole driver process
 
-Have fun.
+Movement (each room's own description lists its real exits):
+  north / south / east / west
+
+Once you are holding the wand of creation (handed to you automatically
+in the entrance hall):
+  clone <path>   clone an existing .c file into this room or your
+                 inventory
+  purge <name>   destruct a named object in the room
+  create <name>  generate and place a brand-new, minimal object

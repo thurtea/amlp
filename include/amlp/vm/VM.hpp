@@ -209,6 +209,13 @@ public:
     // find_object() efun's default (no-compile) behavior.
     std::shared_ptr<LpcObject> lookupObject(const std::string& filename) const;
 
+    // ROADMAP.md row 2.1 (world statedump): dump_state()/restore_state()
+    // construct a StateSerializer directly against the real
+    // ObjectManager, the same way every other object-graph efun in this
+    // table already reaches it, just via a named accessor instead of
+    // each going through its own separate thin wrapper method here.
+    ObjectManager& objectManager() const { return objects_; }
+
     // The object whose function body is currently executing (the
     // top of the C++-recursion call stack run() maintains -- see
     // run()'s own StackGuard comment). This is real FluffOS's

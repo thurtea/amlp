@@ -14,6 +14,7 @@
 #include "amlp/net/SnoopRelay.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
 #include "amlp/efun/ParserPackage.hpp"
+#include "amlp/persist/StateSerializer.hpp"
 #include <algorithm>
 #include <chrono>
 #include <arpa/inet.h>
@@ -7023,6 +7024,40 @@ void registerCoreEfuns() {
             vars[slot] = realFormat ? parseRealSaveValue(line, pos) : deserializeValue(line, pos);
         }
         return Value(int64_t{1});
+    });
+
+    // int dump_state(string file) / int restore_state(string file) --
+    // ROADMAP.md row 2.1's own v1 first slice: StateSerializer
+    // (src/persist), a whole-*world* counterpart to save_object()/
+    // restore_object() just above. Unlike those two, this format can
+    // round-trip an object reference or a closure, since it dumps every
+    // live object (LiveObjectRegistry::all()) in one pass and resolves
+    // references against a shared id table, not one object's variables
+    // in isolation -- see StateSerializer.hpp's own header comment for
+    // the full derivation. Gated the same way save_object()/
+    // restore_object() and every other file efun in this table already
+    // are (checkValidPath(), the real valid_write()/valid_read() master
+    // apply), not a new, separate security model.
+    t.registerEfun("dump_state", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("dump_state: expected a string path argument");
+        }
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), true, "dump_state");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
+        StateSerializer serializer(vm.objectManager());
+        return Value(static_cast<int64_t>(serializer.dumpState(path) ? 1 : 0));
+    });
+
+    t.registerEfun("restore_state", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("restore_state: expected a string path argument");
+        }
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), false, "restore_state");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
+        StateSerializer serializer(vm.objectManager());
+        return Value(static_cast<int64_t>(serializer.restoreState(path) ? 1 : 0));
     });
 
     // ---- Rifts combat math (phase 1 of the game-logic-mechanics move,

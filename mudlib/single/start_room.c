@@ -1,12 +1,13 @@
 // mudlib:  library
 // file:    /single/start_room.c
-// purpose: the one starting location every fresh login lands in, and
-//          currently the only real room this mudlib has. Stock Lil had
-//          no room concept at all -- login.c used to move a fresh
-//          player straight into VOID_OB ("/single/void"), a bare
-//          bookkeeping placeholder with no description and no exits
-//          (see LIBRARY_MUDLIB_PLAN.md's own finding). This replaces
-//          that with a real, describable location.
+// purpose: the entrance hall -- every fresh login lands here. One of
+//          four static rooms this test mudlib now has (see ROOM_CHAMBER_*
+//          in globals.h and each of their own files): a small 2x2 layout,
+//          start_room <-> room_chamber_a (north/south) and start_room
+//          <-> room_chamber_b (east/west), room_chamber_a <-> room_
+//          chamber_c (east/west) and room_chamber_b <-> room_chamber_c
+//          (north/south). Before this there was exactly one room and no
+//          way to leave it at all.
 //
 // No "look" command exists anywhere in this mudlib (stock Lil never
 // shipped one either -- see WAND_OF_CREATION_SCOPING.md's own note on
@@ -16,9 +17,12 @@
 
 #include <globals.h>
 
+inherit ROOM_BASE;
+
 void
 create()
 {
+    set_exits((["north": ROOM_CHAMBER_A, "east": ROOM_CHAMBER_B]));
 }
 
 string
@@ -31,11 +35,10 @@ string
 long()
 {
     return
-        "A plain stone entrance hall. This is the library mudlib's only\n"
-        "real room right now, nothing else has been built here beyond a\n"
-        "wand of creation resting on a low pedestal near the door.\n"
-        "Commands: clone <path>, purge <id>, create <name> (once the\n"
-        "wand is held), say <text>, who, quit.\n";
+        "A plain stone entrance hall, the entry point of this test "
+        "mudlib. A wand of creation rests on a low pedestal near the "
+        "door. Exits: " + exits_desc() + ".\n"
+        "Type 'help' for the full list of runnable commands.\n";
 }
 
 int
@@ -57,13 +60,18 @@ id(string arg)
 // held()/init()): this driver's VM::moveObject() only calls init() on
 // the *moved* object (which is where the wand's own add_action calls
 // live) when the destination's existing occupants already have
-// commandsEnabled() true -- true here because the player is already a
+// commandsEnabled() true (true here because the player is already a
 // genuine occupant of this room by the time this function runs, not
 // true of the player's own (empty) inventory. Moving the wand straight
 // into the player with a single move() call would leave its add_action
 // calls never registered -- confirmed live the first time this was
 // tried, all three wand commands silently fell through to commandHook()
 // and failed with "source file not found".
+//
+// room::init() (a bare qualified parent call) registers this room's own
+// exit verbs (north/east here) onto the arriving player, exactly the
+// same "runs alongside, not instead of" pattern this file already used
+// before room.c existed.
 void
 init()
 {
@@ -77,12 +85,13 @@ init()
 
     write(long());
 
-    if (present("wand", player)) {
-        return;
+    if (!present("wand", player)) {
+        wand = clone_object(WAND_OB);
+        if (wand) {
+            wand->move(this_object()); // enters the room the player already occupies -- fires the wand's own init()
+            wand->move(player);        // now genuinely held
+        }
     }
-    wand = clone_object(WAND_OB);
-    if (wand) {
-        wand->move(this_object()); // enters the room the player already occupies -- fires the wand's own init()
-        wand->move(player);        // now genuinely held
-    }
+
+    room::init();
 }

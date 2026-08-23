@@ -10927,6 +10927,113 @@ static void testDumpStateAndRestoreStateEfunsRoundTripAnObjectVariable() {
     std::cout << "testDumpStateAndRestoreStateEfunsRoundTripAnObjectVariable OK\n";
 }
 
+// ROADMAP.md row 2.4 (dual persistence): confirms, directly against the
+// real shipped row 2.1 code rather than the pre-2.1 abstract plan, that
+// save_object()/restore_object() (EfunTable.cpp's own serializeValue()/
+// deserializeValue(), tab-delimited per-variable files) and dump_state()/
+// restore_state() (StateSerializer's own separate O<id>/C-tagged whole-
+// world format) genuinely coexist with zero real conflict, because they
+// never share any code path at all: dump_state() only ever reads live
+// obj->variables() directly (it never opens or parses a save_object()
+// file), and restoreState()'s own object reconstruction calls
+// ObjectManager::cloneObject()/loadObject() directly (running only
+// create()), the exact same real path an ordinary mudlib-level
+// clone_object() call already goes through -- it does not call
+// restore_object() on anyone's behalf, so there is no double-restore
+// race to guard against. This models exactly the real shape row 2.4's
+// own note called out: a player-style object that has both its own
+// save_object() character file AND was captured in a world snapshot,
+// restored into a completely fresh process, with a save_object()-based
+// restore layered on afterward (the same order a real login flow's own
+// load_character() would run in, whether the object in front of it came
+// from an ordinary clone_object() or, as here, a world restore) -- and
+// confirms the character file's own values win cleanly, with neither
+// format's parser ever misreading the other's file.
+static void testDumpStateWorldSnapshotAndSaveObjectCharacterFileCoexistWithoutConflict() {
+    ObjectVarHarness harness1;
+    const std::string probeSrc =
+        "int n;\n"
+        "string s;\n"
+        "void set_vars(int nv, string sv) { n = nv; s = sv; }\n"
+        "int get_n() { return n; }\n"
+        "string get_s() { return s; }\n"
+        "int save_char(string path) { return save_object(path); }\n"
+        "int restore_char(string path) { return restore_object(path); }\n"
+        "int dump_world(string path) { return dump_state(path); }\n";
+    harness1.writeFile("/dp_probe.c", probeSrc);
+    auto obj = harness1.objects.cloneObject("/dp_probe");
+    assert(obj != nullptr);
+
+    // The character's own save_object() file is written first, at n=1/
+    // s="a" -- the values a real load_character() should restore.
+    harness1.vm.callFunction(obj, "set_vars", {amlp::Value(int64_t{1}), amlp::Value(std::string("a"))});
+    std::string charPath = harness1.tempDir + "/dp_char.o";
+    amlp::Value saveResult = harness1.vm.callFunction(obj, "save_char", {amlp::Value(std::string("/dp_char.o"))});
+    assert(std::get<int64_t>(saveResult.data) == 1);
+
+    // The live object is then mutated further (n=2/s="b") before the
+    // world snapshot runs -- dump_state() must only ever see this live,
+    // in-memory value, never the stale n=1/s="a" already sitting in the
+    // character file on disk.
+    harness1.vm.callFunction(obj, "set_vars", {amlp::Value(int64_t{2}), amlp::Value(std::string("b"))});
+    std::string worldPath = harness1.tempDir + "/dp_world.dump";
+    amlp::Value dumpResult = harness1.vm.callFunction(obj, "dump_world", {amlp::Value(std::string("/dp_world.dump"))});
+    assert(std::get<int64_t>(dumpResult.data) == 1);
+
+    // Restore the world snapshot into a completely separate
+    // ObjectManager/VM, matching the row 2.1 regression precedent.
+    ObjectVarHarness harness2;
+    harness2.writeFile("/dp_probe.c", probeSrc);
+    amlp::StateSerializer restorer(harness2.objects);
+    assert(restorer.restoreState(worldPath));
+
+    std::shared_ptr<amlp::LpcObject> restored;
+    for (auto& live : amlp::LiveObjectRegistry::all()) {
+        if (live == obj) continue;
+        if (live->filename() == "/dp_probe") restored = live;
+    }
+    assert(restored != nullptr);
+
+    // World-restored state is exactly the live value at dump time (2/"b"),
+    // not the character file's stale (1/"a") -- dump_state() never read
+    // that file at all.
+    amlp::Value worldN = harness2.vm.callFunction(restored, "get_n", {});
+    amlp::Value worldS = harness2.vm.callFunction(restored, "get_s", {});
+    assert(std::get<int64_t>(worldN.data) == 2);
+    assert(std::get<std::string>(worldS.data) == "b");
+
+    // Now layer the character file's own save_object()/restore_object()
+    // mechanism on top of this same world-restored object, exactly the
+    // order a real login flow's load_character() runs in -- restore_object()
+    // is a plain efun call on whichever object happens to be
+    // current_object, indifferent to whether that object was freshly
+    // cloned or reconstructed by a world restore moments earlier. The
+    // character file itself lives on harness1's own filesystem (a real
+    // hotboot/reboot shares one real mudlib_root between the old and new
+    // process; only this test's own per-harness scratch directory
+    // convenience needs an explicit copy to model that).
+    std::ifstream charIn(charPath, std::ios::binary);
+    assert(static_cast<bool>(charIn));
+    std::ostringstream charBuf;
+    charBuf << charIn.rdbuf();
+    harness2.writeFile("/dp_char.o", charBuf.str());
+
+    amlp::Value restoreCharResult = harness2.vm.callFunction(restored, "restore_char", {amlp::Value(std::string("/dp_char.o"))});
+    assert(std::get<int64_t>(restoreCharResult.data) == 1);
+
+    // The character file's own values (1/"a") now win, cleanly
+    // overwriting the world-restored (2/"b") state -- exactly what a
+    // real load_character() call does to a freshly cloned object today,
+    // proving a world-restored object is not distinguishable from an
+    // ordinary one as far as restore_object() is concerned.
+    amlp::Value charN = harness2.vm.callFunction(restored, "get_n", {});
+    amlp::Value charS = harness2.vm.callFunction(restored, "get_s", {});
+    assert(std::get<int64_t>(charN.data) == 1);
+    assert(std::get<std::string>(charS.data) == "a");
+
+    std::cout << "testDumpStateWorldSnapshotAndSaveObjectCharacterFileCoexistWithoutConflict OK\n";
+}
+
 static void testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCaller() {
     // Regression test for a real bug found live: secure/daemon/
     // account_d.c's own "unguarded((: save_object, path :))" chain
@@ -24259,6 +24366,7 @@ int main() {
     testDumpStateRestoreStatePreservesObjectGraphReferenceIdentity();
     testRestoreStateRejectsAFileWithoutTheMagicHeader();
     testDumpStateAndRestoreStateEfunsRoundTripAnObjectVariable();
+    testDumpStateWorldSnapshotAndSaveObjectCharacterFileCoexistWithoutConflict();
     testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCaller();
     testLoadObjectFallsBackToCompileObjectOnMissingSourceFile();
     testLoadVirtualObjectRebindsFilenameToVirtualPath();

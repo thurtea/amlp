@@ -9,6 +9,56 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-23 (a later session, same day): rows 2.2/2.3/2.4 re-scoped
+against the real shipped row 2.1 code, not the pre-2.1 abstract plan;
+row 2.4 built.** Re-read `StateSerializer.cpp`/`EfunTable.cpp` directly
+for each of the three rows the earlier 2026-08-21 scoping session had
+gated on 2.1 landing, per this session's own instruction to confirm real
+scope now that it has.
+
+Row 2.4 (dual persistence) confirmed genuinely small, as the original
+note predicted, and built: `dump_state()`/`restore_state()` and
+`save_object()`/`restore_object()` share zero code path (`dump_state()`
+never reads a save file; `restoreState()` reconstructs via
+`cloneObject()`/`loadObject()` directly, never calling `restore_object()`
+itself), so there is no real conflict to design around, only a real
+confirmation and test worth having. `ObjectManager::retainRestoredObjects()`
+(row 2.1's own lifetime fix) turned out load-bearing for this row's own
+test to even be meaningful. 1 new regression test (747 total, up from
+746). Live-verified over two real TCP sessions on the same real running
+driver/bundled mudlib: a real account/character's `save_object()`-backed
+`login_count` correctly went 1 to 2 across an intervening `dump_state()`
+world snapshot, proven through the real `login.c` login flow, not a
+synthetic C++-only check. See ROADMAP.md's own row 2.4 entry for the
+full detail.
+
+Row 2.2 (object swapout) and row 2.3 (hotboot) were **not** picked up
+this session -- both turned out to need real, undone design work even
+with 2.1 now real, not the smaller "depends on 2.1's format" framing
+the pre-2.1 notes carried. Row 2.2: `StateSerializer`'s own id-table is
+built in one coherent whole-world pass and always reconstructs every
+referenced object fresh; it has no way to say "this id refers to an
+object already live in memory elsewhere, resolve to that instance, do
+not reconstruct it" -- exactly what swapping one idle object in and out
+while the rest of the live world stays resident needs. 2.1 clarifies
+that this is a *harder* reference-identity problem than the whole-world
+case, not a smaller one. Row 2.3: the real `fork()`/`exec()`/
+`SCM_RIGHTS` systems work is completely untouched by 2.1 (2.1 has no
+awareness of network fds at all), and hotboot additionally needs a new
+correlation layer 2.1 does not provide -- mapping each inherited,
+still-open connection fd to the correct restored player object, since
+`StateSerializer`'s dump-scoped ids are not by themselves a stable
+enough handle for that across a fresh enumeration. `retainRestoredObjects()`
+is a real, already-solved prerequisite for this row specifically (without
+it the whole restored world would evaporate before a single reconnected
+fd could be served), worth recording since it was fixed as a side effect
+of landing 2.1, not deliberately built for hotboot. Both rows' own
+ROADMAP.md entries were rewritten in place with these concrete,
+post-2.1 findings, replacing the pre-2.1 text rather than leaving it to
+be mistaken for still-current.
+
+747 tests passing (up from 746), zero regressions.
+
 **2026-08-23: row 2.1 (world statedump) v1 first slice built, exactly the
 2026-08-22 scoping session's own design, no more.** New `StateSerializer`
 (`src/persist`), an id-table, two-pass whole-world dump/restore extending

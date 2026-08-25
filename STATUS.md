@@ -9,6 +9,108 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-25: Tier 2 cold-start scoping session, row 2.5 (C++20 coroutine
+scheduler) picked over 2.11 (LLVM JIT) and 3.3 (generational GC), the
+three remaining unscoped-for-real large Phase 2/3 items. Docs-only
+session per instruction -- no implementation code written, ROADMAP.md
+row 2.5's own note replaced with a concrete first-slice design. 747
+tests confirmed passing by rebuilding and running `build/test/amlp_tests`
+directly (not trusted from the prior session's own count), unchanged --
+expected, since no driver code was touched this session.**
+
+**Why 2.5 over the other two, weighed on real evidence gathered fresh
+this session, not repeated from 2026-08-21:**
+
+- **2.11 (JIT):** re-confirmed directly against `CMakeLists.txt` and
+  every `src/*/CMakeLists.txt`, this driver's entire real dependency
+  footprint today is still `pkg_check_modules(PCRE2 REQUIRED libpcre2-8)`
+  + `pkg_check_modules(SQLITE3 REQUIRED sqlite3)` (both in
+  `src/efun/CMakeLists.txt`) + a direct `crypt` link (libxcrypt) -- zero
+  `LLVM` hits anywhere in the repo outside prose. `src/jit/` itself holds
+  only `.gitkeep` and `instruct.md`; it is not even wired into the root
+  `CMakeLists.txt`'s own `add_subdirectory()` list. LLVM 17+ dev
+  libraries would be by far the largest single toolchain jump this
+  project has ever taken, for a row with zero real corpus evidence behind
+  it (a pure performance feature; no vendored mudlib "needs" a JIT the
+  way it needs a specific efun) and a soft precondition (row 1.8, "bit-
+  identical output for every test case," still open) this project has
+  not actually cleared. Scoping it deeply this session would not have
+  reduced its real risk, since that risk is a toolchain/strategic
+  buy-in decision, not a design-clarity gap a docs-only session can
+  resolve.
+- **3.3 (GC):** the shared_ptr migration surface, re-grepped directly
+  this session (`shared_ptr<LpcObject>`/`Array`/`Mapping`/`Closure`
+  across `src/`+`include/`), is 556 real hits today -- up from 546 two
+  sessions ago, up from 525 before that. The growth trend flagged in the
+  last two sessions is confirmed again, not just repeated. But `src/gc/
+  instruct.md` itself is explicit that this row must not start "until
+  all Phase 0, 1, and 2 work is complete" -- Phase 2 is 5/22 today (`2.1`,
+  `2.4`, `2.9`, `2.12`, `2.15`, counted directly off ROADMAP.md's own
+  checkboxes this session), nowhere near done. A first-slice plan written
+  now would face the same fate as the count itself: stale before it can
+  ever be acted on, since every session that touches `src/`/`include/`
+  between now and Phase 2's actual completion adds more `shared_ptr`
+  sites the plan did not account for. Scoping 3.3 deeply is better spent
+  closer to when Phase 2 actually closes.
+- **2.5 (coroutine scheduler):** unlike the other two, this row is not
+  gated behind unrelated work finishing first, and -- like 2.1 before it
+  -- it gates real, named follow-on rows of its own (2.6's `async`/
+  `await` grammar, 2.7's `call_out_future()`, 2.8's Hydra parallel tasks,
+  2.18's async `http_get`/`http_post`, all explicitly blocked on it in
+  their own ROADMAP.md cells). Its real risk is squarely a design-clarity
+  problem, not a toolchain or sequencing one: `VM::run()` is 2,768 real
+  lines exercised by all 747 tests, the single highest-blast-radius file
+  in the whole driver, and this row's own `instruct.md` sketch turned out
+  (see below) to be incomplete for exactly the case that matters most. A
+  docs-only cold-start session is the correct tool for that kind of risk
+  -- settle the design on paper before any code touches that file, which
+  is exactly what this session did.
+
+**Real scope findings, from reading the actual architecture, not the
+abstract feature:** `VM::run()` is one deeply recursive C++ function --
+every nested LPC call (`OpCode::Call`/`CallOther`/`CallEfun`/simul_efun,
+5 real call sites in `VM.cpp`, confirmed by direct grep) is a plain
+synchronous `Value result = run(...)` call growing the real C++ stack,
+with `locals`/`localStack`/`catchFrames`/`ip` living as ordinary C++
+automatic storage in that one activation. `src/scheduler/instruct.md`'s
+own existing 2.6 sketch (manual `TaskFrame` capture-and-resume: serialize
+the current frame on `await`, return a sentinel, restore into a fresh
+`run()` call later) only actually covers a single frame suspending
+directly in a task's own top-level function body. Read literally, it
+does not handle `await` reached through an intervening plain LPC call --
+the sentinel would need to be manually detected and re-propagated by
+hand at every one of the 5 call sites, correctly, for arbitrary nesting
+depth, with `catchFrames` still live across the suspend point. That is a
+large, error-prone hand-reimplementation of what a real C++20 stackless
+coroutine's compiler-generated state machine already does for free via
+`co_await` chaining -- and this driver has zero real coroutine usage
+today (`co_await`/`co_yield`/`co_return`/`<coroutine>`, direct grep,
+zero hits outside this row's own `instruct.md`), so nothing forced the
+manual-frame shortcut except that it was never checked against the
+nested-call case.
+
+**Concrete first-slice proposal (written into ROADMAP.md row 2.5, not
+left in chat only):** a real `Task<Value>` coroutine type (a minimal
+hand-rolled promise_type over the standard `<coroutine>` header, no new
+external dependency), a timer awaitable feeding `Scheduler`'s own
+already-correct `suspend(Task&, duration)` priority-queue design
+(unchanged from the original sketch -- only the frame-capture half
+needed revision), a new `resumeReadyTasks(now)` step in `Scheduler::run()`
+reusing the existing per-callback try/catch isolation `tickCallOuts()`/
+`tickHeartbeats()` already have, and a new parallel `runAsync()` entry
+point in `VM` used only for functions flagged `async` (the flag itself
+is 2.6's job) via `co_await` at `OpCode::Call`'s dispatch site plus a new
+`OpCode::Suspend` -- leaving the existing synchronous `run()` completely
+untouched for every ordinary call, protecting all 747 tests' behavior
+and performance by construction. Explicitly deferred out of this slice,
+each independently bounded: 2.6's real grammar/codegen, 2.7's
+`call_out_future()`, 2.8's Hydra `std::jthread` speculative parallelism
+(materially larger and riskier, must not be conflated with the base
+slice), and 2.18's async I/O efuns (no I/O-driven awaitable exists yet
+to build on). Full reasoning, including the exact call-site count and
+the `evalCost_`-sharing invariant, is in ROADMAP.md row 2.5 itself now,
+not just here.
+
 **2026-08-23 (a further session, same day): bundled test mudlib given a
 real setting, replacing the earlier session's own "test entrance
 hall"/"chamber A/B/C" scaffolding, at the user's explicit request.**

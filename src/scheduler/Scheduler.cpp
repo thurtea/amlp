@@ -69,6 +69,16 @@ void Scheduler::run(Server& server, int maxIterations) {
         }
         tickCallOuts();
 
+        // ROADMAP.md row 2.5's own first slice: resumes any runAsync()
+        // coroutine parked on OpCode::Suspend whose own delay has now
+        // elapsed. Deliberately a VM method the same way
+        // processPendingReplacePrograms() just above already is, not a
+        // Scheduler method of its own the way this row's ROADMAP.md
+        // note first sketched it ("Scheduler::resumeReadyTasks(now)")
+        // -- see VM.hpp's own resumeReadyAsyncTasks() comment for why
+        // that changed once the pieces were actually wired together.
+        vm_.resumeReadyAsyncTasks(now);
+
         ++iterations;
         if (maxIterations > 0 && iterations >= maxIterations) break;
         if (g_shutdownRequested.load()) break;

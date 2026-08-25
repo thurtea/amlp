@@ -23961,6 +23961,233 @@ static void testDbExecOnAnUnknownHandleThrowsIllegalHandle() {
     std::cout << "testDbExecOnAnUnknownHandleThrowsIllegalHandle OK\n";
 }
 
+// ROADMAP.md row 2.5's own first slice (C++20 coroutine scheduler).
+// Real row 2.6 async/await grammar does not exist yet -- no async/await
+// token appears anywhere under src/compiler, confirmed directly -- so
+// every test below hand-builds the CompiledProgram/FunctionEntry a
+// future `async` function would compile to, exactly matching this
+// row's own explicit first-slice scope ("validates the mechanism
+// against one hand-built, test-only async function rather than real
+// LPC source compiled through the parser"). See VM.hpp's own
+// runAsync()/resumeReadyAsyncTasks() comments and Bytecode.hpp's own
+// OpCode::Suspend/FunctionEntry::isAsync comments for the full design.
+
+static void testAsyncFunctionSuspendsOnAwaitAndResumesWithLocalStatePreserved() {
+    amlp::CompiledProgram program;
+    amlp::FunctionEntry entry;
+    entry.name = "probe";
+    entry.entryPoint = 0;
+    entry.numLocals = 1;
+    entry.isAsync = true;
+    // async int probe() { int x = 42; await 0; return x; }
+    program.code = {
+        {amlp::OpCode::PushInt, 42, 0},
+        {amlp::OpCode::StoreLocal, 0, 0},
+        {amlp::OpCode::PushInt, 0, 0},    // delay = 0 seconds
+        {amlp::OpCode::Suspend, 0, 0},
+        {amlp::OpCode::PushLocal, 0, 0},
+        {amlp::OpCode::Return, 0, 0},
+    };
+    program.functions = {entry};
+    auto compiled = std::make_shared<amlp::CompiledProgram>(std::move(program));
+    auto obj = std::make_shared<amlp::LpcObject>("async_probe_object", compiled);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    amlp::Task<amlp::Value> task = vm.runAsync(*compiled, compiled->functions[0], {}, obj);
+    task.resume();
+    // Must have genuinely suspended at the Suspend opcode, not run
+    // straight through to Return -- if this were false, the rest of
+    // this test would not actually be proving suspend/resume at all.
+    assert(!task.done());
+
+    vm.resumeReadyAsyncTasks(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    assert(task.done());
+
+    amlp::Value result = task.takeResult();
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+
+    std::cout << "testAsyncFunctionSuspendsOnAwaitAndResumesWithLocalStatePreserved OK\n";
+}
+
+static void testOrdinarySynchronousFunctionUnaffectedByAsyncMachineryExistingInTheSameBinary() {
+    // Row 2.5's own hard constraint: "nothing about the existing 747
+    // tests' code paths should change, since the new async path is
+    // strictly additive." This is a focused, direct check of exactly
+    // that claim -- rather than trusting it purely from the bulk 747
+    // continuing to pass -- run through the exact same
+    // callFunction()/run() path every one of those 747 tests already
+    // uses, on a real compiled (not hand-built) ordinary function, and
+    // confirm both its own isAsync default and its result are
+    // untouched by any of this row's new code existing in the binary.
+    std::string src =
+        "int probe() {\n"
+        "    int x = 42;\n"
+        "    return x + 1000;\n"
+        "}\n";
+    amlp::Lexer lexer(src);
+    amlp::Parser parser(lexer.tokenize());
+    auto astProgram = parser.parseProgram();
+    amlp::CodeGen codegen;
+    auto compiled = std::make_shared<amlp::CompiledProgram>(codegen.generate(*astProgram));
+    assert(!compiled->functions.empty());
+    assert(compiled->functions[0].isAsync == false);
+
+    auto obj = std::make_shared<amlp::LpcObject>("sync_probe_object", compiled);
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    amlp::Value result = vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1042);
+
+    std::cout << "testOrdinarySynchronousFunctionUnaffectedByAsyncMachineryExistingInTheSameBinary OK\n";
+}
+
+static void testAwaitReachedThroughANestedPlainCallPropagatesSuspendCorrectly() {
+    // The exact scenario ROADMAP.md row 2.5's own scoping session found
+    // the old TaskFrame-capture sketch would have broken on: a() calls
+    // b() through a perfectly ordinary OpCode::Call (no special syntax
+    // at that call site -- from a()'s own bytecode, calling b() looks
+    // identical to calling any other function), and b() is the one
+    // whose own body actually suspends, not a() directly. Real C++20
+    // co_await chaining (Task<Value>'s own await_suspend()/
+    // final_suspend(), Task.hpp) must propagate that suspension all the
+    // way up through a()'s own co_await on b() with no special-casing
+    // at a()'s call site beyond the ordinary isAsync check
+    // VM::runAsync()'s own Call handling already does -- proving this
+    // is exactly what makes this design correct where the old sketch
+    // was not.
+    amlp::CompiledProgram program;
+
+    // b(): int y = 7; await 0; return y + 100;  (-> 107)
+    std::vector<amlp::Instruction> bCode = {
+        {amlp::OpCode::PushInt, 7, 0},
+        {amlp::OpCode::StoreLocal, 0, 0},
+        {amlp::OpCode::PushInt, 0, 0},
+        {amlp::OpCode::Suspend, 0, 0},
+        {amlp::OpCode::PushLocal, 0, 0},
+        {amlp::OpCode::PushInt, 100, 0},
+        {amlp::OpCode::Add, 0, 0},
+        {amlp::OpCode::Return, 0, 0},
+    };
+    // a(): return b() + 1000;  -- an ordinary call, not itself an
+    // await/Suspend of any kind.
+    std::vector<amlp::Instruction> aCode = {
+        {amlp::OpCode::Call, 0, 0},   // operand 0 -> stringPool[0] == "b", argCount 0
+        {amlp::OpCode::PushInt, 1000, 0},
+        {amlp::OpCode::Add, 0, 0},
+        {amlp::OpCode::Return, 0, 0},
+    };
+
+    amlp::FunctionEntry fnB;
+    fnB.name = "b";
+    fnB.entryPoint = 0;
+    fnB.numLocals = 1;
+    fnB.isAsync = true;
+
+    amlp::FunctionEntry fnA;
+    fnA.name = "a";
+    fnA.entryPoint = static_cast<uint32_t>(bCode.size());
+    fnA.isAsync = true;
+
+    program.stringPool = {"b"};
+    program.code = bCode;
+    program.code.insert(program.code.end(), aCode.begin(), aCode.end());
+    program.functions = {fnB, fnA};
+
+    auto compiled = std::make_shared<amlp::CompiledProgram>(std::move(program));
+    auto obj = std::make_shared<amlp::LpcObject>("nested_await_object", compiled);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    amlp::Task<amlp::Value> task = vm.runAsync(*compiled, compiled->functions[1], {}, obj);
+    task.resume();
+    // a() itself never executed a literal Suspend -- the suspension is
+    // entirely b()'s own, reached through a()'s ordinary Call -- yet
+    // the whole chain, driven from a()'s own Task, must show suspended
+    // here too.
+    assert(!task.done());
+
+    vm.resumeReadyAsyncTasks(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    assert(task.done());
+
+    amlp::Value result = task.takeResult();
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1107);
+
+    std::cout << "testAwaitReachedThroughANestedPlainCallPropagatesSuspendCorrectly OK\n";
+}
+
+static void testParkedAsyncTaskAndAnOrdinaryCallOutCoexistAcrossTheSameTickSequence() {
+    // Live-mechanism proof, the closest honest analog available to
+    // "trigger whatever real mechanism ends up calling into an async
+    // function": no LPC source can reach OpCode::Suspend yet (real row
+    // 2.6 grammar does not exist), so this drives the exact same two
+    // real production entry points Scheduler::run()'s own loop calls
+    // every real tick -- tickCallOuts() and vm.resumeReadyAsyncTasks(),
+    // see Scheduler.cpp's own run() body -- directly and interleaved,
+    // proving an ordinary call_out and a parked async task coexist
+    // correctly across the same tick sequence rather than only ever
+    // being exercised in isolation from each other.
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/coexist_probe.c",
+        "int fired = 0;\n"
+        "void mark() { fired = 1; }\n"
+        "void start() { call_out(\"mark\", 0); }\n"
+        "int was_fired() { return fired; }\n");
+    auto ob = harness.objects.cloneObject("/coexist_probe");
+    assert(ob != nullptr);
+    harness.vm.callFunction(ob, "start", {});
+
+    amlp::CompiledProgram program;
+    amlp::FunctionEntry entry;
+    entry.name = "probe";
+    entry.entryPoint = 0;
+    entry.numLocals = 1;
+    entry.isAsync = true;
+    program.code = {
+        {amlp::OpCode::PushInt, 42, 0},
+        {amlp::OpCode::StoreLocal, 0, 0},
+        {amlp::OpCode::PushInt, 0, 0},
+        {amlp::OpCode::Suspend, 0, 0},
+        {amlp::OpCode::PushLocal, 0, 0},
+        {amlp::OpCode::Return, 0, 0},
+    };
+    program.functions = {entry};
+    auto compiled = std::make_shared<amlp::CompiledProgram>(std::move(program));
+    auto asyncObj = std::make_shared<amlp::LpcObject>("coexist_async_object", compiled);
+    amlp::Task<amlp::Value> task =
+        harness.vm.runAsync(*compiled, compiled->functions[0], {}, asyncObj);
+    task.resume();
+    assert(!task.done());
+
+    // Same tick sequence Scheduler::run()'s own loop uses (Scheduler.cpp):
+    // tickCallOuts() first, then resumeReadyAsyncTasks() -- neither call
+    // disturbs the other's own pending state.
+    scheduler.tickCallOuts();
+    harness.vm.resumeReadyAsyncTasks(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+
+    amlp::Value firedResult = harness.vm.callFunction(ob, "was_fired", {});
+    assert(std::holds_alternative<int64_t>(firedResult.data));
+    assert(std::get<int64_t>(firedResult.data) == 1);
+
+    assert(task.done());
+    amlp::Value result = task.takeResult();
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+
+    std::cout << "testParkedAsyncTaskAndAnOrdinaryCallOutCoexistAcrossTheSameTickSequence OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -24724,6 +24951,10 @@ int main() {
     testDbConnectDeniedByPrivilegeViolationThrows();
     testDbConnectWithNoMasterPrivilegeViolationLfunHardErrors();
     testDbExecOnAnUnknownHandleThrowsIllegalHandle();
+    testAsyncFunctionSuspendsOnAwaitAndResumesWithLocalStatePreserved();
+    testOrdinarySynchronousFunctionUnaffectedByAsyncMachineryExistingInTheSameBinary();
+    testAwaitReachedThroughANestedPlainCallPropagatesSuspendCorrectly();
+    testParkedAsyncTaskAndAnOrdinaryCallOutCoexistAcrossTheSameTickSequence();
     std::cout << "all tests passed\n";
     return 0;
 }

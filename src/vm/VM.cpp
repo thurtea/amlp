@@ -2765,4 +2765,237 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
     return Value{};
 }
 
+// ROADMAP.md row 2.5's own first slice. See VM.hpp's own runAsync()
+// comment for why this exists as a genuinely separate coroutine rather
+// than a mode flag on run() above, and Bytecode.hpp's own
+// OpCode::Suspend/FunctionEntry::isAsync comments for the exact
+// contract each piece keeps. Deliberately a small, explicit *subset* of
+// run()'s own opcode coverage: real row 2.6 grammar/codegen does not
+// exist yet, so nothing in this driver can compile real LPC source into
+// a function with isAsync set -- every function this coroutine ever
+// actually runs is this row's own hand-built, test-only bytecode (see
+// test/test_lexer.cpp's own row 2.5 regression tests), and the opcodes
+// those tests exercise are the only ones implemented below. Anything
+// else throws a clear, explicit "not yet implemented" error (the same
+// NotImplementedError run()'s own default case above already throws
+// for a genuinely unhandled opcode) rather than silently misbehaving.
+// Extending this to the full opcode set is real row 2.6 scope, not
+// attempted here.
+//
+// Deliberately does NOT push obj onto callStack_/objectChangeStack_ the
+// way run()'s own ObjectFrameGuard does, and does NOT push/pop
+// originStack_ the way OriginGuard does either: both are single
+// VM-wide vectors shared with every ordinary synchronous run() call
+// still happening elsewhere (Scheduler ticking a call_out/heartbeat, a
+// player command dispatching) -- if a task suspended here left an
+// entry on either stack, an unrelated synchronous call resuming
+// *between* this coroutine's suspend and its later resume would see a
+// stale, wrong currentObject()/origin(), and this coroutine's own
+// eventual resume would then pop whatever happens to be on top of that
+// shared vector at that later moment, not necessarily the entry it
+// pushed -- real, silent stack corruption, not just a wrong-but-
+// harmless read. currentObject()/origin() are therefore not reliable
+// from inside a running-or-parked async task in this first slice -- a
+// real, named gap, not an oversight: row 2.6 will need a genuine
+// per-task context (not these shared VM-wide stacks) before an async
+// LPC function can safely call an ordinary efun that reads either, and
+// building that now, before any real async LPC code exists to need it,
+// would be speculative scope this row's own ROADMAP.md note never
+// asked for. evalCost_ is the one deliberate exception, shared
+// unchanged: it is already a single VM-wide counter reset once per
+// top-level dispatch (see its own VM.hpp comment), not a per-call-frame
+// stack, so nothing about suspension makes sharing it here any less
+// sound than run() already relies on for ordinary nested calls today --
+// and sharing it is a hard requirement, not just convenient (see
+// Bytecode.hpp's own FunctionEntry comment): a separate async-only
+// budget would make `await` a cost-limit escape hatch, exactly what
+// ROADMAP.md row 2.5 rules out.
+Task<Value> VM::runAsync(const CompiledProgram& program, const FunctionEntry& fn,
+                          std::vector<Value> args, const std::shared_ptr<LpcObject>& obj) {
+    std::vector<Value> locals(fn.numLocals, Value(int64_t{0}));
+    for (size_t i = 0; i < args.size() && i < locals.size(); ++i) {
+        locals[i] = std::move(args[i]);
+    }
+    std::vector<Value> localStack;
+    size_t ip = fn.entryPoint;
+
+    while (ip < program.code.size()) {
+        const Instruction& instr = program.code[ip];
+        ++evalCost_;
+        if (evalCost_ > maxEvalCost_) {
+            throw EvalCostError("eval cost exceeded");
+        }
+
+        switch (instr.op) {
+            case OpCode::PushInt: {
+                localStack.emplace_back(Value(static_cast<int64_t>(instr.operand)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushLocal: {
+                if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= locals.size()) {
+                    throw LpcRuntimeError("runAsync: PushLocal out of range");
+                }
+                localStack.push_back(locals[instr.operand]);
+                ++ip;
+                break;
+            }
+
+            case OpCode::StoreLocal: {
+                if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= locals.size()) {
+                    throw LpcRuntimeError("runAsync: StoreLocal out of range");
+                }
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("runAsync: StoreLocal stack underflow");
+                }
+                locals[instr.operand] = localStack.back();
+                localStack.pop_back();
+                ++ip;
+                break;
+            }
+
+            case OpCode::Add: {
+                // Int-only in this first slice -- real Add's full
+                // string/float/monostate coercion table (above, this
+                // same file) is real row 2.6 codegen scope, not
+                // reimplemented here for a hand-built test opcode
+                // subset that only ever exercises plain integers.
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("runAsync: Add stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+                auto* li = std::get_if<int64_t>(&lhs.data);
+                auto* ri = std::get_if<int64_t>(&rhs.data);
+                if (!li || !ri) {
+                    throw LpcRuntimeError("runAsync: Add only supports int+int in this first slice");
+                }
+                localStack.emplace_back(Value(static_cast<int64_t>(*li + *ri)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Call: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("runAsync: Call bad function name index");
+                }
+                const std::string& funcName = program.stringPool[instr.operand];
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("runAsync: Call bad arg count for " + funcName);
+                }
+                std::vector<Value> callArgs(localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+
+                // Same obj->program()-first resolution run()'s own
+                // OpCode::Call uses (see that case's own long comment
+                // above) -- this first slice's own hand-built test
+                // programs never inherit, so the simul_efun/efun-table
+                // tiers that follow it there are not needed here.
+                FunctionLookupResult found = findFunctionInChain(obj->program(), funcName);
+                if (!found.program) {
+                    throw LpcRuntimeError("runAsync: Call unresolved function " + funcName);
+                }
+
+                // The exact design decision row 2.5's own scoping
+                // session settled on, now real: a callee flagged async
+                // is co_await'd (its own suspension, if any, propagates
+                // straight up through this call -- the precise "await
+                // reached through an intervening plain call" case the
+                // old TaskFrame sketch could not have handled); an
+                // ordinary callee falls through to the plain, unchanged
+                // run(), which cannot suspend and therefore cannot leak
+                // a suspension across this coroutine's own frame.
+                Value result = found.fn->isAsync
+                                   ? co_await runAsync(*found.program, *found.fn, std::move(callArgs), obj)
+                                   : run(*found.program, *found.fn, std::move(callArgs), obj);
+                localStack.push_back(std::move(result));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Suspend: {
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("runAsync: Suspend stack underflow");
+                }
+                Value delayVal = localStack.back(); localStack.pop_back();
+                double seconds = 0.0;
+                if (auto* i = std::get_if<int64_t>(&delayVal.data)) {
+                    seconds = static_cast<double>(*i);
+                } else if (auto* d = std::get_if<double>(&delayVal.data)) {
+                    seconds = *d;
+                } else {
+                    throw LpcRuntimeError("runAsync: Suspend delay must be numeric");
+                }
+                co_await suspendFor(std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(seconds)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Return: {
+                Value result = localStack.empty() ? Value{} : localStack.back();
+                co_return result;
+            }
+
+            case OpCode::Halt:
+                co_return Value{};
+
+            default:
+                throw NotImplementedError(
+                    "VM::runAsync opcode " + std::to_string(static_cast<int>(instr.op)) +
+                    " (row 2.5's first slice implements only PushInt/PushLocal/StoreLocal/"
+                    "Add/Call/Suspend/Return/Halt)");
+        }
+    }
+
+    co_return Value{};
+}
+
+// ROADMAP.md row 2.5's own first slice ("Scheduler::run() gains one new
+// step..."). See VM.hpp's own resumeReadyAsyncTasks() comment for why
+// this lives here (a VM method Scheduler::run() calls, mirroring
+// processPendingReplacePrograms() immediately above it in that same
+// loop) rather than the Scheduler-side "resumeReadyTasks()" ROADMAP.md's
+// own note first sketched, and why that is a real, deliberate
+// correction rather than a drift from the design.
+void VM::resumeReadyAsyncTasks(std::chrono::steady_clock::time_point now) {
+    // Same "collect due entries, then fire each" shape as
+    // Scheduler::tickCallOuts() (Scheduler.cpp) -- a task that
+    // immediately re-suspends itself on resume (parking a fresh entry
+    // in pendingAsyncResumes_) must not corrupt the vector being walked
+    // to find what was already due this tick.
+    std::vector<std::coroutine_handle<>> due;
+    for (auto it = pendingAsyncResumes_.begin(); it != pendingAsyncResumes_.end();) {
+        if (it->resumeAt <= now) {
+            due.push_back(it->handle);
+            it = pendingAsyncResumes_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto handle : due) {
+        // Defense in depth, matching tickCallOuts()/tickHeartbeats()'s
+        // own per-callback isolation intent: an LPC-level error inside
+        // the coroutine body is already captured by Task<Value>'s own
+        // promise_type::unhandled_exception() (Task.hpp) rather than
+        // escaping resume() itself, so this catch rarely fires in
+        // practice today. A fully fire-and-forget top-level task's own
+        // captured error is not yet surfaced anywhere once captured
+        // that way -- a real, named gap: nothing in this row's own
+        // first slice creates such a task (every regression test drives
+        // its own Task to completion and reads takeResult() directly),
+        // and a real answer for "who owns a fire-and-forget task's
+        // outcome" belongs to whichever later row (2.6/2.7) actually
+        // gives tasks a caller nobody necessarily awaits.
+        try {
+            handle.resume();
+        } catch (const std::exception& e) {
+            std::cerr << "[async task] " << e.what() << "\n";
+        }
+    }
+}
+
 } // namespace amlp

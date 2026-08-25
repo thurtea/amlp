@@ -9,6 +9,122 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-25 (a further session, same day): row 2.5's v1 first slice
+built, exactly the design from the scoping session immediately below
+plus two real corrections found while wiring it together. 4 new
+regression tests, 751 total (751 = 747 + 4, confirmed by rebuilding and
+running `build/test/amlp_tests` directly), all passing; the original
+747 re-verified unchanged (same names, same count) to confirm the new
+async path is genuinely additive, not just re-trusted from before this
+session.**
+
+Built, in the order ROADMAP.md row 2.5's own 5-item first slice lists
+them: `include/amlp/scheduler/Task.hpp` (a real, minimal `Task<Value>`
+coroutine type, header-only, deliberately independent of Scheduler's
+own class); `FunctionEntry::isAsync` and `OpCode::Suspend`
+(`Bytecode.hpp`); `VM::runAsync()` (a genuinely separate coroutine next
+to the unchanged `run()`, implementing a deliberately small opcode
+subset -- `PushInt`/`PushLocal`/`StoreLocal`/`Add`(int-only)/`Call`/
+`Suspend`/`Return`/`Halt` -- covering exactly what this row's own
+hand-built test bytecode needs, throwing `NotImplementedError` for
+anything else rather than misbehaving silently, real row 2.6 grammar
+not existing yet to need more); and `Scheduler::run()` draining a new
+queue each tick.
+
+**Two real corrections found while wiring the pieces together, neither
+visible from the docs-only scoping pass, both the same "found before
+finishing, not before starting" discipline every prior Phase 2 build
+session has already used:**
+
+1. **Circular-dependency correction.** The design as scoped put the
+   timer-park queue and `resumeReadyTasks()` on `Scheduler`. Confirmed
+   directly before writing that code: `src/scheduler/CMakeLists.txt`
+   links `scheduler` against `vm`, never the reverse, and `VM.cpp` has
+   zero existing call sites referencing `Scheduler`'s own concrete
+   class at all -- every real `call_out()`/`heart_beat()` efun bridges
+   the two from `EfunTable.cpp` instead, one layer up, a real,
+   pre-existing precedent, not invented for this row. Giving `VM.cpp` a
+   new call into `Scheduler.hpp` would have created a genuine circular
+   library dependency. Fixed by flipping ownership: the parked-handle
+   queue and its own per-callback isolation now live on `VM`
+   (`pendingAsyncResumes_`, `resumeReadyAsyncTasks()`, `suspendFor()`),
+   and `Scheduler::run()` calls `vm_.resumeReadyAsyncTasks(now)` each
+   tick -- mirroring `processPendingReplacePrograms()`'s own already-
+   established "VM owns the pending queue, Scheduler drains it every
+   tick" shape immediately next to it in that same loop, not a new
+   pattern invented for this row.
+2. **A real C++20 gotcha, not an architecture issue.** `Task<T>::
+   promise_type` had no user-declared constructor, making it a plain
+   aggregate; C++20's parenthesized aggregate-init (P0960) let the
+   compiler try constructing it positionally from `runAsync()`'s own
+   argument list (preceded by its implicit `this`, since it is a
+   non-static member coroutine) when deciding how to build the promise
+   object -- silently landing the `VM&` receiver into the promise's
+   first member (`value`, a `Value`) and failing to compile with a
+   confusing "no matching `Value` constructor" error nowhere near
+   `Task.hpp`. Fixed with one explicit `promise_type() = default;`,
+   restoring ordinary default construction.
+
+**Deliberately not given `run()`'s own `ObjectFrameGuard`/`OriginGuard`
+treatment:** `runAsync()` never pushes `obj` onto `VM::callStack_`/
+`objectChangeStack_`/`originStack_`, all three single VM-wide vectors
+shared with every ordinary synchronous call still happening elsewhere
+while a task is parked -- doing so would risk real, silent shared-stack
+corruption across a suspend/resume boundary. `currentObject()`/
+`origin()` are therefore not reliable from inside a running-or-parked
+async task in this v1 -- a real, named gap, not an oversight, left for
+row 2.6. `evalCost_` is shared unchanged, deliberately, matching the
+hard requirement the scoping session already named.
+
+**The 4 new regression tests:** a minimal hand-built async function
+that suspends on `Suspend` and resumes with its own local state
+(`x = 42`) intact; a direct check that an ordinary, really-compiled (not
+hand-built) synchronous function run through the unchanged
+`callFunction()`/`run()` path is bit-for-bit unaffected by any of this
+row's new code existing in the same binary; the specific scenario the
+scoping session found the old `TaskFrame`-sketch would have broken on --
+an `async` function `a()` calling another `async` function `b()`
+through a perfectly ordinary, unmarked `OpCode::Call`, where `b()` (not
+`a()`) is the one that actually suspends, proving the suspension still
+correctly propagates all the way up through `a()`'s own `co_await`
+chain to the real driver (result `1107`); and a parked async task
+coexisting correctly with a real ordinary `call_out` across the same
+tick sequence (`scheduler.tickCallOuts()` then
+`vm.resumeReadyAsyncTasks()`, the same order `Scheduler::run()` itself
+uses) -- the closest honest proof available of real-mechanism
+integration given no LPC source can reach `OpCode::Suspend` yet.
+
+**Live-verified against the real running driver** (`./build/amlp
+etc/driver.cfg`) and the real bundled mudlib over a real TCP session,
+since no LPC source can trigger the new async path itself yet: fresh
+account/character creation, reconnect, full movement loop (gatehouse ->
+watch room -> gatehouse), `talk mabb`/`talk mabb about rod` (both
+produce real dialogue once actually standing in the watch room -- Old
+Mabb is not in the starting gatehouse, confirmed correct only after
+moving there), and the reeve's rod's `create`/`purge` mechanic, all
+working exactly as before this row, with zero errors or crashes in the
+driver's own log across two full sessions (the only log lines produced,
+"[object] source file not found: mudlib/command/look.c" and similarly
+for `talk`/`inventory`, are the pre-existing, harmless virtual-command
+compile-miss fallback these `add_action`-driven verbs already logged
+before this row, confirmed by reading the driver's own startup/dispatch
+code, not a new regression). Test-account/character/created-object
+state (`livecheck2026`, `testhero.o`, `test_widget.c`) deleted
+afterward, matching row 2.9/2.12/2.15's own established cleanup
+precedent.
+
+**Explicitly still open, unchanged from the scoping session's own
+deferral list:** 2.6's real grammar/codegen (now genuinely unblocked --
+this row's own machinery is real and tested), 2.7's `call_out_future()`,
+2.8's Hydra parallelism, 2.18's async I/O efuns. One additional real gap
+surfaced by the build itself, not previously named: a `Task<T>` whose
+coroutine is destroyed while still parked leaves a dangling
+`coroutine_handle` in `VM::pendingAsyncResumes_` -- real cancellation
+does not exist yet, and nothing in this row's own scope creates and
+abandons a `Task` early, so this is named in `Task.hpp` rather than
+fixed here. Full detail, including the exact opcode list and file
+layout, is in ROADMAP.md row 2.5 itself now, not just here.
+
 **2026-08-25: Tier 2 cold-start scoping session, row 2.5 (C++20 coroutine
 scheduler) picked over 2.11 (LLVM JIT) and 3.3 (generational GC), the
 three remaining unscoped-for-real large Phase 2/3 items. Docs-only

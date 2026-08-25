@@ -1,11 +1,14 @@
 #pragma once
 #include <array>
+#include <chrono>
+#include <coroutine>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 #include "amlp/vm/Value.hpp"
 #include "amlp/vm/Bytecode.hpp"
+#include "amlp/scheduler/Task.hpp"
 
 namespace amlp {
 
@@ -420,6 +423,51 @@ public:
     // walk).
     void processPendingReplacePrograms();
 
+    // ROADMAP.md row 2.5's own first slice ("VM: a new parallel
+    // runAsync() entry point beside the existing run()..."). Public,
+    // unlike run() (see below), because this row's own regression
+    // tests construct a CompiledProgram/FunctionEntry by hand (real
+    // row 2.6 async/await grammar does not exist yet -- see
+    // FunctionEntry::isAsync's own comment) and drive it directly,
+    // with no existing name-resolution wrapper like callFunction() to
+    // go through. fn.isAsync need not be true for this specific top-
+    // level call (nothing checks it here); it matters only inside the
+    // coroutine body itself, at each OpCode::Call site resolving a
+    // *callee*, deciding whether that nested call should co_await
+    // another runAsync() or fall through to the plain, unchanged
+    // run() -- see VM.cpp's own implementation comment for the full
+    // per-opcode scope of this first slice's own minimal interpreter
+    // (a deliberately small subset of the real opcode set: real
+    // row 2.6 codegen, once it exists, will need this expanded to the
+    // rest, exactly the same way the plain run() loop already covers
+    // it -- not attempted this row, see ROADMAP.md's own explicit
+    // deferral list).
+    Task<Value> runAsync(const CompiledProgram& program, const FunctionEntry& fn,
+                          std::vector<Value> args, const std::shared_ptr<LpcObject>& obj);
+
+    // ROADMAP.md row 2.5's own first slice ("Scheduler::run() gains one
+    // new step..."). Called once per Scheduler::run() iteration,
+    // mirroring processPendingReplacePrograms()'s own already-
+    // established "VM owns the pending queue, Scheduler drains it every
+    // tick" shape immediately above -- deliberately a VM method, not a
+    // Scheduler one, and deliberately not named/shaped the way this
+    // row's own ROADMAP.md note first sketched it
+    // (`Scheduler::resumeReadyTasks(now)`): src/scheduler/CMakeLists.txt
+    // links `scheduler` against `vm`, never the reverse, and VM.cpp has
+    // no existing call site referencing Scheduler's own concrete class
+    // at all (every real call_out()/heart_beat() efun bridges VM and
+    // Scheduler from EfunTable.cpp instead, one layer up -- confirmed
+    // directly before writing this, not assumed). Putting the parked-
+    // handle queue and its own per-callback isolation here instead
+    // avoids a real circular library dependency without needing a new
+    // abstract interface just to preserve that layering -- a real scope
+    // correction found while wiring the pieces together, the same
+    // discipline every prior Phase 2 row's own "found before writing
+    // any code" corrections already used, just found one step later
+    // here since the scoping session's own docs-only mandate could not
+    // have caught it before any code existed to reveal it.
+    void resumeReadyAsyncTasks(std::chrono::steady_clock::time_point now);
+
 private:
     Value run(const CompiledProgram& program, const FunctionEntry& fn,
               std::vector<Value> args, const std::shared_ptr<LpcObject>& obj);
@@ -531,6 +579,39 @@ private:
         std::string name;
     };
     std::vector<PendingReplaceProgram> pendingReplacePrograms_;
+
+    // ROADMAP.md row 2.5's own first slice. One entry per runAsync()
+    // coroutine currently parked on OpCode::Suspend, resumed once
+    // resumeReadyAsyncTasks() sees now >= resumeAt -- a plain vector,
+    // scanned linearly each call, matching tickCallOuts()'s own
+    // established "collect due entries, then fire each" style
+    // (Scheduler.cpp) rather than a literal std::priority_queue: this
+    // row's own first slice never has more than a handful of tasks
+    // parked at once, and a real heap only pays for itself at a scale
+    // nothing in this slice's own scope reaches.
+    struct PendingAsyncResume {
+        std::chrono::steady_clock::time_point resumeAt;
+        std::coroutine_handle<> handle;
+    };
+    std::vector<PendingAsyncResume> pendingAsyncResumes_;
+
+    // Awaitable returned by suspendFor() below -- OpCode::Suspend's own
+    // `co_await` target inside runAsync(). await_suspend() records this
+    // coroutine's own handle into pendingAsyncResumes_ above rather
+    // than touching anything on Scheduler, for the same layering
+    // reason resumeReadyAsyncTasks() documents just above.
+    struct AsyncTimerAwaiter {
+        VM* vm;
+        std::chrono::steady_clock::time_point resumeAt;
+        bool await_ready() const noexcept { return false; }
+        void await_suspend(std::coroutine_handle<> h) const {
+            vm->pendingAsyncResumes_.push_back({resumeAt, h});
+        }
+        void await_resume() const noexcept {}
+    };
+    AsyncTimerAwaiter suspendFor(std::chrono::steady_clock::duration delay) {
+        return AsyncTimerAwaiter{this, std::chrono::steady_clock::now() + delay};
+    }
 };
 
 } // namespace amlp

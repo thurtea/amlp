@@ -143,7 +143,24 @@ enum class OpCode : uint8_t {
     Return,
     Pop,
     Dup,
-    Halt
+    Halt,
+    // ROADMAP.md row 2.5's own first slice. Pops one numeric delay
+    // (seconds, int or float) and co_await's VM's own timer awaiter
+    // (VM::suspendFor(), see VM.hpp), parking this coroutine with
+    // VM::pendingAsyncResumes_ until that much time has passed, then
+    // continuing at the next instruction with the rest of the operand
+    // stack untouched. Only ever reached from VM::runAsync() -- VM::run()
+    // (the ordinary, synchronous entry point, completely unchanged by
+    // this row) has no coroutine frame to suspend and must never
+    // execute this opcode; reaching it there is a compiler bug once
+    // row 2.6 exists (no such bug is possible yet, since nothing emits
+    // this opcode without row 2.6's own grammar, which does not exist
+    // today -- this row's own regression tests construct it by hand).
+    // Real `await expr` (row 2.6) will eventually need this to also
+    // push expr's own awaited result; this first slice's own Suspend
+    // pushes nothing back, matching row 2.5's explicit deferral of
+    // 2.6/2.7's own value-producing await semantics.
+    Suspend
 };
 
 struct Instruction {
@@ -157,6 +174,23 @@ struct FunctionEntry {
     uint32_t entryPoint = 0;
     uint8_t numArgs = 0;
     uint8_t numLocals = 0;
+    // ROADMAP.md row 2.5's own first slice: true only for a function
+    // this row's own hand-built test bytecode marks as an async task
+    // entry point (real row 2.6 grammar/codegen -- an `async` keyword
+    // setting this from real LPC source -- does not exist yet, and is
+    // explicitly out of this row's own scope). OpCode::Call checks this
+    // on its resolved callee inside VM::runAsync() only: true means
+    // co_await a nested VM::runAsync() (the callee may itself suspend,
+    // and that suspension must propagate all the way up through this
+    // call, the exact "await reached through an intervening plain
+    // call" case row 2.5's own scoping session found the old
+    // TaskFrame-capture sketch would have broken on); false (the
+    // default, i.e. every real function compiled by this driver today)
+    // means the plain, unchanged, synchronous VM::run(), exactly as
+    // before this row -- VM::run() itself never reads this field at
+    // all, so it cannot behave differently for any of the 747 tests
+    // that predate this row.
+    bool isAsync = false;
 };
 
 struct CompiledProgram {

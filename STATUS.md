@@ -9,6 +9,111 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-25 (a further session, same day): the array-form `call_other()`
+gap the previous session's broader pass found (real FluffOS's own
+`object *` first-argument form for `call_other()`/`->`, not supported
+by this driver) fixed, real semantics confirmed against the actual
+interpreter-level implementation before writing any code. 5 new
+regression tests (761 total, up from 756), live-verified against the
+real driver and the real AetherMUD mudlib specifically: the room-reset
+error is gone, and `reinitiate()`'s own real intended behavior (moving
+every object in a room out and back in) confirmed actually working, not
+just non-erroring.**
+
+**Real semantics, confirmed from source, not inferred.** Read real
+`efuns_main.c`'s own `f__call_other()` directly: `arg[0].type ==
+T_ARRAY` dispatches to `call_all_other(arg[0].u.arr, funcname, num_arg -
+2)` (`interpret.c`), whose full body was read line by line before
+writing anything:
+
+- **Result is a real array, same size as the input, index-aligned in
+  the same order** (`allocate_array(size = v->size)`, `vptr`/`rptr`
+  incrementing together) -- not a "drop the misses" shape.
+- **Every unfilled slot defaults to real `allocate_array()`'s own plain
+  `const0`** (`array.c`: `while (n--) p->item[n] = const0;`), an
+  ordinary, subtype-less int 0 -- confirmed distinct from the
+  T_UNDEFINED-tagged `const0u` the prior session's sprintf fix had to
+  special-case (`main.c`: only `const0u.subtype = T_UNDEFINED;`).
+- **A destructed array element is silently skipped, not an error**
+  (`if (ob->flags & O_DESTRUCTED) continue;`), its own slot staying at
+  the default 0.
+- **A missing function on one element is likewise silently skipped, not
+  an error** (`if (apply_low(...))` false just means the result-copy
+  line never runs for that element) -- confirmed the exact same
+  "one bad element never aborts the whole call" rule the destructed
+  case uses, not a separate path.
+- A string element resolves via `find_object()` the same way the scalar
+  form already does, skipping (not erroring) on a miss. The same args
+  are pushed for every element (read from one saved stack position each
+  iteration, not a per-element slice).
+
+**Real corpus cross-check, confirming this is genuinely needed, not a
+speculative generalization:** `array_var->method(args)` is real and
+widespread, not narrow to AetherMUD -- confirmed live across every
+vendored corpus this project tracks (`dead-souls`, `lima`,
+`es2_mudlib`, `nightmare3`, this project's own bundled `mudlib/`
+corpus, and AetherMUD's own `reinitiate()` itself). One real usage
+confirms the *result-array* semantics specifically matter, not just
+dispatch: `lima/lib/secure/simul_efun/userfuncs.c`'s own
+`users()->query_body() - ({0})` explicitly filters literal-0 non-hit
+entries back out -- live proof real mudlib code relies on exactly the
+"unfilled slot is int 0" fallback found in the real source, not some
+other sentinel. No real corpus evidence of the *combined*
+array-of-targets-plus-array-of-(funcname,boundargs) form anywhere, and
+this driver's scalar-target `call_other` never supported an
+array-form function name either -- that combination stayed out of
+scope, matching this project's own bounded-to-real-evidence discipline.
+
+**Built:** the array-form branch added to `call_other`'s own registered
+efun body (`EfunTable.cpp`), checked before the existing scalar
+branches. Reuses `VM::callFunction()` directly as the per-element apply
+mechanism -- it already implements the destructed-target and
+missing-function "return a default `Value{}`, never throw" behavior
+real `call_all_other()` needs, for free, confirmed against that
+method's own header comment. The new code resolves each element
+(`shared_ptr<LpcObject>` used directly, a string resolved via
+`vm.findObject()`, anything else left null), calls through
+`VM::callFunction()` when a target was resolved, and collapses the
+result into the output array -- converting this driver's own
+`monostate` (whether from a skip or a genuinely void function falling
+through, both observably identical to a real int 0 on real FluffOS
+too) into a real `int64_t{0}`, matching real `allocate_array()`'s own
+plain `const0` default exactly.
+
+**5 new regression tests (761 total, up from 756):** array-form
+call_other calling every element and returning results in the right
+order; a destructed element silently skipped, its own slot left at 0,
+the rest of the array still called; a missing function on one element
+likewise skipped, the rest still called; a string element resolved via
+`find_object()` to the real blueprint object; and the exact real
+`reinitiate()` shape itself (`obs->move(dest)`, return value discarded,
+only each element's own real environment change checked afterward)
+confirming the side effect happens for every element, not just the
+first. The original 756 re-run unchanged.
+
+**Live-verified against the real running driver and the real AetherMUD
+mudlib specifically, before and after:** before, walking a fresh
+character through the same Chi-Town rooms the prior session's broader
+pass already exercised reliably reproduced the real `call_other: first
+argument must be an object or a string path` error in the driver's own
+log every time; after, zero such errors across the same walk. Went
+further than "no error," per this row's own instruction to confirm
+`reinitiate()`'s real intended behavior: a temporary debug build of
+`std/room/exits.c` (reverted afterward, confirmed byte-identical via
+`diff`) traced every real `reinitiate()` firing during that same walk
+-- `/domains/Praxis/setter` (1 object), `/domains/ChiTown/areas/
+chitown_start` (2), `/domains/ChiTown/areas/chitown_gate` (5),
+`/domains/ChiTown/areas/chitown_burbs` (1) -- each one moving every
+object out to `ROOM_VOID` and back, the result array's own `sizeof()`
+matching the input count every time, and the room's own final
+inventory count matching what it started with, confirming the real
+"kick everyone out and back in" refresh genuinely completes correctly,
+not just avoids erroring. Test-account/postal state created during this
+verification deleted afterward, matching this row's own established
+cleanup precedent. Full real-semantics citation trail, the fix, and
+every regression test are in ROADMAP.md row 3.9 itself now, not just
+here.
+
 **2026-08-25 (a further session, same day): row 3.9's open sprintf trace
 finished. Real root cause found and fixed (a driver-side gap, confirmed
 against real FluffOS source, not the mudlib's own bug), 5 new

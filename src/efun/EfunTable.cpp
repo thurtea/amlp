@@ -2030,6 +2030,99 @@ void registerCoreEfuns() {
         if (!std::holds_alternative<std::string>(args[1].data)) {
             throw LpcRuntimeError("call_other: second argument must be a string function name");
         }
+        const std::string& functionName = std::get<std::string>(args[1].data);
+        std::vector<Value> forwardedArgs(args.begin() + 2, args.end());
+
+        // Real f__call_other()'s own array-of-targets form (efuns_main.c:
+        // "else if (arg[0].type == T_ARRAY) { ret = call_all_other(v,
+        // funcname, num_arg - 2); ... }", confirmed directly against the
+        // real interpreter-level call_all_other() (interpret.c) before
+        // writing any of this, not guessed from func_spec.c's own
+        // signature ("object | string | object *") alone. Real corpus
+        // evidence this is genuinely needed, not a speculative
+        // generalization: the "array_var->method(args)" idiom is real
+        // and widespread across every vendored corpus this project
+        // tracks (dead-souls, lima, es2_mudlib, nightmare3, this
+        // project's own bundled mudlib, and AetherMUD's own std/room/
+        // exits.c reinitiate(): "obs->move(ROOM_VOID);
+        // obs->move(this_object());" where obs is all_inventory()'s own
+        // real object* return -- the exact real call site row 3.9's
+        // broader pass found erroring here).
+        if (auto* targetArray = std::get_if<std::shared_ptr<Array>>(&args[0].data)) {
+            if (!*targetArray) {
+                throw LpcRuntimeError("call_other: target array is null");
+            }
+            // Real call_all_other() (interpret.c): allocates a result
+            // array of the *same size* as the input, index-aligned (one
+            // slot per input element, same order: "for (vptr = v->item,
+            // rptr = ret->item; size--; vptr++, rptr++)") -- not a
+            // "drop the skipped entries" shape. Each slot starts as real
+            // allocate_array()'s own plain "const0" (array.c: "while
+            // (n--) p->item[n] = const0;"), an ordinary, subtype-less
+            // int 0 -- distinct from the T_UNDEFINED-tagged "const0u" a
+            // missing mapping key returns (row 3.9's own prior sprintf
+            // fix) -- overwritten only when apply_low() actually
+            // succeeds for that element. Real corpus evidence this
+            // default value specifically matters, not just a
+            // theoretical default: lima/lib/secure/simul_efun/
+            // userfuncs.c's own "users()->query_body() - ({0})"
+            // explicitly filters those literal-0 non-hits back out,
+            // confirming real mudlib code relies on exactly this
+            // fallback value.
+            auto result = std::make_shared<Array>();
+            result->items.reserve((*targetArray)->items.size());
+            for (const Value& element : (*targetArray)->items) {
+                std::shared_ptr<LpcObject> elementTarget;
+                if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&element.data)) {
+                    elementTarget = *ob;
+                } else if (auto* path = std::get_if<std::string>(&element.data)) {
+                    // Real call_all_other()'s own T_STRING branch: "ob =
+                    // find_object(vptr->u.string); if (!ob ||
+                    // !object_visible(ob)) continue;" -- resolved the
+                    // same way this efun's own existing scalar-target
+                    // form already does (vm.findObject()), but a miss
+                    // here skips only this one element rather than
+                    // throwing, matching real call_all_other()'s own
+                    // per-element "continue", not the scalar form's own
+                    // "abort the whole call" behavior just below.
+                    elementTarget = vm.findObject(*path);
+                }
+                // Real call_all_other(): any other element type (int,
+                // mapping, etc.) falls through its own "else continue;"
+                // -- matched here by elementTarget staying null, which
+                // the shared path below already treats as "skip, leave
+                // the default 0".
+                //
+                // vm.callFunction() already implements every one of
+                // real call_all_other()'s own remaining per-element
+                // rules for free: a null/destructed target (real "if
+                // (ob->flags & O_DESTRUCTED) continue;") and a target
+                // with no such function defined (real "if
+                // (apply_low(...))" false) both return this driver's
+                // own default Value{} rather than throwing -- see
+                // VM::callFunction()'s own header comment, and neither
+                // aborts the surrounding loop, matching real semantics
+                // exactly: one bad array element never aborts the whole
+                // call. Real code's own "skip, leave the default"
+                // outcome and real code's own "function found and ran
+                // but is void" outcome are observably identical on real
+                // FluffOS too (a void function's own real bytecode
+                // still pushes a real int 0 before returning), so
+                // collapsing this driver's own Value{} into a real
+                // int64_t 0 for every result slot -- not just the
+                // genuinely-skipped ones -- is the faithful choice, not
+                // an approximation.
+                Value callResult = elementTarget
+                    ? vm.callFunction(elementTarget, functionName, forwardedArgs, Origin::CallOther)
+                    : Value{};
+                if (std::holds_alternative<std::monostate>(callResult.data)) {
+                    result->items.emplace_back(Value(int64_t{0}));
+                } else {
+                    result->items.push_back(std::move(callResult));
+                }
+            }
+            return Value(result);
+        }
 
         std::shared_ptr<LpcObject> target;
         if (std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
@@ -2057,8 +2150,6 @@ void registerCoreEfuns() {
             throw LpcRuntimeError("call_other: first argument must be an object or a string path");
         }
 
-        const std::string& functionName = std::get<std::string>(args[1].data);
-        std::vector<Value> forwardedArgs(args.begin() + 2, args.end());
         // Real f__call_other()'s own "call_origin = ORIGIN_CALL_OTHER;"
         // right before apply_low() (efuns_main.c), confirmed directly --
         // this is the one real call site that actually sets

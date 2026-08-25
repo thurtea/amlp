@@ -3207,6 +3207,184 @@ static void testIndexThenCallOtherOnResultVmExecution() {
     std::cout << "testIndexThenCallOtherOnResultVmExecution OK\n";
 }
 
+// Row 3.9's broader-pass finding: real FluffOS's call_other() accepts an
+// array of objects as its first argument (func_spec.c: "object | string
+// | object *"), a distributed call across every element -- confirmed
+// against the real interpreter-level call_all_other() (interpret.c)
+// directly. AetherMUD's own std/room/exits.c reinitiate() ("obs->move(
+// ROOM_VOID); obs->move(this_object());" where obs = all_inventory())
+// is the real call site that surfaced this driver's own prior gap here.
+
+static void testArrayFormCallOtherCallsEveryElementAndReturnsResultsInOrder() {
+    ObjectVarHarness harness;
+    harness.writeFile("/afco_target.c",
+        "int probe_val;\n"
+        "void set_probe(int x) { probe_val = x; }\n"
+        "int get_probe() { return probe_val; }\n");
+    harness.writeFile("/afco_caller.c",
+        "mixed *probe() {\n"
+        "    object t1; object t2; object t3;\n"
+        "    object *targets;\n"
+        "    t1 = clone_object(\"/afco_target\"); t1->set_probe(10);\n"
+        "    t2 = clone_object(\"/afco_target\"); t2->set_probe(20);\n"
+        "    t3 = clone_object(\"/afco_target\"); t3->set_probe(30);\n"
+        "    targets = ({ t1, t2, t3 });\n"
+        "    return targets->get_probe();\n"
+        "}\n");
+    auto caller = harness.objects.cloneObject("/afco_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert((*arr)->items.size() == 3);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 10);
+    assert(std::get<int64_t>((*arr)->items[1].data) == 20);
+    assert(std::get<int64_t>((*arr)->items[2].data) == 30);
+
+    std::cout << "testArrayFormCallOtherCallsEveryElementAndReturnsResultsInOrder OK\n";
+}
+
+// Real call_all_other() (interpret.c): "if (ob->flags & O_DESTRUCTED)
+// continue;" -- a destructed element is silently skipped, not an error,
+// and its own result slot stays at the array's own default (real
+// allocate_array()'s plain "const0", an ordinary int 0). One bad
+// element must never abort the whole call.
+static void testArrayFormCallOtherSkipsADestructedElementLeavingItsSlotZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/afcd_target.c",
+        "int probe_val;\n"
+        "void set_probe(int x) { probe_val = x; }\n"
+        "int get_probe() { return probe_val; }\n");
+    harness.writeFile("/afcd_caller.c",
+        "mixed *probe() {\n"
+        "    object t1; object t2; object t3;\n"
+        "    object *targets;\n"
+        "    t1 = clone_object(\"/afcd_target\"); t1->set_probe(10);\n"
+        "    t2 = clone_object(\"/afcd_target\"); t2->set_probe(20);\n"
+        "    t3 = clone_object(\"/afcd_target\"); t3->set_probe(30);\n"
+        "    destruct(t2);\n"
+        "    targets = ({ t1, t2, t3 });\n"
+        "    return targets->get_probe();\n"
+        "}\n");
+    auto caller = harness.objects.cloneObject("/afcd_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert((*arr)->items.size() == 3);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 10);
+    assert(std::get<int64_t>((*arr)->items[1].data) == 0);   // destructed -- skipped, default 0
+    assert(std::get<int64_t>((*arr)->items[2].data) == 30);  // still called despite t2's own skip
+
+    std::cout << "testArrayFormCallOtherSkipsADestructedElementLeavingItsSlotZero OK\n";
+}
+
+// Real call_all_other(): "if (apply_low(func, ob, numargs)) *rptr =
+// *sp--;" -- apply_low() returning 0 (function not found on that one
+// object) also just leaves the default 0 in place, the same
+// non-aborting skip as a destructed element, not a distinct error path.
+static void testArrayFormCallOtherSkipsAMissingFunctionOnOneElementLeavingItsSlotZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/afcm_target.c",
+        "int probe_val;\n"
+        "void set_probe(int x) { probe_val = x; }\n"
+        "int get_probe() { return probe_val; }\n");
+    harness.writeFile("/afcm_other.c",
+        "int unrelated() { return 999; }\n");
+    harness.writeFile("/afcm_caller.c",
+        "mixed *probe() {\n"
+        "    object t1; object t2;\n"
+        "    object *targets;\n"
+        "    t1 = clone_object(\"/afcm_target\"); t1->set_probe(10);\n"
+        "    t2 = clone_object(\"/afcm_other\");\n"
+        "    targets = ({ t1, t2 });\n"
+        "    return targets->get_probe();\n"
+        "}\n");
+    auto caller = harness.objects.cloneObject("/afcm_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert((*arr)->items.size() == 2);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 10);
+    assert(std::get<int64_t>((*arr)->items[1].data) == 0);   // /afcm_other has no get_probe()
+
+    std::cout << "testArrayFormCallOtherSkipsAMissingFunctionOnOneElementLeavingItsSlotZero OK\n";
+}
+
+// Real call_all_other()'s own T_STRING branch: "ob = find_object(vptr->
+// u.string); ..." -- a string element resolves the target the same way
+// this efun's own existing scalar-target form already does
+// (VM::findObject(), a compile-if-needed lookup by path), reaching the
+// blueprint object at that path, not a clone.
+static void testArrayFormCallOtherResolvesAStringElementViaFindObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/afcs_target.c",
+        "int probe_val;\n"
+        "void set_probe(int x) { probe_val = x; }\n"
+        "int get_probe() { return probe_val; }\n");
+    harness.writeFile("/afcs_caller.c",
+        "mixed *probe() {\n"
+        "    object t1;\n"
+        "    mixed *targets;\n"
+        "    t1 = clone_object(\"/afcs_target\"); t1->set_probe(42);\n"
+        "    targets = ({ t1, \"/afcs_target\" });\n"
+        "    return targets->get_probe();\n"
+        "}\n");
+    auto caller = harness.objects.cloneObject("/afcs_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert((*arr)->items.size() == 2);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 42);
+    // The blueprint's own probe_val was never set -- real default 0,
+    // confirming the string element genuinely resolved to a real,
+    // distinct object rather than erroring or being skipped outright.
+    assert(std::get<int64_t>((*arr)->items[1].data) == 0);
+
+    std::cout << "testArrayFormCallOtherResolvesAStringElementViaFindObject OK\n";
+}
+
+// The exact real reinitiate() shape row 3.9's own broader pass found
+// erroring (std/room/exits.c: "obs->move(ROOM_VOID);
+// obs->move(this_object());"): the return value is discarded entirely
+// there, only the *side effect* on each array element matters. Mirrors
+// that exactly via move_object(), confirming every element in the array
+// really is moved, not just the first one or none.
+static void testArrayFormCallOtherSideEffectMovesEveryElementLikeRealReinitiate() {
+    ObjectVarHarness harness;
+    harness.writeFile("/afmv_room.c", "void init() {}\n");
+    harness.writeFile("/afmv_item.c",
+        "object probe_env() { return environment(this_object()); }\n"
+        "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/afmv_caller.c",
+        "void reinitiate(object dest) {\n"
+        "    object *obs;\n"
+        "    obs = ({ clone_object(\"/afmv_item\"), clone_object(\"/afmv_item\") });\n"
+        "    obs->go(dest);\n"
+        "}\n");
+
+    auto dest = harness.objects.cloneObject("/afmv_room");
+    auto caller = harness.objects.cloneObject("/afmv_caller");
+    assert(dest != nullptr && caller != nullptr);
+
+    harness.vm.callFunction(caller, "reinitiate", {amlp::Value(dest)});
+
+    assert(dest->inventory().size() == 2);
+    for (const auto& moved : dest->inventory()) {
+        amlp::Value env = harness.vm.callFunction(moved, "probe_env", {});
+        auto* envPtr = std::get_if<std::shared_ptr<amlp::LpcObject>>(&env.data);
+        assert(envPtr != nullptr && *envPtr == dest);
+    }
+
+    std::cout << "testArrayFormCallOtherSideEffectMovesEveryElementLikeRealReinitiate OK\n";
+}
+
 // Found compiling the real secure/SimulEfun/SimulEfun.c (misc.c's own
 // "efun::destruct(ob)", needed there because that same file defines its
 // own simul_efun wrapper named "destruct"): "efun::name(...)" must reach
@@ -24419,6 +24597,11 @@ int main() {
     testStringLiteralMatchingOperatorTextParsesAsLiteralNotOperator();
     testCallOtherWithVariableFunctionNameVmExecution();
     testIndexThenCallOtherOnResultVmExecution();
+    testArrayFormCallOtherCallsEveryElementAndReturnsResultsInOrder();
+    testArrayFormCallOtherSkipsADestructedElementLeavingItsSlotZero();
+    testArrayFormCallOtherSkipsAMissingFunctionOnOneElementLeavingItsSlotZero();
+    testArrayFormCallOtherResolvesAStringElementViaFindObject();
+    testArrayFormCallOtherSideEffectMovesEveryElementLikeRealReinitiate();
     testEfunOverrideBypassesLocalFunctionOfSameName();
     testCompoundAssignOperatorsTokenize();
     testCompoundAssignParsesToCompoundAssignExpr();

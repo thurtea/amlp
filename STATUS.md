@@ -9,6 +9,146 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-25 (a further session, same day): row 3.9's open sprintf trace
+finished. Real root cause found and fixed (a driver-side gap, confirmed
+against real FluffOS source, not the mudlib's own bug), 5 new
+regression tests (756 total, up from 751), live-verified against the
+real driver and the real AetherMUD Rifts mudlib before and after.
+Followed by a broader content pass through that same mudlib: one
+further real driver gap found (not fixed this session), two real
+mudlib-content issues (not this driver's), reported below.**
+
+**The finished trace.** The prior session's own static-only read had
+already ruled out `sprintf()`'s own `%d` strictness and this driver's
+`(int)` cast semantics (both confirmed byte-for-byte faithful to real
+FluffOS by direct citation) and traced `query_next_level_xp()`'s two
+branches (`ADVANCE_D->get_exp()`, an OCC's own `xp_table`) as far as
+static reading allowed, finding every literal genuinely int-typed but
+never confirming the actual runtime value. This session picked it up
+empirically instead of continuing to read: instrumented
+`query_next_level_xp()` directly with real `typeof()` tracing (a
+temporary debug build of `cmds/mortal/_score.c`, reverted afterward,
+confirmed byte-identical via `diff`) and drove a real fresh character
+through this driver's own `Scheduler`/`VM` end to end via a real TCP
+session. Every value along both of the prior session's own suspect
+paths came back genuinely `int` -- closing off `query_next_level_xp()`'s
+own return value as the culprit entirely, the concrete thing the prior
+session's own budget could not settle. The actual non-int value turned
+out to be `show_experience()`'s *other* local: `exp = (int)who->
+query_exp()`, where `std/living.c`'s own `query_exp()` returns
+`player_data["general"]["experience"]` -- a genuinely missing,
+non-column mapping key on a freshly created character whose experience
+has never been written.
+
+**Root cause, confirmed against real FluffOS source directly, not
+inferred:** real `mapping.c`'s own `find_in_mapping()` returns
+`&const0u` on a genuine miss; real `main.c`'s own `const0u.subtype =
+T_UNDEFINED;` confirms `T_UNDEFINED` (`lpc.h`: `#define T_UNDEFINED
+0x4`) is a *subtype* flag on an ordinary `T_NUMBER` svalue, not a
+distinct top-level type. A missing-mapping-key value is therefore
+genuine `T_NUMBER` at the real C level and passes real `sprintf()`'s own
+`%d`/`%o`/`%x`/`%c` type check (`sprintf.c:1180`: `carg->type !=
+T_NUMBER`) without issue, printing as plain `0`. This driver's own
+`OpCode::Index` (`VM.cpp`) already correctly returns its own
+`monostate` (this driver's T_UNDEFINED-equivalent) for a missing,
+non-column `map[key]`, and that value already participates correctly in
+arithmetic (`asArithmeticOperand()`) and string-concatenation
+(`formatNumberForConcat()`) exactly like a real 0 -- both pre-existing,
+already-documented, correct. The actual gap was narrower: `sprintf()`'s
+own `%d`/`%o`/`%x`/`%c` argument-type checks (`EfunTable.cpp`) rejected
+`monostate` outright, the one numeric context in this driver that had
+not been given the same exemption every other one already had.
+
+**The fix.** One new helper, `sprintfNumericArg()` (a local lambda
+inside the same block `sprintfImpl` lives in, captured by it): accepts
+`int64_t` unchanged, treats `monostate` as `0`, used at all four
+affected call sites. `%s`/`%O` untouched (`%O` already accepted every
+kind unconditionally; `%s` correctly still requires a real string). The
+`'*'`/`'.*'` dynamic field-width argument checks were deliberately left
+strict-`int64_t`-only -- zero real evidence anywhere in this mudlib or
+any other vendored corpus of a missing-mapping-key value ever being
+used as a field width, matching this project's own bounded-to-
+real-evidence discipline (row 2.12's own precedent).
+
+**5 new regression tests (756 total, up from 751):** `%d` still throws
+on a genuinely non-numeric argument (a string, mirroring the
+pre-existing `%c` symmetric test); `%d` on a missing mapping key prints
+`0`; `%o`/`%x` on a missing mapping key both print `0`; `%c` on a
+missing mapping key emits a real NUL byte; and the exact real-world
+shape this trace found -- a nested mapping lookup where the outer key
+exists but the inner one does not, cast through a no-op `(int)` into a
+multi-argument `%d` format string matching `show_experience()`'s own
+real one -- reproducing `Level: 1    XP: 0 / 2000 (next level)` exactly.
+The original 751 re-run unchanged (same names, same count) to confirm
+the fix is additive.
+
+**Live-verified against the real running driver** (a new
+`etc/driver_aethermud.cfg` in this main checkout, values taken directly
+from the mudlib's own bundled `secure/cfg/mudos.cfg`, kept in the repo
+as a real, reusable boot config) and the real AetherMUD mudlib
+specifically, before and after the fix: before, the score panel
+silently stopped mid-render at the `EXPERIENCE` header row (driver log
+showing the real `sprintf: %d argument is not an int` failure, caught
+by `finish_creation()`'s own `catch()` for the automatic end-of-chargen
+call, uncaught -- `[net] ... input handling failed` -- for an explicit
+`score` command); after, a full, correct score panel renders every
+time, `Level: 1    XP: 0 / 2000 (next level)` included, zero errors of
+any kind across several fresh characters.
+
+**Broader pass through this Rifts-lineage mudlib's own content, same
+live session, real gaps found and categorized (not exhaustive, per
+instruction not to force full coverage in one sitting):**
+
+- `inventory`/`equipment` real and correct per OCC. One real
+  mudlib-content bug (not this driver's): `equipment`'s own display
+  prints "Right hand: ... (wielded in left hand)", a hand-label
+  mismatch in the mudlib's own formatting code.
+- `skills` lists real, per-OCC granted skills correctly (matching
+  Vagabond's own `base_skills`/`occ_skills` from `daemon/occ.c`). One
+  real gap investigated and categorized as mudlib-content, not this
+  driver's: `%^BOLD%^`/`%^GREEN%^`/`%^RESET%^` colour tags print
+  raw/untranslated even after `colorize`. Traced before categorizing:
+  this mudlib's own colour translation lives entirely inside
+  `std/user.c`'s own `receive_message()`, reached only via message-
+  class-aware output -- `_score.c`/`_skills.c` instead call the raw
+  `write()` efun directly with embedded `%^` tags, and this mudlib's
+  own `catch_tell(str) { receive(str); }` is a bare passthrough with no
+  colour handling at all. Confirmed against real `simulate.c`'s own
+  `do_write()` -> `print_svalue()` -> `tell_object()` -> (real FluffOS,
+  `INTERACTIVE_CATCH_TELL`) `catch_tell()`: the identical real call
+  chain, meaning real FluffOS would show the same raw tags for this
+  exact mudlib code -- a real mudlib-content inconsistency, not a
+  driver gap.
+- **A real driver-side gap found, not fixed this session** (found late
+  in this row's own time budget, matching the "diagnose with rigor, do
+  not force a fix" precedent from the original trace): `std/room/
+  exits.c`'s own `reinitiate()` does `obs->move(ROOM_VOID);
+  obs->move(this_object());` where `obs` is `object *` (an array) --
+  real FluffOS's own `call_other()` signature (`func_spec.c`: `unknown
+  call_other(object | string | object *, string | mixed *, ...)`)
+  documents `object *` as a real, first-class accepted form (a
+  distributed call across every array element), confirmed directly.
+  This driver's own arrow-call dispatch instead throws "call_other:
+  first argument must be an object or a string path" for an array
+  target, surfacing repeatedly in the driver's own log every time a
+  room with inventory resets. Not yet scoped into its own ROADMAP.md
+  row -- a real candidate for a future dedicated session.
+- Combat: `kill`/`attack` exist and respond (a real newbie-safe-zone
+  gate blocked the one attempt made), but no live fight was actually
+  reached within this session's own exploration budget -- not ruled in
+  or out.
+- Zone/race/OCC/alignment chargen (the real ~60-entry Rifts race list,
+  OCC-eligibility branching, all seven real Palladium alignments, the
+  full OCC list) all confirmed real and correctly gated.
+
+Test-account/character/postal state created during this session's own
+live verification deleted afterward (by file timestamp against this
+session's own newly-created `etc/driver_aethermud.cfg`, not `git
+status`, matching row 3.9's own established reasoning for why -- see
+that row's own 2026-08-21 note), matching row 2.9/2.12/2.15's own
+cleanup precedent. Full trace, root cause, fix, and every categorized
+finding are in ROADMAP.md row 3.9 itself now, not just here.
+
 **2026-08-25 (a further session, same day): row 2.5's v1 first slice
 built, exactly the design from the scoping session immediately below
 plus two real corrections found while wiring it together. 4 new

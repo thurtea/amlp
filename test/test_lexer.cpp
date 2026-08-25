@@ -14168,6 +14168,92 @@ static void testSprintfPercentCThrowsOnNonIntArgument() {
     std::cout << "testSprintfPercentCThrowsOnNonIntArgument OK\n";
 }
 
+// Row 3.9's own finished trace (ROADMAP.md): real sprintf.c's own %d/%o/
+// %x/%c type check tests carg->type != T_NUMBER (sprintf.c:1180), and
+// real T_UNDEFINED -- the subtype real find_in_mapping() (mapping.c)
+// stamps on const0u, the value it returns for a missing, non-column
+// mapping[key] lookup -- is a *subtype* of T_NUMBER (lpc.h: "#define
+// T_UNDEFINED 0x4"), confirmed directly against main.c's own
+// "const0u.subtype = T_UNDEFINED;", not a distinct top-level type. So a
+// missing-mapping-key value is real, genuine T_NUMBER at the C level and
+// passes real sprintf()'s own %d/%o/%x/%c check, printing as plain 0 --
+// exactly like it already passes this driver's own existing
+// asArithmeticOperand()/formatNumberForConcat() (VM.cpp) for +/-/* and
+// string+number concatenation. This driver's own monostate is this
+// driver's T_UNDEFINED-equivalent (see those two functions' own
+// comments); before this row's fix, sprintf's own %d/%o/%x/%c instead
+// hard-rejected it exactly like a genuinely non-numeric value
+// (string/array/mapping/object/closure) -- a real driver-side gap, not
+// a mudlib bug, found finishing the trace row 3.9's own prior session
+// left open (AetherMUD's cmds/mortal/_score.c::show_experience(), via
+// std/living.c's own query_exp(): "player_data[\"general\"][\"experience\"]"
+// on a freshly created character whose experience key has never been
+// written).
+static void testSprintfPercentDThrowsOnNonIntArgument() {
+    bool threw = false;
+    try {
+        runProbe("return sprintf(\"%d\", \"x\");\n");
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testSprintfPercentDThrowsOnNonIntArgument OK\n";
+}
+
+static void testSprintfPercentDAcceptsAMissingMappingKeyAndPrintsZero() {
+    amlp::Value result = runProbe(
+        "mapping m = ([]);\n"
+        "return sprintf(\"XP: %d\", m[\"experience\"]);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "XP: 0");
+    std::cout << "testSprintfPercentDAcceptsAMissingMappingKeyAndPrintsZero OK\n";
+}
+
+static void testSprintfPercentOAndPercentXAcceptAMissingMappingKeyAndPrintZero() {
+    amlp::Value oResult = runProbe(
+        "mapping m = ([]);\n"
+        "return sprintf(\"%o\", m[\"missing\"]);\n");
+    assert(std::holds_alternative<std::string>(oResult.data));
+    assert(std::get<std::string>(oResult.data) == "0");
+
+    amlp::Value xResult = runProbe(
+        "mapping m = ([]);\n"
+        "return sprintf(\"%x\", m[\"missing\"]);\n");
+    assert(std::holds_alternative<std::string>(xResult.data));
+    assert(std::get<std::string>(xResult.data) == "0");
+    std::cout << "testSprintfPercentOAndPercentXAcceptAMissingMappingKeyAndPrintZero OK\n";
+}
+
+static void testSprintfPercentCAcceptsAMissingMappingKeyAsNulByte() {
+    amlp::Value result = runProbe(
+        "mapping m = ([]);\n"
+        "return sprintf(\"%c\", m[\"missing\"]);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    std::string expected(1, '\0');
+    assert(std::get<std::string>(result.data) == expected);
+    std::cout << "testSprintfPercentCAcceptsAMissingMappingKeyAsNulByte OK\n";
+}
+
+// The exact real-world shape row 3.9's trace actually found: a nested
+// mapping lookup (query_exp()'s own "player_data[\"general\"][\"experience\"]")
+// where the *outer* key is present (a real, populated sub-mapping) but
+// the *inner* key was never written -- the inner Index alone yields the
+// missing-key monostate, which then flows through a same-name (int)
+// cast (already confirmed a no-op at this driver's own codegen,
+// Parser.cpp:803-811) into %d untouched, matching the real driver's own
+// declared-type-is-not-runtime-enforced semantics throughout.
+static void testSprintfPercentDAcceptsANestedMissingMappingKeyLikeARealCharacterSheet() {
+    amlp::Value result = runProbe(
+        "mapping player_data = ([]);\n"
+        "int exp;\n"
+        "player_data[\"general\"] = ([\"hp\": 10]);\n"
+        "exp = (int)player_data[\"general\"][\"experience\"];\n"
+        "return sprintf(\"Level: %d    XP: %d / %d (next level)\", 1, exp, 2000);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "Level: 1    XP: 0 / 2000 (next level)");
+    std::cout << "testSprintfPercentDAcceptsANestedMissingMappingKeyLikeARealCharacterSheet OK\n";
+}
+
 // sprintf field-width modifiers ("-" left-adjust, leading-zero pad) --
 // confirmed against real sprintf.c's own documented modifier set.
 // Surfaced live: domains/Praxis/setter.c's own show_rolled_attributes(),
@@ -24706,6 +24792,11 @@ int main() {
     testImplodeOnEmptyArrayReturnsEmptyString();
     testSprintfPercentCEmitsSingleCharacterFromIntArgument();
     testSprintfPercentCThrowsOnNonIntArgument();
+    testSprintfPercentDThrowsOnNonIntArgument();
+    testSprintfPercentDAcceptsAMissingMappingKeyAndPrintsZero();
+    testSprintfPercentOAndPercentXAcceptAMissingMappingKeyAndPrintZero();
+    testSprintfPercentCAcceptsAMissingMappingKeyAsNulByte();
+    testSprintfPercentDAcceptsANestedMissingMappingKeyLikeARealCharacterSheet();
     testSprintfLeftJustifiedFieldWidthPadsWithSpaces();
     testSprintfRightJustifiedFieldWidthPadsWithSpaces();
     testSprintfZeroPaddedFieldWidthPadsWithZeros();

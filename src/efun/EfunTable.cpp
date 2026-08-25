@@ -2473,7 +2473,43 @@ void registerCoreEfuns() {
     // and capital "%X" are all not implemented; throws rather than
     // silently mishandling anything else, matching this codebase's
     // existing convention for other partially-implemented efuns.
-    auto sprintfImpl = [](VM&, std::vector<Value>& args) -> Value {
+    // sprintf()'s own %d/%o/%x/%c: real sprintf.c's type check for every
+    // one of these (fluffos-2.9-ds2.08/sprintf.c:1180, "carg->type !=
+    // T_NUMBER") tests the real svalue's *type tag*, not a separate "is
+    // this genuinely assigned" bit -- and real T_UNDEFINED (lpc.h:
+    // "#define T_UNDEFINED 0x4 /* undefinedp() returns true */") is a
+    // *subtype* flag on an ordinary T_NUMBER svalue, confirmed directly
+    // against main.c's own "const0u.subtype = T_UNDEFINED;", not a
+    // distinct top-level type -- the exact same const0u a missing,
+    // non-column mapping[key] lookup returns (mapping.c's own
+    // find_in_mapping(): "return &const0u;"). So a missing-mapping-key
+    // value passes real sprintf()'s own %d/%o/%x/%c check and prints as
+    // plain 0, the same way it already passes this driver's own
+    // asArithmeticOperand() (VM.cpp) for +/-/* and
+    // formatNumberForConcat() for string+number concatenation -- this
+    // driver's own monostate (its own T_UNDEFINED-equivalent, see those
+    // two functions' own comments) needs the identical exemption here,
+    // not the hard rejection every genuinely non-numeric kind (string/
+    // array/mapping/object/closure) still correctly gets. Found live:
+    // row 3.9's own "AetherMUD" Rifts mudlib boot, std/living.c's own
+    // query_exp() ("return player_data[\"general\"][\"experience\"];")
+    // on a freshly created character whose experience key has never
+    // been written, reaching cmds/mortal/_score.c's own
+    // show_experience() -- see ROADMAP.md row 3.9's own dated note for
+    // the full trace.
+    auto sprintfNumericArg = [](const Value& v, int64_t& out) -> bool {
+        if (auto* i = std::get_if<int64_t>(&v.data)) {
+            out = *i;
+            return true;
+        }
+        if (std::holds_alternative<std::monostate>(v.data)) {
+            out = 0;
+            return true;
+        }
+        return false;
+    };
+
+    auto sprintfImpl = [sprintfNumericArg](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("sprintf: expected a string format argument");
         }
@@ -2608,22 +2644,24 @@ void registerCoreEfuns() {
                 }
                 piece = std::get<std::string>(argVal.data);
             } else if (spec == 'd') {
-                if (!std::holds_alternative<int64_t>(argVal.data)) {
+                int64_t n;
+                if (!sprintfNumericArg(argVal, n)) {
                     throw LpcRuntimeError("sprintf: %d argument is not an int");
                 }
-                piece = std::to_string(std::get<int64_t>(argVal.data));
+                piece = std::to_string(n);
             } else if (spec == 'o' || spec == 'x') {
                 // sprintf.c's own INFO_T_OCT/INFO_T_HEX: the integer arg
                 // printed in octal/hex, plain C conversion, no leading
                 // "0"/"0x" prefix added (real sprintf.c does not add one
                 // either -- confirmed by its own doc comment describing
                 // these as the plain "printed in octal"/"printed in hex").
-                if (!std::holds_alternative<int64_t>(argVal.data)) {
+                int64_t n;
+                if (!sprintfNumericArg(argVal, n)) {
                     throw LpcRuntimeError(std::string("sprintf: %") + spec + " argument is not an int");
                 }
                 char buf[32];
                 std::snprintf(buf, sizeof(buf), spec == 'o' ? "%llo" : "%llx",
-                              static_cast<long long>(std::get<int64_t>(argVal.data)));
+                              static_cast<long long>(n));
                 piece = buf;
             } else if (spec == 'c') {
                 // sprintf.c's own INFO_T_CHAR handling (fluffos-2.9-ds2.08/
@@ -2634,10 +2672,11 @@ void registerCoreEfuns() {
                 // daemon/terminal.c's own ANSI(p)/ESC(p) macros:
                 // sprintf("%c["+(p)+"m", 27), which builds a raw ESC
                 // (ASCII 27) byte ahead of an ANSI escape sequence.
-                if (!std::holds_alternative<int64_t>(argVal.data)) {
+                int64_t n;
+                if (!sprintfNumericArg(argVal, n)) {
                     throw LpcRuntimeError("sprintf: %c argument is not an int");
                 }
-                piece = std::string(1, static_cast<char>(std::get<int64_t>(argVal.data)));
+                piece = std::string(1, static_cast<char>(n));
                 haveWidth = false; // real sprintf.c: field width is not meaningful for %c
             } else if (spec == 'O') {
                 // Real sprintf.c: accepts any value kind (no type check

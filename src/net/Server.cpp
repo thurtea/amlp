@@ -497,40 +497,76 @@ void Server::handleConnection(Connection& conn) {
     if (obj && !lines.empty()) {
         OutputContext::set(&conn);
         for (const auto& line : lines) {
-            // Same reasoning as onNewConnection()'s own try/catch: a runtime
-            // error handling one player's input line must close only that
-            // player's connection, not crash the driver out from under
-            // everyone else currently connected.
+            // Real current FluffOS's own per-command recovery boundary
+            // (packages/core/add_action.cc's safe_parse_command(), and
+            // comm.cc's own safe_apply(APPLY_PROCESS_INPUT, ...) call
+            // immediately above it in process_input()): every risky call
+            // in the real per-line dispatch path is individually wrapped
+            // in a fresh error_context_t (save_context()/try/catch(const
+            // char*)/restore_context()/pop_context()), so an uncaught
+            // error aborts only the one command running inside it -- the
+            // player sees an error message (real _error_handler(),
+            // simulate.cc: full trace for a wizard, DEFAULT_ERROR_MESSAGE
+            // otherwise) and the connection, and the rest of that
+            // player's already-buffered input, both continue normally.
+            // (Real FluffOS 2.9 ds2.08 achieved the same outcome, but
+            // only as a side effect of one single top-level SETJMP set up
+            // once in backend() before its own command loop -- current
+            // FluffOS's per-call safe_apply()/safe_parse_command() wrapping
+            // is the more explicit, load-bearing version of the same
+            // guarantee, not a behavior change a player would observe.)
+            //
+            // This driver's own dispatchLine() is the equivalent of that
+            // entire process_input()/parse_command() chain collapsed into
+            // one call, so one try/catch around it here is the matching
+            // boundary. Unlike real FluffOS's SETJMP (which cannot run
+            // C++ destructors and needs restore_context() to manually
+            // reset sp/csp/cgsp by hand), this driver's own VM state
+            // (callStack_, objectChangeStack_, originStack_, commandGiver
+            // stack, and run()'s own per-call locals/operand stack) is
+            // already exception-safe by construction -- every one of
+            // those is popped by an RAII guard's destructor (see
+            // ObjectFrameGuard/CommandGiverGuard/OriginGuard in VM.cpp,
+            // and run()'s own "RAII rather than an explicit pop" comment
+            // on objectFrameGuard), so ordinary C++ stack unwinding
+            // already does restore_context()'s whole job for free, with
+            // no separate reset step needed here at all. evalCost_ needs
+            // no reset either: it is a plain counter, not a stack, and
+            // dispatchLine() already unconditionally resets it (real
+            // process_user_command()'s own "eval_cost reset to 0 once at
+            // the start of each top-level dispatch") the moment the next
+            // line runs, whether or not this one threw.
             try {
                 dispatchLine(vm_, conn, line);
             } catch (const std::exception& e) {
                 std::cerr << "[net] connection fd=" << conn.fd()
-                           << " input handling failed: " << e.what() << "\n";
-                // markClosed(), not the full close(): a real bug, found
-                // live investigating a flagged crash risk -- calling the
-                // full close() here cleared boundObject_ immediately, so
-                // fireNetDeadIfLinkDead() below (which still runs
-                // unconditionally after this loop) always saw a null
-                // object and silently never fired this connection's own
-                // net_dead() apply. The ordinary peer-EOF/read-error path
-                // (Connection::pollLines()) never had this bug -- it only
-                // ever sets the lightweight "closed" flag itself, the
-                // same one markClosed() now exposes here, leaving
-                // boundObject() valid long enough for net_dead() to
-                // actually run before the real teardown (fd close,
-                // InteractiveRegistry removal, snoop unlink) happens a
-                // moment later via ~Connection() once Server::pollOnce()'s
-                // own closed()-connections pruning erases the last
-                // owning shared_ptr. Concretely, this used to mean a
-                // player whose current command threw an uncaught error
-                // never got set_heart_beat(0) run for them (real
-                // net_dead(), user.c) -- their own object stayed
-                // registered for a heart_beat tick that never stops
-                // firing for the rest of the process's lifetime, a real,
-                // permanent per-incident resource leak, not merely a
-                // missed notification.
-                conn.markClosed();
-                break;
+                           << " input handling failed (command isolated, "
+                              "connection stays open): " << e.what() << "\n";
+                // Tell the player something happened -- matching real
+                // _error_handler()'s own guarantee that command_giver
+                // always sees *some* message, not silence. This driver has
+                // no wizard/mortal distinction to gate on (unlike real
+                // FluffOS's O_IS_WIZARD check), so every player gets the
+                // same generic message; the real exception detail goes to
+                // the driver's own log above instead, not to the player,
+                // matching real DEFAULT_ERROR_MESSAGE's own intent of not
+                // leaking internal detail to an ordinary player. Wrapped in
+                // its own try/catch: deliverToConnection() can itself
+                // throw (a snoop relay's own receive_snoop() erroring), and
+                // an error while reporting an error must not undo this
+                // fix by escaping uncaught back into the loop below.
+                try {
+                    deliverToConnection(vm_, &conn,
+                        "Error while processing your command.\n");
+                } catch (const std::exception& e2) {
+                    std::cerr << "[net] connection fd=" << conn.fd()
+                               << " error-report delivery itself failed: "
+                               << e2.what() << "\n";
+                }
+                // No markClosed(): this player's connection, and the rest
+                // of their already-buffered input this same poll, both
+                // continue -- only the one command that threw is aborted.
+                continue;
             }
         }
         OutputContext::set(nullptr);

@@ -9,6 +9,183 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): the connection-isolation gap
+row 3.9's own combat pass found and deferred (an uncaught command error
+closes the whole connection instead of isolating just that command) is
+now fixed. Real semantics confirmed from source on both sides of the
+2.9-vs-current line before writing any code, not assumed; the fix
+itself was small and bounded, built the same session. 767 tests passing
+(up from 764), live-verified against the real running driver and the
+real bundled mudlib.**
+
+**Real FluffOS recovery semantics, confirmed from source, both sides.**
+Vendored 2.9 ds2.08 reference (`temp/reference/fluffos-2.9-ds2.08/`):
+`backend()` (`backend.c:113-116`) calls `save_context(&econ)` and
+`SETJMP(econ.context)` exactly ONCE, before its own `while(1)` command
+loop, establishing a single global recovery point for the entire process
+lifetime -- `process_user_command()` (`comm.c:1829`) itself has no
+`SETJMP` of its own, and neither does `parse_command()`
+(`add_action.c:425`), which calls `apply()` on the matched verb function
+directly. Per-command isolation in 2.9 is therefore an implicit side
+effect of that single top-level context, not a dedicated mechanism: an
+uncaught `error()` (`simulate.c`'s `error_handler()`) always `LONGJMP`s
+back to the same one `econ`, `restore_context()` (`interpret.c:5741`)
+manually resets the VM's own `sp`/`csp`/`cgsp` pointers back to their
+saved position and frees any leftover `ref_t` references, and the outer
+`while(1)` loop simply continues -- the connection/socket/`interactive_t`
+are never touched by this path at all. `error_handler()` itself
+(`simulate.c:1676-1800`) always gives the player *something*:
+`add_message_with_location()` shows the full trace to a wizard
+(`O_IS_WIZARD`), or the config-driven `DEFAULT_ERROR_MESSAGE` otherwise;
+a `current_heart_beat` object gets its heart beat disabled if the error
+fired during one, specifically to stop an infinite per-tick error loop;
+`too_deep_error`/`max_eval_error` are reset so the *next* command is not
+permanently stuck. One real, confirmed-live piece of defensive ordering
+worth naming: `call_function_interactive()` (`comm.c:2073-2191`, the
+`input_to()` callback dispatcher) clears `i->input_to = 0` BEFORE
+invoking the callback, not after -- so an uncaught error mid-callback
+can never leave a stale/dangling `input_to` registration, by
+construction, not by any special-casing in the error path itself.
+
+**Confirmed changed since 2.9: current FluffOS moved from `SETJMP`/
+`LONGJMP` to real C++ exceptions, and from one implicit global boundary
+to explicit, dedicated per-call recovery.** Fetched directly from
+`github.com/fluffos/fluffos` (`master`, via the GitHub API tree listing
+plus raw file fetches, not summarized/guessed): `save_context`/
+`restore_context`/`pop_context`/`error_context_t` all still exist with
+the same names and the same job (`vm/internal/base/interpret.cc:5553-
+5607`), but `error_handler()` (`vm/internal/simulate.cc:2369-2489`) now
+ends every path with `throw("error handler")`/`throw("error handler
+error")` instead of `LONGJMP`, and the real per-command boundary is no
+longer one global `SETJMP` in `backend()` (confirmed: current
+`backend.cc` has zero `SETJMP`/`error_context`/`try`/`catch` of its own
+at all) -- it is now `safe_parse_command()` (`packages/core/
+add_action.cc:488-497`, a fresh `error_context_t econ`, `save_context(&econ)`,
+`try { parse_command(str, ob); } catch (const char*) { restore_context(&econ);
+} pop_context(&econ);`), called from `process_input()` (`comm.cc:612-644`)
+in place of 2.9's bare `parse_command()` call. `process_input()`'s own
+mudlib-facing `APPLY_PROCESS_INPUT` apply is likewise now wrapped in
+`safe_apply()` (`vm/internal/apply.cc:398-422`, the identical `save_context`/
+`try`/`catch(const char*)`/`restore_context`/`pop_context` shape) rather
+than a bare `apply()` -- current FluffOS wraps every individual risky
+call explicitly and separately, not one call relying on an outer
+boundary set up elsewhere. `restore_context()`'s own unwind logic is
+functionally the same as 2.9's, plus one real hardening: a guard against
+`sp` already being below the saved mark (issue #1014, a broken-stack-
+accounting bug 2.9's own unconditional `pop_n_elems(sp - econ->save_sp)`
+had no defense against). `error_handler()`'s own player-facing message
+logic (`_error_handler()`, `vm/internal/simulate.cc:2324-2364`) is
+otherwise unchanged from 2.9's: same wizard/`DEFAULT_ERROR_MESSAGE`
+split, same heart-beat-disable-on-error behavior. `input_to`'s own
+clear-before-invoke ordering is preserved identically in current
+`comm.cc`. **Net effect for this driver's own purposes: real current
+FluffOS's own error recovery is functionally the same outcome as 2.9's
+(one command's error never closes the connection), but the mechanism it
+now uses -- real C++ exceptions around individually-wrapped calls -- is
+the exact idiom this driver already uses everywhere else for
+`LpcRuntimeError`, not something foreign to port in.**
+
+**Why this driver's own current behavior diverges: a deliberate
+simplification revisited, not a structural limitation.** `Server::
+dispatchLine()` (`Server.cpp:237`, this driver's own single-function
+collapse of real `process_input()`/`parse_command()`) had zero internal
+`try`/`catch` of its own; the ONLY catch in the whole per-command path
+was `Server::handleConnection()`'s own per-line loop (`Server.cpp:497-
+537`, before this fix), which on any `std::exception` called
+`conn.markClosed()` and `break`, closing the connection and dropping any
+further already-buffered lines in that same poll batch. Confirmed this
+was never structural: this driver's own VM (`VM.cpp`) already uses RAII
+guards throughout (`ObjectFrameGuard`, `CommandGiverGuard`, `OriginGuard`,
+and `run()`'s own comment: "RAII rather than an explicit pop before
+every return: run() has several return points plus exception unwinding
+... a destructor is the only pop that reliably covers all of them") --
+meaning this driver's own equivalent of real `restore_context()`'s whole
+job (unwinding `sp`/`csp`/`cgsp` back to a clean state) is already
+handled automatically by ordinary C++ stack unwinding on every single
+call, everywhere, not just at one boundary. `evalCost_` needs no reset
+either: a plain counter, already unconditionally reset at the top of
+every `dispatchLine()` call (`vm.resetEvalCost()`) regardless of whether
+the previous call threw. There was therefore no `restore_context()`-
+shaped gap to fill at all -- the only real gap was the per-line catch's
+own choice to treat any uncaught error as connection-fatal, an early
+simplification that was never revisited once this driver's exception-
+safety guarantees were solid elsewhere in the codebase.
+
+**The fix.** `Server::handleConnection()`'s per-line catch
+(`Server.cpp`) no longer calls `conn.markClosed()`: it logs the real
+exception detail to the driver's own log (unchanged), reports a generic
+message to the player via `deliverToConnection()` (itself wrapped in its
+own nested `try`/`catch`, since a snoop relay's own `receive_snoop()`
+apply could itself throw -- an error while reporting an error must not
+undo the fix by escaping uncaught), then `continue`s to the next
+already-buffered line in this same poll batch instead of `break`ing out
+of the loop. This driver has no wizard/mortal distinction to gate a
+fuller message on the way real `_error_handler()` does (`privs()` only,
+no full uid/euid hierarchy, per `COMPARISON.md`'s own accounting), so
+every player gets the same generic message; the real exception detail
+stays server-side, matching real `DEFAULT_ERROR_MESSAGE`'s own intent of
+not leaking internal detail to an ordinary connection. A real, adjacent
+config-driven `DEFAULT_ERROR_MESSAGE`-equivalent (configurable per-mud
+rather than hardcoded) is a genuine, separate, smaller future increment,
+named here rather than silently built in scope-creeping fashion this
+session.
+
+**3 new regression tests (767 total, up from 764):**
+`testDispatchErrorInOneCommandDoesNotCloseTheConnection` (one command's
+uncaught error leaves `conn.closed()` false); `testDispatchErrorInOne
+CommandReportsAGenericMessageToThePlayer` (the player receives exactly
+the generic message over the real socket, not raw internal exception
+text); `testCommandAfterADispatchErrorStillRunsNormallyProvingVmState
+NotCorrupted` (a second command dispatched immediately after the one
+that threw still runs its own side effect correctly, proving this
+driver's RAII-based VM state was never corrupted by the escaped
+exception). One pre-existing test's own comment was stale after this
+fix and corrected rather than left describing removed behavior:
+`testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose`, renamed
+`testFireNetDeadFiresForAnyMarkClosedConnectionWithValidBoundObject`,
+narrowed to describe what it actually still proves (`fireNetDeadIfLink
+Dead()`'s own correctness for any `markClosed()` connection with a valid
+`boundObject()`, independent of why it was closed) rather than
+`handleConnection()`'s own now-outdated old sequence. The original 764
+re-run unchanged.
+
+**Live-verified against the real running driver and the real bundled
+`mudlib/`** (`./build/amlp etc/driver.cfg`, a real Python TCP client): a
+temporary `boomtest` debug command added to `mudlib/clone/user.c`
+(`add_action("boomtest", "boomtest")` in `setup()`, calling a genuinely
+undefined efun), reverted via `git checkout` immediately after,
+confirmed clean via `git diff --stat`. A fresh account/character created
+and walked through the real gatehouse login flow over a real TCP
+connection: `say hello before` (control, before the error) worked
+normally; `boomtest` produced exactly `"Error while processing your
+command.\n"` back to the player, and the driver's own log showed the
+real exception detail (`connection fd=4 input handling failed (command
+isolated, connection stays open): /clone/user::boomtest(): undefined
+function or efun: totally_undefined_efun_for_live_verification_only`);
+the connection stayed open and fully functional afterward -- `say hello
+after` and `who` both worked normally, `who` correctly still listing the
+same character as connected with idle 0 -- and the driver process itself
+was confirmed still running throughout via `ps`. Test-account/character
+files created during verification (`boomtestverify`/`boomtestverify2`/
+`boomtestverify3`, `boomchar2`/`boomchar3`) deleted afterward, matching
+this project's own established cleanup precedent.
+
+**Out of scope, deliberately:** a configurable `DEFAULT_ERROR_MESSAGE`-
+equivalent (a real, separate, smaller future increment, see above); a
+wizard/mortal message-detail distinction (this driver has no such flag
+today, `COMPARISON.md`'s own accounting); per-apply-granular recovery
+matching current FluffOS's own `safe_apply()`-everywhere shape exactly
+(this driver's single per-line `try`/`catch` around the whole
+`dispatchLine()` call already produces the same observable outcome --
+one command's error never escapes past that command -- with less
+surface area to get wrong, and was preferred for that reason, not
+because the finer-grained shape was rejected on its merits).
+
+**Documentation updated to match:** `ROADMAP.md` row 3.9's own cell
+(where this gap was originally scoped and deferred) appended with the
+fix, the full citation trail above, and the live-verification account,
+rather than rewritten.
+
 **2026-08-27: first pass at modernizing AMLP against *current* FluffOS
 specifically, not just the vendored 2.9 ds2.08 reference this project
 otherwise cites throughout -- research first, then one bounded

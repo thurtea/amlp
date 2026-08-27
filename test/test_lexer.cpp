@@ -16,6 +16,7 @@
 #include "amlp/net/Connection.hpp"
 #include "amlp/net/OutputContext.hpp"
 #include "amlp/net/Server.hpp"
+#include "amlp/net/SnoopRelay.hpp"
 #include "amlp/net/InteractiveRegistry.hpp"
 #include "amlp/net/SocketRegistry.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
@@ -9202,32 +9203,29 @@ static void testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose() {
     std::cout << "testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose OK\n";
 }
 
-// Real bug, found live investigating a flagged crash risk (not an actual
-// process crash on further investigation -- see this session's own
-// STATUS.md entry -- but a real, confirmed correctness gap):
-// Server::handleConnection()'s own per-line dispatch-error catch used to
-// call the *full* Connection::close() directly, which -- exactly like
-// testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose above
-// confirms is the *correct*, intentional behavior for an explicit
-// destruct()-driven close -- clears boundObject() immediately, so
-// fireNetDeadIfLinkDead() (called unconditionally right after, in the
-// real handleConnection()) always saw a null object and net_dead() never
-// fired. Unlike the destruct() case, this path is *not* supposed to skip
-// net_dead(): a player's own connection dying because their current
-// command threw an uncaught error is exactly the same real "this
-// interactive session just ended" event real FluffOS's remove_interactive()
-// already fires net_dead() for on ordinary link death (the peer-EOF case
-// above) -- there was never a real semantic reason for the error path to
-// behave differently, just an implementation bug (calling the wrong of
-// the two teardown methods). Fixed via Connection::markClosed() (the same
-// lightweight "just the flag" shape Connection::pollLines()'s own EOF
-// branch already used internally), reproducing handleConnection()'s own
-// exact fixed sequence manually here (dispatchLine() throws -> caught ->
-// markClosed() -> fireNetDeadIfLinkDead()), the same public-static-method
-// test seam every other test in this cluster already uses since
-// handleConnection() itself is private and requires a real listening
-// socket.
-static void testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose() {
+// Historical note (this test used to exercise a real bug, since fixed
+// the other way): Server::handleConnection()'s own per-line dispatch-error
+// catch briefly called the *full* Connection::close() directly on an
+// uncaught error, which cleared boundObject() before fireNetDeadIfLinkDead()
+// (called unconditionally right after, in the real handleConnection()) got
+// a chance to use it, so net_dead() never fired. That was fixed via
+// Connection::markClosed() at the time. A later session found the real
+// underlying question was wrong: real current FluffOS's own per-command
+// recovery (packages/core/add_action.cc's safe_parse_command(), comm.cc's
+// own safe_apply(APPLY_PROCESS_INPUT, ...)) never closes the connection
+// over an uncaught command error at all -- only the one command aborts,
+// the session continues, matching real _error_handler()'s own behavior
+// exactly (see Server.cpp's own current dispatch-error catch for the full
+// citation and the real fix). Server::handleConnection() no longer calls
+// markClosed() on this path for that reason -- this test is kept, narrowed
+// to what it actually still proves: fireNetDeadIfLinkDead() correctly
+// fires net_dead() for *any* markClosed() connection whose boundObject()
+// is still valid, regardless of why it was closed (the real, still-live
+// invariant testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose's
+// own sibling case above depends on), reproduced here by marking the
+// connection closed directly rather than by simulating handleConnection()'s
+// own (no longer accurate) old sequence.
+static void testFireNetDeadFiresForAnyMarkClosedConnectionWithValidBoundObject() {
     ObjectVarHarness harness;
     harness.writeFile("/nd_dispatch_error.c",
         "int ran;\n"
@@ -9249,10 +9247,13 @@ static void testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose() {
     conn.setPendingInputTo(target, "boom", {});
 
     amlp::OutputContext::set(&conn);
-    // Reproduces Server::handleConnection()'s own real fixed sequence by
-    // hand, the same public-static-method seam every other test in this
-    // cluster already uses (handleConnection() itself is private and
-    // needs a real listening socket):
+    // dispatchLine() throwing is just a convenient way to get a real
+    // uncaught exception here; the point under test is markClosed() +
+    // fireNetDeadIfLinkDead() below, not dispatchLine() itself -- the
+    // dispatch-error catch's own real, current behavior (connection stays
+    // open, no markClosed()) is covered separately, see
+    // testDispatchErrorInOneCommandDoesNotCloseTheConnection and its
+    // siblings just below.
     bool caught = false;
     try {
         amlp::Server::dispatchLine(harness.vm, conn, "anything");
@@ -9264,7 +9265,8 @@ static void testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose() {
     amlp::Server::fireNetDeadIfLinkDead(harness.vm, conn);
     amlp::OutputContext::set(nullptr);
 
-    // The real fix: net_dead() actually fired this time, unlike
+    // net_dead() fires because boundObject() was still valid when
+    // fireNetDeadIfLinkDead() ran, unlike
     // testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose's own
     // (correct, unchanged) explicit-close case just above.
     amlp::Value ranVal = target->variables()[0];
@@ -9273,7 +9275,136 @@ static void testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose() {
     assert(conn.closed());
 
     ::close(fds[1]);
-    std::cout << "testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose OK\n";
+    std::cout << "testFireNetDeadFiresForAnyMarkClosedConnectionWithValidBoundObject OK\n";
+}
+
+// ---------------------------------------------------------------------
+// Server::handleConnection()'s real, current per-line dispatch-error
+// catch: one command's uncaught error is isolated to that command,
+// matching real current FluffOS's own safe_parse_command()/safe_apply()
+// per-command recovery boundary (packages/core/add_action.cc,
+// vm/internal/apply.cc) -- the connection is never closed and the rest
+// of that same player's already-buffered input still runs. This
+// replaced the older markClosed()-then-fireNetDeadIfLinkDead() sequence
+// testFireNetDeadFiresForAnyMarkClosedConnectionWithValidBoundObject
+// above used to describe as handleConnection()'s own real behavior; see
+// Server.cpp's own current dispatch-error catch for the full citation.
+//
+// handleConnection() itself is private and needs a real listening
+// socket, so these reproduce its own real per-line loop by hand, the
+// same public-static-method test seam every other test in this cluster
+// already uses (dispatchLine() throws -> caught -> report to the player
+// -> continue, no markClosed()).
+// ---------------------------------------------------------------------
+
+static void testDispatchErrorInOneCommandDoesNotCloseTheConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dispatch_err1.c",
+        "void boom() { totally_undefined_efun_for_this_test(); }\n");
+    auto target = harness.objects.cloneObject("/dispatch_err1");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(target);
+    conn.setPendingInputTo(target, "boom", {});
+
+    amlp::OutputContext::set(&conn);
+    bool caught = false;
+    try {
+        amlp::Server::dispatchLine(harness.vm, conn, "anything");
+    } catch (const std::exception&) {
+        caught = true;
+        // Real handleConnection()'s own current catch: report to the
+        // player, no markClosed(), continue to the next buffered line.
+        amlp::deliverToConnection(harness.vm, &conn, "Error while processing your command.\n");
+    }
+    amlp::OutputContext::set(nullptr);
+
+    assert(caught); // boom()'s own undefined-efun call really did throw uncaught
+    assert(!conn.closed()); // the real fix: the connection stays open
+
+    ::close(fds[1]);
+    std::cout << "testDispatchErrorInOneCommandDoesNotCloseTheConnection OK\n";
+}
+
+static void testDispatchErrorInOneCommandReportsAGenericMessageToThePlayer() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dispatch_err2.c",
+        "void boom() { totally_undefined_efun_for_this_test(); }\n");
+    auto target = harness.objects.cloneObject("/dispatch_err2");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(target);
+    conn.setPendingInputTo(target, "boom", {});
+
+    amlp::OutputContext::set(&conn);
+    try {
+        amlp::Server::dispatchLine(harness.vm, conn, "anything");
+    } catch (const std::exception&) {
+        amlp::deliverToConnection(harness.vm, &conn, "Error while processing your command.\n");
+    }
+    amlp::OutputContext::set(nullptr);
+
+    // Player-facing message is generic, not the raw internal exception
+    // text -- matching real DEFAULT_ERROR_MESSAGE's own intent of not
+    // leaking driver-internal detail to an ordinary connection (this
+    // driver has no wizard/mortal distinction to gate a fuller message
+    // on the way real _error_handler() does).
+    char buf[256];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    std::string received(buf, static_cast<size_t>(n));
+    assert(received == "Error while processing your command.\n");
+
+    ::close(fds[1]);
+    std::cout << "testDispatchErrorInOneCommandReportsAGenericMessageToThePlayer OK\n";
+}
+
+static void testCommandAfterADispatchErrorStillRunsNormallyProvingVmStateNotCorrupted() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dispatch_err3.c",
+        "int ran;\n"
+        "void boom() { totally_undefined_efun_for_this_test(); }\n"
+        "void ok() { ran = 1; }\n");
+    auto target = harness.objects.cloneObject("/dispatch_err3");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(target);
+
+    // Reproduces handleConnection()'s own real per-line loop over two
+    // already-buffered lines, by hand: the first throws, the second must
+    // still run normally afterward -- proving both that the connection
+    // survives and that this driver's own exception-safe VM state (RAII
+    // guards throughout VM.cpp/VM.cpp's run(), see Server.cpp's own
+    // dispatch-error catch comment for the full citation) needs no
+    // separate reset step the way real FluffOS's restore_context() does.
+    amlp::OutputContext::set(&conn);
+    for (const std::string& line : {std::string("first"), std::string("second")}) {
+        conn.setPendingInputTo(target, line == "first" ? "boom" : "ok", {});
+        try {
+            amlp::Server::dispatchLine(harness.vm, conn, "anything");
+        } catch (const std::exception&) {
+            amlp::deliverToConnection(harness.vm, &conn, "Error while processing your command.\n");
+            continue;
+        }
+    }
+    amlp::OutputContext::set(nullptr);
+
+    assert(!conn.closed());
+    amlp::Value ranVal = target->variables()[0];
+    assert(std::holds_alternative<int64_t>(ranVal.data));
+    assert(std::get<int64_t>(ranVal.data) == 1); // ok() ran normally after boom() threw
+
+    ::close(fds[1]);
+    std::cout << "testCommandAfterADispatchErrorStillRunsNormallyProvingVmStateNotCorrupted OK\n";
 }
 
 // ---------------------------------------------------------------------
@@ -24879,7 +25010,10 @@ int main() {
     testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection();
     testFireNetDeadIfLinkDeadIsNoOpWhileConnectionStillOpen();
     testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose();
-    testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose();
+    testFireNetDeadFiresForAnyMarkClosedConnectionWithValidBoundObject();
+    testDispatchErrorInOneCommandDoesNotCloseTheConnection();
+    testDispatchErrorInOneCommandReportsAGenericMessageToThePlayer();
+    testCommandAfterADispatchErrorStillRunsNormallyProvingVmStateNotCorrupted();
     testDestructEfunClosesTargetObjectsOwnConnectionNotCallersConnection();
     testDestructEfunStillClosesOwnConnectionWhenSelfDestructing();
     testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection();

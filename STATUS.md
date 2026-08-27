@@ -9,6 +9,201 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): the row 2.25 method
+(cross-check an already-partially-implemented efun category's real
+current `.spec` file against this driver's own registered efuns, not
+research candidates one at a time) applied systematically across
+several more categories. Swept `core.spec` (strings/arrays/mappings/
+objects/general -- all one real package in current FluffOS, not
+separate `.spec` files) plus `trim.spec`, `contrib.spec`, and `ops.spec`
+(confirmed to be bytecode operators, not efuns, out of scope). Found 41
+real names genuinely absent from the vendored 2.9 reference; built five
+small, independently-verifiable ones this session, named and scoped six
+larger/harder-to-verify ones rather than building them speculatively or
+dropping them silently. 789 tests passing (up from 776), all five
+built efuns live-verified against the real running driver.**
+
+**The sweep method, and what it found.** `core.spec` (fetched live,
+`src/packages/core/core.spec`) was parsed for every declared efun name,
+including alias forms (e.g. `"object this_interactive this_player(int
+default: 1);"` declares two real callable names, `this_interactive` and
+`this_player`, sharing one C implementation) -- 238 real names extracted,
+cross-referenced directly against every `registerEfun("...")` call
+already in `EfunTable.cpp`, not assumed. 58 names came back missing;
+each was then checked against `temp/reference/fluffos-2.9-ds2.08` to
+separate genuinely-new-since-2.9 gaps (this session's own real target)
+from old FluffOS gaps this project already correctly deferred for other
+reasons (`ed`/`ed_cmd`/`ed_start`/`get_char`/`allocate_buffer`/
+`bufferp`/`read_buffer`/`write_buffer`/`cache_stats`/`dumpallobj`/
+`dump_file_descriptors`/`malloc_status`/`memory_info`/`mud_status`/
+`resolve`/`request_term_type`/`start_request_term_type` all already
+existed in 2.9, confirmed by direct grep, not new modernization work) --
+41 names cleared that bar. The same method applied to `trim.spec`
+(`src/packages/trim/trim.spec`, 3 names, all 3 missing and all 3
+confirmed genuinely new-since-2.9) and a lighter pass over `contrib.spec`
+(most names already implemented, per this driver's own already-large
+existing `pluralize`/`terminal_colour`/`repeat_string`/etc. coverage --
+no new gaps found there worth a dedicated row) and `ops.spec` (confirmed
+to declare bytecode operators, not real callable efuns at all, out of
+scope entirely).
+
+**Ranked by the same independent-verifiability standard as `hash()`/
+`time_ns()`/`secure_random()`/`log2()`/`round()`: prefer real
+identities, round-trip properties, or direct standard-library
+comparison over anything needing a live current-FluffOS instance to
+verify subtle behavior against.** Five names cleared that bar and were
+small enough to build this same session:
+
+- **`trim`/`ltrim`/`rtrim`** (`src/packages/trim/trim.spec`): plain
+  string character-class trimming, default whitespace or an explicit
+  charset. The single most airtight verification surface of anything
+  built this session -- pure string identities (idempotence,
+  `trim(s) == rtrim(ltrim(s))`), zero floating-point question at all
+  (unlike even `log2()`/`round()`'s own standard math identities).
+- **`explode_reversible`** (`src/packages/core/core.spec`): a lossless
+  sibling of `explode()`, real doc's own explicit, stated guarantee
+  `implode(explode_reversible(str, delim), delim) == str` for any
+  non-empty `delim` -- the textbook round-trip-property verification
+  style, confirmed correct even for a string made entirely of the
+  delimiter (real `explode_string()`'s own "issue #968" bug-fix comment
+  needed a special case for exactly that; a plain split-at-every-
+  occurrence algorithm produces the correct result by construction, no
+  special-casing needed on this side).
+- **`call_out_walltime`**: real doc says it exists specifically because
+  real `call_out()` schedules against a coarse, once-per-loop-iteration
+  `current_time` rather than true wall-clock time. This driver's own
+  `call_out()` was already `std::chrono::steady_clock`-based (confirmed
+  by reading its own implementation before assuming anything), so this
+  is a real, honest alias of the exact same code -- the distinction real
+  `call_out_walltime()` exists to draw does not apply to this driver's
+  architecture, named explicitly rather than silently pretending a
+  byte-identical mechanism was ported.
+- **`enable_wizard`/`disable_wizard`/`wizardp`**: a plain per-object
+  boolean flag (`LpcObject::isWizard()`/`setWizard()`, the same shape
+  as the pre-existing `isHidden()`/`setHidden()` precedent), gated on
+  the same "is `current_object` interactive right now"
+  (`InteractiveRegistry` membership) check `interactive()` already
+  uses. Real, but currently unreachable through this driver's own
+  bundled mudlib's normal play, found and worth naming precisely rather
+  than glossing over: `mudlib/clone/user.c`'s own `setup()` already has
+  a real, pre-existing `#ifndef __NO_WIZARDS__ enable_wizard(); #endif`
+  call site, but this driver's own `ObjectManager.cpp` predefines
+  `__NO_WIZARDS__` for every compile (confirmed directly), so that
+  block has always compiled out -- these three efuns are real and
+  correct but only exercised by this session's own temporary debug
+  command so far, not by any live path through the bundled mudlib
+  today. One real, concrete future connection named, not built: real
+  `error_handler()` reads this exact flag to decide a wizard's own
+  full-trace error message versus `DEFAULT_ERROR_MESSAGE` for an
+  ordinary player -- the earlier connection-isolation session's own
+  dispatch-error catch explicitly noted "this driver has no wizard/
+  mortal distinction to gate on" at the time; that infrastructure now
+  exists, wiring it up is a real, separate, smaller future increment.
+- **`sys_network_ports`**: real shape is `({ port_#, type, port, tls })`
+  per configured listening port. This driver has exactly one real port
+  and no TLS, so the honest, real return is a single-element array
+  matching that one real port exactly -- not a fabricated multi-port or
+  TLS entry, and not silently declining to implement the efun at all
+  just because this driver's own multi-port support (a real, separate,
+  larger gap) is not there.
+
+**Six real names found and deliberately deferred, each with a concrete
+reason, not dropped silently:**
+
+- `query_notify_destruct`/`set_notify_destruct` -- the efun bodies
+  themselves are trivial (the same flag-accessor shape as
+  `enable_wizard()` above), but building them as bare accessors without
+  also wiring `destruct()`'s own real behavior (conditionally calling
+  `on_destruct()`) would be a real, misleading half-feature. That
+  wiring touches `VM::destructObject()`'s own critical lifecycle path,
+  genuinely more than a same-session addition alongside five other
+  rows without rushing a change to a sensitive path.
+- GMCP/MSDP/MSP/ZMP/MXP telnet extensions (11 real names) -- confirmed
+  real protocol-negotiation work in `src/net`'s telnet layer, the same
+  size class as TLS/WebSocket (rows 2.13/2.14), not a bounded
+  single-session efun addition.
+- UTF-8/charset conversion plus a real `buffer` value type (10 real
+  names) -- confirmed this driver's own `Value` variant has no buffer
+  kind at all; a real new value type touching the parser, `Value`,
+  `sprintf`/`typeof`/equality, and save/restore, before any of these
+  efun bodies have anywhere real to operate on. Reconfirmed, not
+  re-derived: an earlier session's own research pass already named this
+  as a larger candidate.
+- `set_config` -- needs the same real, currently-missing ~50-entry
+  runtime config registry this driver's own already-implemented
+  `get_config()` already honestly admits it lacks in its own comment
+  (a single-index stub, real index range unimplemented) -- the
+  registry is the real prerequisite, not the setter body itself.
+- `defer()` -- real per-LPC-frame `finally`/RAII semantics guaranteed
+  on every real exit path of the *calling* function, needing a genuine
+  new hook threaded through `VM::run()`'s own frame lifecycle to run an
+  LPC closure specifically. Real VM frame-lifecycle feature, not a
+  three-line efun the way rows 2.26-2.30 were.
+- Driver-internals diagnostics (`dump_trace`/`trace_start`/`trace_end`/
+  `function_profile`/`clear_debug_level`/`debug_levels`, confirmed
+  genuinely new-since-2.9; `cache_stats`/`malloc_status`/`memory_info`/
+  `mud_status`/`dumpallobj`/`dump_file_descriptors`, confirmed
+  pre-existing 2.9 gaps, not modernization work) -- expose this
+  driver's own specific memory allocator/malloc-debug/object-table
+  internals real FluffOS's own `jemalloc`/`debugmalloc` machinery has
+  no equivalent structure for at all; not independently portable
+  behavior, would mean fabricating driver-internal statistics this
+  codebase has no real source for.
+
+**12 new regression tests (789 total, up from 776):** 4 for
+`trim`/`ltrim`/`rtrim` (default-whitespace both-ends stripping;
+`ltrim`/`rtrim` each stripping only their own end plus the
+`trim == rtrim(ltrim(...))` identity; a custom charset stripping
+exactly those characters, whitespace left alone once given; idempotence
+on an already-trimmed string); 3 for `explode_reversible` (the real
+doc's own worked example; the round-trip identity across five varied
+inputs including a leading/trailing/adjacent-delimiter mix and a
+string made entirely of the delimiter; throws on an empty delimiter);
+2 for `call_out_walltime` (accepts the real argument shape and returns
+a handle; actually fires via the same scheduler `call_out()` uses); 3
+for `enable_wizard`/`disable_wizard`/`wizardp` (a real no-op for a
+non-interactive object; toggling the flag on a real interactive
+object; `wizardp()` reading the flag on an explicit argument); 1 for
+`sys_network_ports` (the single real entry matches the real shape and
+this exact process's own real configured port).
+
+**Live-verified against the real running driver** (`./build/amlp
+etc/driver.cfg`, real TCP sessions, the same real bundled mudlib and
+gatehouse login flow prior sessions used), via real `eval` calls for
+four of the five: `trim("  hello world  ")` returned `"hello world"`;
+`ltrim("xxhixx", "x")`/`rtrim("xxhixx", "x")` returned `"hixx"`/
+`"xxhi"`; `implode(explode_reversible("a,,b,", ","), ",")` round-tripped
+back to `"a,,b,"` exactly, `sizeof(...)` returned `4`;
+`call_out_walltime("eval", 0)` returned a real handle; `sys_network_ports()`
+returned `({ ({ 1, "telnet", 1122, 0 }) })`, `1122` being this exact
+process's own real configured port. `enable_wizard`/`disable_wizard`/
+`wizardp` needed a different real vehicle than `eval`, found and worth
+naming precisely: `eval`'s own code always runs as a fresh, throwaway
+`/tmp_eval_file` object, which is never itself `InteractiveRegistry`-
+registered, so `enable_wizard()`'s own real "only works on a currently
+interactive `current_object`" guard correctly, silently no-ops there --
+confirmed live (`wizardp(this_player())` stayed `0` through an
+`enable_wizard()`/`wizardp()` `eval` sequence, zero driver-log errors,
+exactly the expected real no-op outcome, not a bug). A temporary
+`wiztest` debug command was added directly to `mudlib/clone/user.c`
+instead (real `current_object` there genuinely is the interactive
+player object), reverted via `git checkout` immediately after,
+confirmed clean via `git diff --stat`: `wizardp(this_object())`
+before/after `enable_wizard()`/`disable_wizard()` returned `0`/`1`/`0`
+exactly, zero errors in the driver's own log throughout. Test-account/
+character files created during all of this session's verification
+passes (`sweepcheck27`/`SweepChar`, `wiztest27`/`WizTestChar`,
+`portcheck27`/`PortCheckChar`) deleted afterward, matching this
+project's own established cleanup precedent.
+
+**Documentation updated to match:** eleven new `ROADMAP.md` rows,
+2.26-2.30 (`[x]`, the five built efuns, full citation trail in each
+row's own cell) and 2.31-2.36 (`[ ]`, the six deferred names/families,
+each with its own concrete, source-cited reason for deferral rather
+than a vague "too big"); `COMPARISON.md`'s Phase 2 done-count (7/25 to
+12/36) and its "what AMLP does not have" bullet updated to match, with
+a new dated re-sweep note rather than a rewrite.
+
 **2026-08-27 (a further session, same day): `json_encode()`/`json_decode()`
 (row 2.17) re-examined on request, specifically to check whether their
 own real formatting semantics were actually specified in source rather

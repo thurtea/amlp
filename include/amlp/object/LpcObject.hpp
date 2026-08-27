@@ -151,6 +151,20 @@ public:
     bool isHidden() const { return hidden_; }
     void setHidden(bool h) { hidden_ = h; }
 
+    // real object_t's O_IS_WIZARD flag (enable_wizard()/disable_wizard()/
+    // wizardp()). Same shape and same deliberately narrow scope as
+    // hidden_/isHidden() just above: only the flag itself, not every
+    // real behavior it gates (real enable_wizard() also grants
+    // restricted-ed access and trace()/traceprefix() privilege; real
+    // error_handler() also reads it to decide full-trace vs.
+    // DEFAULT_ERROR_MESSAGE for a connected player -- none of that
+    // consumes this flag yet, see EfunTable.cpp's "enable_wizard"
+    // registration for the full citation). A wizard flag nothing reads
+    // back yet is still a real improvement over "undefined efun",
+    // matching this session's own explicitly narrow scope.
+    bool isWizard() const { return isWizard_; }
+    void setWizard(bool w) { isWizard_ = w; }
+
     // real object_t::privs (set_privs()/query_privs()) -- an arbitrary
     // per-object "privilege string" the mudlib sets and later checks for
     // permission gating (secure/daemon/master.c's own valid_write()-
@@ -395,6 +409,7 @@ private:
     bool destructed_ = false;
     bool everInteractive_ = false;
     bool hidden_ = false;
+    bool isWizard_ = false;
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
     std::string livingName_;

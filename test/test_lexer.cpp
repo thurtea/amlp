@@ -5522,6 +5522,35 @@ static void testUptimeIsNonNegativeAndNonDecreasingAcrossTwoCalls() {
     std::cout << "testUptimeIsNonNegativeAndNonDecreasingAcrossTwoCalls OK\n";
 }
 
+// sys_network_ports(void) -- current FluffOS's own real, genuinely
+// new-since-2.9 efun (confirmed absent from the vendored 2.9 ds2.08
+// reference entirely). Signature confirmed directly against real
+// current source: src/packages/core/core.spec's own "mixed
+// *sys_network_ports();", and src/packages/core/sys.cc's own real
+// "({ external_port_#, type, port, tls })" per-entry shape -- see
+// EfunTable.cpp's own citation on the registration for the full trail,
+// including why this driver's own single-port, no-TLS build honestly
+// returns exactly one real entry rather than fabricating more.
+static void testSysNetworkPortsReturnsOneRealTelnetEntryMatchingConfig() {
+    ObjectVarHarness harness;
+    harness.writeFile("/snp_probe.c", "mixed *probe() { return sys_network_ports(); }\n");
+    auto ob = harness.objects.cloneObject("/snp_probe");
+    assert(ob != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto outer = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(outer && outer->items.size() == 1);
+
+    auto entry = std::get<std::shared_ptr<amlp::Array>>(outer->items[0].data);
+    assert(entry && entry->items.size() == 4);
+    assert(std::get<int64_t>(entry->items[0].data) == 1); // real 1-indexed slot
+    assert(std::get<std::string>(entry->items[1].data) == "telnet");
+    assert(std::get<int64_t>(entry->items[2].data) == static_cast<int64_t>(harness.vm.config().port()));
+    assert(std::get<int64_t>(entry->items[3].data) == 0); // no TLS support (row 2.13)
+
+    std::cout << "testSysNetworkPortsReturnsOneRealTelnetEntryMatchingConfig OK\n";
+}
+
 static void testRusageReturnsMappingWithExpectedKeysAndNonNegativeValues() {
     ObjectVarHarness harness;
     harness.writeFile("/rusagetest.c",
@@ -9999,6 +10028,52 @@ static void testCallOutAcceptsRealArgumentShapeAndReturnsHandle() {
     std::cout << "testCallOutAcceptsRealArgumentShapeAndReturnsHandle OK\n";
 }
 
+// call_out_walltime(string|function, int|float, ...) -- current
+// FluffOS's own real, genuinely new-since-2.9 efun (confirmed absent
+// from the vendored 2.9 ds2.08 reference entirely). Signature confirmed
+// directly against real current source: src/packages/core/core.spec's
+// own "int call_out_walltime(string | function, int|float, ...);" --
+// see EfunTable.cpp's own citation on the registration for the full
+// trail, including why this driver's own call_out() (already
+// std::chrono::steady_clock-based) makes call_out_walltime() a real,
+// honest alias of the exact same implementation rather than a separate
+// mechanism.
+
+static void testCallOutWalltimeAcceptsRealArgumentShapeAndReturnsHandle() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/callout_wt_probe.c",
+        "int probe() { return call_out_walltime(\"idle\", 180); }\n"
+        "void idle() {}\n");
+    auto obj = harness.objects.cloneObject("/callout_wt_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testCallOutWalltimeAcceptsRealArgumentShapeAndReturnsHandle OK\n";
+}
+
+static void testCallOutWalltimeActuallyFiresViaTheSameSchedulerAsCallOut() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/callout_wt_fire.c",
+        "int fired;\n"
+        "void tick(int x) { fired = x; }\n"
+        "void probe() { call_out_walltime(\"tick\", 0, 42); }\n"
+        "int query_fired() { return fired; }\n");
+    auto obj = harness.objects.cloneObject("/callout_wt_fire");
+    assert(obj != nullptr);
+    harness.vm.callFunction(obj, "probe", {});
+    scheduler.tickCallOuts();
+
+    amlp::Value fired = harness.vm.callFunction(obj, "query_fired", {});
+    assert(std::get<int64_t>(fired.data) == 42);
+
+    std::cout << "testCallOutWalltimeActuallyFiresViaTheSameSchedulerAsCallOut OK\n";
+}
+
 // remove_call_out() on a name with nothing actually pending under it
 // still correctly reports -1 (not found), the real "nothing to remove"
 // outcome -- distinct from the old pre-Scheduler stub this test used to
@@ -10154,6 +10229,164 @@ static void testUpperCaseThrowsOnNonStringArgument() {
     assert(threw);
 
     std::cout << "testUpperCaseThrowsOnNonStringArgument OK\n";
+}
+
+// trim(string, string|void)/ltrim(...)/rtrim(...) -- current FluffOS's
+// own real, genuinely new-since-2.9 string efuns (confirmed absent from
+// the vendored 2.9 ds2.08 reference entirely). Signatures and semantics
+// confirmed directly against real current source: src/packages/trim/
+// trim.spec's own "string trim(string, string|void);" (same shape for
+// ltrim/rtrim), and trim.cc's own trim_impl()/ltrim_func()/rtrim_func()/
+// trim_func() -- see EfunTable.cpp's own citation on the registration
+// for the full trail. Verified via plain string identities with zero
+// live-current-FluffOS-instance dependency at all -- an even more
+// airtight verification surface than log2()/round()'s own standard math
+// identities, since there is no floating-point precision question here.
+
+static void testTrimStripsDefaultWhitespaceFromBothEnds() {
+    ObjectVarHarness harness;
+    harness.writeFile("/trim_probe.c", "string probe(string s) { return trim(s); }\n");
+    auto ob = harness.objects.cloneObject("/trim_probe");
+    assert(ob != nullptr);
+
+    amlp::Value r = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string(" \t\nhello world\r\n "))});
+    assert(std::holds_alternative<std::string>(r.data));
+    assert(std::get<std::string>(r.data) == "hello world");
+
+    std::cout << "testTrimStripsDefaultWhitespaceFromBothEnds OK\n";
+}
+
+static void testLtrimAndRtrimOnlyStripTheirOwnEnd() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ltrim_probe.c",
+        "string lprobe(string s) { return ltrim(s); }\n"
+        "string rprobe(string s) { return rtrim(s); }\n");
+    auto ob = harness.objects.cloneObject("/ltrim_probe");
+    assert(ob != nullptr);
+
+    amlp::Value l = harness.vm.callFunction(ob, "lprobe", {amlp::Value(std::string("  hi  "))});
+    amlp::Value r = harness.vm.callFunction(ob, "rprobe", {amlp::Value(std::string("  hi  "))});
+    assert(std::get<std::string>(l.data) == "hi  ");
+    assert(std::get<std::string>(r.data) == "  hi");
+
+    // trim(s) == rtrim(ltrim(s)) -- a real identity, not assumed.
+    amlp::Value both = harness.vm.callFunction(ob, "rprobe", {l});
+    assert(std::get<std::string>(both.data) == "hi");
+
+    std::cout << "testLtrimAndRtrimOnlyStripTheirOwnEnd OK\n";
+}
+
+static void testTrimWithCustomCharsetStripsOnlyThoseCharacters() {
+    ObjectVarHarness harness;
+    harness.writeFile("/trim_custom.c",
+        "string probe(string s, string ch) { return trim(s, ch); }\n");
+    auto ob = harness.objects.cloneObject("/trim_custom");
+    assert(ob != nullptr);
+
+    // Real trim.cc: the 2nd argument, when given, REPLACES the default
+    // whitespace set entirely -- so a string with real whitespace inside
+    // the custom charset's own reach is stripped too, and whitespace
+    // outside it is left alone.
+    amlp::Value r = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("xxhelloxx")), amlp::Value(std::string("x"))});
+    assert(std::get<std::string>(r.data) == "hello");
+
+    // Whitespace is NOT stripped once a custom charset is given.
+    amlp::Value r2 = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("xx hello xx")), amlp::Value(std::string("x"))});
+    assert(std::get<std::string>(r2.data) == " hello ");
+
+    std::cout << "testTrimWithCustomCharsetStripsOnlyThoseCharacters OK\n";
+}
+
+static void testTrimIsIdempotentOnAnAlreadyTrimmedString() {
+    ObjectVarHarness harness;
+    harness.writeFile("/trim_idem.c", "string probe(string s) { return trim(s); }\n");
+    auto ob = harness.objects.cloneObject("/trim_idem");
+    assert(ob != nullptr);
+
+    amlp::Value once = harness.vm.callFunction(ob, "probe", {amlp::Value(std::string("  hello  "))});
+    amlp::Value twice = harness.vm.callFunction(ob, "probe", {once});
+    assert(std::get<std::string>(once.data) == "hello");
+    assert(std::get<std::string>(twice.data) == std::get<std::string>(once.data));
+
+    std::cout << "testTrimIsIdempotentOnAnAlreadyTrimmedString OK\n";
+}
+
+// explode_reversible(string, string) -- current FluffOS's own real,
+// genuinely new-since-2.9 efun (confirmed absent from the vendored 2.9
+// ds2.08 reference entirely). Signature confirmed directly against real
+// current source: src/packages/core/core.spec's own "string
+// *explode_reversible(string, string);" -- see EfunTable.cpp's own
+// citation on the registration for the full trail, including the real
+// "n delimiters entirely consuming the string still produce n+1 empty
+// fields" edge case (real explode_string()'s own "issue #968" comment).
+// Verified via the real doc's own stated round-trip identity
+// (implode(explode_reversible(str, delim), delim) == str), the textbook
+// round-trip-property verification style, not a live-instance-dependent
+// check.
+
+static void testExplodeReversiblePreservesEmptyFieldsMatchingRealDocExample() {
+    ObjectVarHarness harness;
+    harness.writeFile("/er_probe.c",
+        "string *probe(string s, string d) { return explode_reversible(s, d); }\n");
+    auto ob = harness.objects.cloneObject("/er_probe");
+    assert(ob != nullptr);
+
+    // Real doc's own worked example: explode_reversible("a,,b,", ",")
+    // == ({ "a", "", "b", "" }).
+    amlp::Value r = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("a,,b,")), amlp::Value(std::string(","))});
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(r.data);
+    assert(arr && arr->items.size() == 4);
+    assert(std::get<std::string>(arr->items[0].data) == "a");
+    assert(std::get<std::string>(arr->items[1].data) == "");
+    assert(std::get<std::string>(arr->items[2].data) == "b");
+    assert(std::get<std::string>(arr->items[3].data) == "");
+
+    std::cout << "testExplodeReversiblePreservesEmptyFieldsMatchingRealDocExample OK\n";
+}
+
+static void testExplodeReversibleRoundTripsThroughImplodeForVariousInputs() {
+    ObjectVarHarness harness;
+    harness.writeFile("/er_roundtrip.c",
+        "string roundtrip(string s, string d) { return implode(explode_reversible(s, d), d); }\n");
+    auto ob = harness.objects.cloneObject("/er_roundtrip");
+    assert(ob != nullptr);
+
+    // Real doc's own stated guarantee: implode(explode_reversible(str,
+    // delimiter), delimiter) == str for any str and any non-empty
+    // delimiter -- checked across a leading delimiter, a trailing one,
+    // adjacent ones, none at all, and a string made entirely of the
+    // delimiter (real explode_string()'s own "issue #968" edge case).
+    std::vector<std::string> cases = {"a,,b,", ",a,b", "a,b,", "no-delimiter-here", ",,,", ""};
+    for (const auto& s : cases) {
+        amlp::Value r = harness.vm.callFunction(ob, "roundtrip",
+            {amlp::Value(s), amlp::Value(std::string(","))});
+        assert(std::holds_alternative<std::string>(r.data));
+        assert(std::get<std::string>(r.data) == s);
+    }
+
+    std::cout << "testExplodeReversibleRoundTripsThroughImplodeForVariousInputs OK\n";
+}
+
+static void testExplodeReversibleThrowsOnEmptyDelimiter() {
+    ObjectVarHarness harness;
+    harness.writeFile("/er_empty_delim.c",
+        "string *probe(string s) { return explode_reversible(s, \"\"); }\n");
+    auto ob = harness.objects.cloneObject("/er_empty_delim");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {amlp::Value(std::string("abc"))});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testExplodeReversibleThrowsOnEmptyDelimiter OK\n";
 }
 
 // Phase 0 row 0.12 audit: capitalize/strlen/strstr were registered but
@@ -13191,6 +13424,83 @@ static void testSetHideTogglesHiddenFlagWhenMasterValidHidePermits() {
     assert(!ob->isHidden());
 
     std::cout << "testSetHideTogglesHiddenFlagWhenMasterValidHidePermits OK\n";
+}
+
+// enable_wizard()/disable_wizard()/wizardp(object) -- current FluffOS's
+// own real, genuinely new-since-2.9 efuns (confirmed absent from the
+// vendored 2.9 ds2.08 reference entirely). Signatures and semantics
+// confirmed directly against real current source: src/packages/core/
+// core.spec's own "void enable_wizard(); void disable_wizard(); int
+// wizardp(object);", and efuns_main.cc's own f_enable_wizard()/
+// f_disable_wizard()/f_wizardp() bodies -- see EfunTable.cpp's own
+// citation on the registrations for the full trail, including the real
+// "only works on a currently interactive current_object, silently a
+// no-op otherwise" guard.
+
+static void testEnableWizardIsANoOpForANonInteractiveObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/wiz_noninteractive.c", "void go() { enable_wizard(); }\n");
+    auto ob = harness.objects.cloneObject("/wiz_noninteractive");
+    assert(ob != nullptr);
+
+    assert(!ob->isWizard());
+    harness.vm.callFunction(ob, "go", {});
+    // Real f_enable_wizard(): "if (current_object->interactive) { ...
+    // }" -- a non-interactive object calling this must see no effect at
+    // all, not an error.
+    assert(!ob->isWizard());
+
+    std::cout << "testEnableWizardIsANoOpForANonInteractiveObject OK\n";
+}
+
+static void testEnableWizardAndDisableWizardToggleTheFlagOnAnInteractiveObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/wiz_probe.c",
+        "void go_wizard() { enable_wizard(); }\n"
+        "void go_mortal() { disable_wizard(); }\n");
+    auto ob = harness.objects.cloneObject("/wiz_probe");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(ob); // registers ob in InteractiveRegistry, matching
+                      // real current_object->interactive being non-null
+
+    assert(!ob->isWizard());
+    harness.vm.callFunction(ob, "go_wizard", {});
+    assert(ob->isWizard());
+
+    harness.vm.callFunction(ob, "go_mortal", {});
+    assert(!ob->isWizard());
+
+    ::close(fds[1]);
+    std::cout << "testEnableWizardAndDisableWizardToggleTheFlagOnAnInteractiveObject OK\n";
+}
+
+static void testWizardpReadsTheFlagOnAnExplicitObjectArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/wiz_query.c",
+        "void go_wizard() { enable_wizard(); }\n"
+        "int probe(object ob) { return wizardp(ob); }\n");
+    auto ob = harness.objects.cloneObject("/wiz_query");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(ob);
+
+    amlp::Value before = harness.vm.callFunction(ob, "probe", {amlp::Value(ob)});
+    assert(std::get<int64_t>(before.data) == 0);
+
+    harness.vm.callFunction(ob, "go_wizard", {});
+
+    amlp::Value after = harness.vm.callFunction(ob, "probe", {amlp::Value(ob)});
+    assert(std::get<int64_t>(after.data) == 1);
+
+    ::close(fds[1]);
+    std::cout << "testWizardpReadsTheFlagOnAnExplicitObjectArgument OK\n";
 }
 
 // Real f_set_hide()'s own "if (!valid_hide(current_object)) { sp--;
@@ -25172,6 +25482,7 @@ int main() {
     testBaseNameReturnsSameAsFileNameSinceNoCloneSuffixExistsHere();
     testDebugMessageAcceptsAStringArgumentAndDoesNotThrow();
     testUptimeIsNonNegativeAndNonDecreasingAcrossTwoCalls();
+    testSysNetworkPortsReturnsOneRealTelnetEntryMatchingConfig();
     testRusageReturnsMappingWithExpectedKeysAndNonNegativeValues();
     testCommandDispatchesToCurrentObjectsOwnActionTableAndReturnsTruthy();
     testShutdownSetsSchedulerRequestFlag();
@@ -25281,6 +25592,8 @@ int main() {
     testFindLivingDoesNotMatchADestructedObjectsFormerLivingName();
     testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
+    testCallOutWalltimeAcceptsRealArgumentShapeAndReturnsHandle();
+    testCallOutWalltimeActuallyFiresViaTheSameSchedulerAsCallOut();
     testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName();
     testCallOtherWithStringTargetResolvesAlreadyLoadedObject();
     testCallOtherWithStringTargetAutoCompilesAndLoadsOnFirstUse();
@@ -25289,6 +25602,13 @@ int main() {
     testUpperCaseFoldsLowercaseLettersAndLeavesEverythingElseUnchanged();
     testUpperCaseMatchesRealGuildTagUppercasingShape();
     testUpperCaseThrowsOnNonStringArgument();
+    testTrimStripsDefaultWhitespaceFromBothEnds();
+    testLtrimAndRtrimOnlyStripTheirOwnEnd();
+    testTrimWithCustomCharsetStripsOnlyThoseCharacters();
+    testTrimIsIdempotentOnAnAlreadyTrimmedString();
+    testExplodeReversiblePreservesEmptyFieldsMatchingRealDocExample();
+    testExplodeReversibleRoundTripsThroughImplodeForVariousInputs();
+    testExplodeReversibleThrowsOnEmptyDelimiter();
     testCapitalizeUppercasesOnlyALowercaseFirstCharacter();
     testStrlenAndStrstrAliasesWorkByTheirOwnNames();
     testCryptWithExplicitSaltIsDeterministicAndSaltIsThePrefix();
@@ -25386,6 +25706,9 @@ int main() {
     testPresentFindsInventoryItemByIdApplyNotByOtherFunctions();
     testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject();
     testSetHideTogglesHiddenFlagWhenMasterValidHidePermits();
+    testEnableWizardIsANoOpForANonInteractiveObject();
+    testEnableWizardAndDisableWizardToggleTheFlagOnAnInteractiveObject();
+    testWizardpReadsTheFlagOnAnExplicitObjectArgument();
     testSetHideDeclinesWhenValidHideRejectsOrNoMasterLoaded();
     testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs();
     testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord();

@@ -1701,6 +1701,62 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // string *explode_reversible(string str, string delimiter) --
+    // current FluffOS's own real, genuinely new-since-2.9 efun
+    // (confirmed absent from temp/reference/fluffos-2.9-ds2.08 entirely:
+    // no explode_reversible anywhere in that tree). Signature confirmed
+    // directly against real current source: src/packages/core/core.spec's
+    // own "string *explode_reversible(string, string);". Real
+    // f_explode_reversible() (src/packages/core/string.cc) calls the
+    // same explode_string() explode() itself uses, but with its
+    // "reversible" flag forced true rather than reading the
+    // RC_REVERSIBLE_EXPLODE_STRING config that gates explode()'s own
+    // optional lossless mode -- unlike plain explode() above (which
+    // matches this driver's own already-verified default, config-off
+    // FluffOS behavior: drop a leading delimiter run and a trailing
+    // empty field), this never drops anything: every delimiter
+    // occurrence produces a split point, including leading/trailing/
+    // adjacent ones, so implode(explode_reversible(str, delim), delim)
+    // == str always holds for a non-empty delim (real doc's own stated
+    // guarantee, confirmed live below and in the regression tests, not
+    // just assumed) -- confirmed this holds even when str is made
+    // entirely of delim (real explode_string()'s own "issue #968"
+    // comment needed a special case for exactly that; a plain
+    // split-at-every-occurrence algorithm produces the correct n+1
+    // empty fields for n delimiter occurrences by construction, with no
+    // special-casing needed here). Real doc leaves an empty delimiter's
+    // own behavior in reversible mode unstated (real explode_string()
+    // takes a structurally different, UTF-8-grapheme-splitting path
+    // there this driver has no equivalent machinery for elsewhere) --
+    // throws instead, matching this codebase's own established
+    // precedent of throwing rather than silently mishandling an
+    // unsupported shape (replace_string()'s own comment, sscanf's
+    // %f/%x handling).
+    t.registerEfun("explode_reversible", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("explode_reversible: expected (string, string) arguments");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        const std::string& sep = std::get<std::string>(args[1].data);
+        if (sep.empty()) {
+            throw LpcRuntimeError("explode_reversible: delimiter must be non-empty");
+        }
+
+        auto result = std::make_shared<Array>();
+        size_t start = 0;
+        for (;;) {
+            size_t pos = str.find(sep, start);
+            if (pos == std::string::npos) {
+                result->items.emplace_back(str.substr(start));
+                break;
+            }
+            result->items.emplace_back(str.substr(start, pos - start));
+            start = pos + sep.size();
+        }
+        return Value(result);
+    });
+
     // mixed implode(mixed *arr, string | function sep, void | mixed) --
     // real func_spec.cpp signature. Only the plain string-separator form
     // is implemented (join every element, converted to string, with sep
@@ -2277,13 +2333,13 @@ void registerCoreEfuns() {
     // confirmed active in this exact vendored build's options.h),
     // needed live by cmds/mortal/_trade.c's own "tid = call_out(...);
     // ...; remove_call_out(tid)".
-    t.registerEfun("call_out", [](VM& vm, std::vector<Value>& args) -> Value {
+    auto callOutImpl = [](const char* efunName, VM& vm, std::vector<Value>& args) -> Value {
         bool validTarget = !args.empty() &&
             (std::holds_alternative<std::string>(args[0].data) ||
              std::holds_alternative<std::shared_ptr<Closure>>(args[0].data));
         if (args.size() < 2 || !validTarget) {
             throw LpcRuntimeError(
-                "call_out: expected (string|function target, int|float delay, ...) arguments");
+                std::string(efunName) + ": expected (string|function target, int|float delay, ...) arguments");
         }
         double delaySeconds;
         if (std::holds_alternative<int64_t>(args[1].data)) {
@@ -2291,7 +2347,7 @@ void registerCoreEfuns() {
         } else if (std::holds_alternative<double>(args[1].data)) {
             delaySeconds = std::get<double>(args[1].data);
         } else {
-            throw LpcRuntimeError("call_out: second argument must be an int or float delay");
+            throw LpcRuntimeError(std::string(efunName) + ": second argument must be an int or float delay");
         }
         if (delaySeconds < 0) delaySeconds = 0;
 
@@ -2307,9 +2363,39 @@ void registerCoreEfuns() {
             entry.function = std::get<std::string>(args[0].data);
         }
         if (!vm.scheduler()) {
-            throw LpcRuntimeError("call_out: no scheduler attached to this VM");
+            throw LpcRuntimeError(std::string(efunName) + ": no scheduler attached to this VM");
         }
         return Value(vm.scheduler()->addCallOut(std::move(entry)));
+    };
+    t.registerEfun("call_out", [callOutImpl](VM& vm, std::vector<Value>& args) -> Value {
+        return callOutImpl("call_out", vm, args);
+    });
+
+    // int call_out_walltime(string|function func, int|float delay, mixed
+    // extra_args...) -- current FluffOS's own real, genuinely
+    // new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08 entirely). Signature confirmed
+    // directly against real current source: src/packages/core/core.spec's
+    // own "int call_out_walltime(string | function, int|float, ...);".
+    // Real doc (docs/efun/calls/call_out_walltime.md, fetched live):
+    // "This efun is identical to call_out except it does not schedule
+    // the call on the game loop. Rather, in real seconds." -- real
+    // call_out() schedules against current_time, a coarse, once-per-
+    // backend()-loop-iteration integer-seconds variable, so real
+    // call_out_walltime() exists specifically to give a delay measured
+    // against actual wall-clock time instead. This driver's own
+    // call_out() (above) was never built with that limitation: it
+    // already schedules against std::chrono::steady_clock directly,
+    // confirmed by reading callOutImpl's own body just above rather
+    // than assumed -- so call_out_walltime() here is a real, honest
+    // alias of the exact same implementation, not a stripped-down or
+    // approximated port. The real distinction call_out_walltime() exists
+    // to draw in real FluffOS genuinely does not apply to this driver's
+    // own architecture; named here explicitly rather than silently
+    // pretending a byte-identical mechanism was ported instead of an
+    // already-equivalent one.
+    t.registerEfun("call_out_walltime", [callOutImpl](VM& vm, std::vector<Value>& args) -> Value {
+        return callOutImpl("call_out_walltime", vm, args);
     });
 
     // int remove_call_out(int | void | string) -- func_spec.c's real
@@ -2961,6 +3047,63 @@ void registerCoreEfuns() {
             if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
         }
         return Value(s);
+    });
+
+    // string trim(string str, string|void ch) / ltrim(...) / rtrim(...)
+    // -- current FluffOS's own real, genuinely new-since-2.9 string
+    // efuns (confirmed absent from temp/reference/fluffos-2.9-ds2.08
+    // entirely: no trim/ltrim/rtrim anywhere in that tree). Signatures
+    // confirmed directly against real current source, not guessed:
+    // src/packages/trim/trim.spec's own "string trim(string,
+    // string|void);" (same shape for ltrim/rtrim), and
+    // src/packages/trim/trim.cc's own trim_impl()/ltrim_func()/
+    // rtrim_func()/trim_func(): a missing or empty 2nd argument defaults
+    // the strip set to "\t\n\v\f\r " (the classic C isspace() set for
+    // the "C" locale, ported verbatim below); otherwise every character
+    // in the given 2nd-argument string is a member of the strip set
+    // (strspn/strcspn-style character-class trimming, not a substring
+    // match). Independently verifiable via plain string identities with
+    // zero live-current-FluffOS-instance dependency at all: idempotence
+    // (trimming an already-trimmed string is a no-op), the trim/ltrim/
+    // rtrim relationship (trim(s) == rtrim(ltrim(s))), and an explicit
+    // custom charset stripping exactly the given characters and nothing
+    // else -- an even more airtight verification surface than log2()/
+    // round()'s own standard math identities, since there is no
+    // floating-point precision question at all here.
+    auto stripSet = [](const std::string& s, const std::string& charset, bool fromStart, bool fromEnd) -> std::string {
+        size_t begin = 0;
+        size_t end = s.size();
+        if (fromStart) {
+            while (begin < end && charset.find(s[begin]) != std::string::npos) ++begin;
+        }
+        if (fromEnd) {
+            while (end > begin && charset.find(s[end - 1]) != std::string::npos) --end;
+        }
+        return s.substr(begin, end - begin);
+    };
+    auto trimArgs = [](std::vector<Value>& args) -> std::pair<std::string, std::string> {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("trim: expected a string argument");
+        }
+        std::string str = std::get<std::string>(args[0].data);
+        std::string charset;
+        if (args.size() > 1 && std::holds_alternative<std::string>(args[1].data)) {
+            charset = std::get<std::string>(args[1].data);
+        }
+        if (charset.empty()) charset = "\t\n\v\f\r ";
+        return {str, charset};
+    };
+    t.registerEfun("trim", [stripSet, trimArgs](VM&, std::vector<Value>& args) -> Value {
+        auto [str, charset] = trimArgs(args);
+        return Value(stripSet(str, charset, true, true));
+    });
+    t.registerEfun("ltrim", [stripSet, trimArgs](VM&, std::vector<Value>& args) -> Value {
+        auto [str, charset] = trimArgs(args);
+        return Value(stripSet(str, charset, true, false));
+    });
+    t.registerEfun("rtrim", [stripSet, trimArgs](VM&, std::vector<Value>& args) -> Value {
+        auto [str, charset] = trimArgs(args);
+        return Value(stripSet(str, charset, false, true));
     });
 
     // string replace_string(string str, string pattern, string
@@ -4404,6 +4547,60 @@ void registerCoreEfuns() {
         if (!permitted) return Value{};
         ob->setHidden(!args.empty() && isTruthy(args[0]));
         return Value{};
+    });
+
+    // void enable_wizard(void) / disable_wizard(void) / int wizardp(object)
+    // -- current FluffOS's own real, genuinely new-since-2.9 efuns
+    // (confirmed absent from temp/reference/fluffos-2.9-ds2.08 entirely:
+    // no enable_wizard/disable_wizard/wizardp anywhere in that tree).
+    // Signatures confirmed directly against real current source:
+    // src/packages/core/core.spec's own "void enable_wizard(); void
+    // disable_wizard(); int wizardp(object);" (all three under the
+    // same #ifndef NO_WIZARDS block). Real f_enable_wizard()/
+    // f_disable_wizard() (efuns_main.cc), fetched live: both take zero
+    // arguments and always target current_object -- "if
+    // (current_object->interactive) { current_object->flags |=
+    // O_IS_WIZARD; }" / "&= ~O_IS_WIZARD" -- silently doing nothing for
+    // a non-interactive caller, not throwing. This driver's own
+    // equivalent of "is current_object interactive right now" is
+    // InteractiveRegistry membership (the same live check interactive()
+    // above already uses, not the sticky everInteractive_ flag
+    // userp()/query_once_interactive() use instead -- see LpcObject.hpp's
+    // own wasEverInteractive() comment for that distinction). Real
+    // f_wizardp() (efuns_main.cc): "i = sp->u.ob->flags & O_IS_WIZARD;
+    // put_number(i != 0);" -- a plain flag read on an explicit object
+    // argument, no interactive requirement of its own. Real
+    // enable_wizard() also grants restricted-ed access and trace()/
+    // traceprefix() privilege, and real error_handler() reads this same
+    // flag to decide a wizard's own full-trace error message versus
+    // DEFAULT_ERROR_MESSAGE for an ordinary player (real doc,
+    // docs/efun/mudlib/enable_wizard.md, fetched live) -- none of that
+    // consumes the flag here yet, matching LpcObject::isWizard()'s own
+    // comment and this session's deliberately narrow scope (the flag
+    // itself, not every real behavior it gates).
+    t.registerEfun("enable_wizard", [](VM& vm, std::vector<Value>&) -> Value {
+        auto ob = vm.currentObject();
+        if (!ob) return Value{};
+        for (auto& live : InteractiveRegistry::all()) {
+            if (live == ob) { ob->setWizard(true); break; }
+        }
+        return Value{};
+    });
+    t.registerEfun("disable_wizard", [](VM& vm, std::vector<Value>&) -> Value {
+        auto ob = vm.currentObject();
+        if (!ob) return Value{};
+        for (auto& live : InteractiveRegistry::all()) {
+            if (live == ob) { ob->setWizard(false); break; }
+        }
+        return Value{};
+    });
+    t.registerEfun("wizardp", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            return Value(int64_t{0});
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob) return Value(int64_t{0});
+        return Value(static_cast<int64_t>(ob->isWizard() ? 1 : 0));
     });
 
     // int living(object ob default: this_object()) -- func_spec.c: "int
@@ -5860,6 +6057,38 @@ void registerCoreEfuns() {
             return Value(static_cast<int64_t>(std::time(nullptr) - bootTime));
         });
     }
+
+    // mixed *sys_network_ports(void) -- current FluffOS's own real,
+    // genuinely new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08 entirely). Signature confirmed
+    // directly against real current source: src/packages/core/core.spec's
+    // own "mixed *sys_network_ports();". Real f_sys_network_ports()
+    // (src/packages/core/sys.cc): one sub-array per configured, active
+    // listening port, real shape "({ (int) external_port_#, (string)
+    // type, (int) port, (int) tls })" -- external_port_# is the port's
+    // real 1-indexed config-table slot (i+1 across a fixed 5-slot real
+    // table), type is "telnet" or "websocket" (port_kind_name()), tls is
+    // 1 only when that specific port has a real cert/key pair
+    // configured. This driver has exactly one real listening port
+    // (Config::port(), etc/driver.cfg's own "port:" directive), no
+    // multi-port config support at all (a real, separate, larger gap
+    // this row does not attempt to close), and no TLS support (row
+    // 2.13, not started) -- so the honest, real port for this build is
+    // "({ 1, \"telnet\", <configured port>, 0 })", a single-element
+    // outer array, matching the real shape exactly for the one real
+    // port this driver actually has rather than fabricating additional
+    // slots or a websocket/tls entry this driver cannot back.
+    t.registerEfun("sys_network_ports", [](VM& vm, std::vector<Value>&) -> Value {
+        auto portInfo = std::make_shared<Array>();
+        portInfo->items.emplace_back(int64_t{1});
+        portInfo->items.emplace_back(std::string("telnet"));
+        portInfo->items.emplace_back(static_cast<int64_t>(vm.config().port()));
+        portInfo->items.emplace_back(int64_t{0});
+
+        auto result = std::make_shared<Array>();
+        result->items.emplace_back(portInfo);
+        return Value(result);
+    });
 
     // void debug_message(string str) -- real main.c's own debug_message()
     // C primitive (varargs, "%s"-style) appends to the driver's own debug

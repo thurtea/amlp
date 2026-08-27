@@ -200,12 +200,34 @@ with zero live-current-FluffOS-instance dependency, the same bar
 rows 2.17/2.25 and `STATUS.md`'s own dated entry for the full trail. 3
 new regression tests (776 total, up from 773).
 
+**Re-swept 2026-08-27 (a further session, same day):** the row 2.25
+method (cross-check an already-partially-implemented efun category's
+real current `.spec` file against this driver's own registered efuns)
+applied systematically to `core.spec` (strings/arrays/mappings/objects/
+general, all bundled in one real package in current FluffOS) plus
+`trim.spec`, `contrib.spec`, and `ops.spec` (the latter confirmed to be
+bytecode operators, not efuns, out of scope). Found 41 real names
+confirmed genuinely absent from the vendored 2.9 reference; five small,
+independently-verifiable ones built as five new rows (2.26-2.30:
+`trim`/`ltrim`/`rtrim`, `explode_reversible`, `call_out_walltime`,
+`enable_wizard`/`disable_wizard`/`wizardp`, `sys_network_ports`), the
+rest named and scoped as six new deferred rows (2.31-2.36) rather than
+built speculatively or dropped silently -- real protocol-negotiation
+work (GMCP/MSDP/MSP/ZMP/MXP), a new value type plus a charset-conversion
+dependency (buffers/encoding), a runtime-mutable config registry
+`get_config()`'s own comment already flagged as missing, a real VM
+frame-lifecycle feature (`defer()`), destruct-path wiring
+(`query_notify_destruct`), and implementation-specific driver-internals
+diagnostics. See `ROADMAP.md` rows 2.26-2.36 and `STATUS.md`'s own
+dated entry for the full trail. 12 new regression tests (789 total, up
+from 776).
+
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 25 | 7 | 18 | 28% |
+| 2, Beyond both (novel features) | 36 | 12 | 24 | 33% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
 
 **What is left open in Phase 1, and why each item stays open** (each
@@ -385,12 +407,15 @@ applicable).
   Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
   conformance suite, generational GC -- all still have a real
   `instruct.md` and zero implementation, and none of them should be
-  described as "in progress." Seven Phase 2 rows are the exception,
+  described as "in progress." Twelve Phase 2 rows are the exception,
   real and landed rather than planned: the apply cache (2.9), the full
   PCRE suite (2.12), built-in SQLite (2.15), the `hash()` efun (2.16),
-  `time_ns()`/`perf_counter_ns()` (2.23), `secure_random()` (2.24), and
-  `log2()`/`round()` (2.25) -- along with Phase 3's own row 3.9, a real
-  third-party mudlib boot-and-play confirmation.
+  `time_ns()`/`perf_counter_ns()` (2.23), `secure_random()` (2.24),
+  `log2()`/`round()` (2.25), `trim()`/`ltrim()`/`rtrim()` (2.26),
+  `explode_reversible()` (2.27), `call_out_walltime()` (2.28),
+  `enable_wizard()`/`disable_wizard()`/`wizardp()` (2.29), and
+  `sys_network_ports()` (2.30) -- along with Phase 3's own row 3.9, a
+  real third-party mudlib boot-and-play confirmation.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger
   master-object callback surface: see the section above. LDMud's

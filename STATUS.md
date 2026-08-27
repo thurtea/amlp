@@ -9,6 +9,187 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): the LDMud-vs-FluffOS `db_*`
+naming collision the prior session's `.spec` sweep found (row 2.40) is
+resolved. Both real sources read directly this session, not assumed
+from either side's own summary; real corpus evidence checked fresh,
+confirming zero demand for a second, FluffOS-shaped target. Resolution:
+dialect-gate the existing, correct, evidence-backed LDMud-shaped `db_*`
+family to `dialect: ldmud` only, converting a real, previously-silent
+wrong-shape bug under this driver's own default dialect into an honest
+gap. 794 tests passing (up from 792), both dialect paths live-verified
+against the real running driver.**
+
+**Real signature differences, confirmed from both sides directly.**
+Real LDMud (`temp/ldmud/src/pkg-mysql.c`, re-read line by line this
+session, not trusted from `DbRegistry.hpp`'s own prior summary alone):
+`int db_connect(string database, void|string user, void|string
+password)` -- no host argument at all; `int db_exec(int handle, string
+statement)` -- the real doc comment states plainly, "The result is the
+handle if all went okay. If there was an error in the statement, 0 is
+returned," confirmed in the body: success pushes the handle back
+unchanged, a bad statement pushes plain `0`, never a string; `mixed
+db_fetch(int handle)` -- single arg, "Retrieve _ONE_ line of result of
+the latest SQL-action... If not more results are on the server, 0 is
+returned" (own doc comment), confirmed sequential via a real
+`mysql_fetch_row()` walk, one call at a time; `int db_close(int
+handle)` -- "Return the handle-number on success" (own doc comment),
+confirmed in the body; every one of the seven real efuns gated by
+`check_privilege(instrs[F_DB_X].name, MY_TRUE, sp)`.
+
+Real current FluffOS: this session found a real, locally-vendored
+current-FluffOS clone already present in this repo's own `temp/fluffos/`
+directory (a real `git log` dated August 2026, confirmed live against
+`master` before trusting it as current rather than assumed stale) --
+used directly rather than re-fetching from GitHub for this pass.
+`int db_connect(string host, string database, string|void user,
+int|void type)` -- host FIRST, then the database name, an optional
+user, an optional numeric backend-type selector (`USE_MSQL`/
+`USE_MYSQL`/`USE_SQLITE3`/`USE_POSTGRES`), gated by a differently-named
+`valid_database("connect", info)` master apply, not `check_privilege()`
+at all; `mixed db_exec(int handle, string sql)` -- the real doc comment
+states plainly, "Returns number of rows in result set on success, an
+error string on failure," confirmed in the body: success pushes the
+raw row count, failure pushes the error *string*, never the handle;
+`mixed *db_fetch(int db_handle, int row)` -- TWO arguments, the real
+doc's own worked example confirms explicit 1-indexed random access
+(`for(i=1; i<=rows; i++) { res = db_fetch(dbconn, i); }`), not a
+sequential walk; `int db_close(int handle)` -- returns a plain `1`/`0`
+success flag (whatever the backend's own real `close()` callback
+returns), not the handle number. Every one of these eight real
+distinctions (argument count/order on `db_connect`/`db_fetch`,
+return-value meaning on `db_exec`/`db_close`, the master-apply name) is
+a genuine, confirmed incompatibility with LDMud's own shape, not a
+cosmetic difference -- both sides now cited from direct reads of both
+real sources, not from either side's own prior summary alone.
+
+**Corpus evidence, checked fresh across every vendored corpus, not
+assumed carried forward.** Grepped `dead-souls`/`es2_mudlib`/`lima`/
+`nightmare3`/`reference-lpc-mud-library`/this project's own bundled
+`mudlib/` for `db_connect`/`db_exec`/`db_fetch`/`db_close(`: zero real
+call sites anywhere in any of them. `core-lib` is the only real corpus
+evidence this project has ever had for this row, and its own real call
+sites (`secure/simulated-efuns/database.c`) do not merely happen to fit
+LDMud's own shape, they actively *depend* on it: `efun::db_connect(
+database, user, password)` (3 args, no host -- would silently pass the
+real database name as "host" under real FluffOS's own arg order);
+`while (db_fetch(dbHandle));` (single-arg sequential walk -- a real
+arity mismatch, not just a different result, under real FluffOS's own
+required 2-arg form); and the single most concrete finding this session
+made: `dbHandle = efun::db_exec(dbHandle, sqlQuery);` -- this real line
+only makes sense under LDMud's own "db_exec returns the handle on
+success" contract (a same-value reassignment on success); under real
+FluffOS's own "returns rows-affected" contract, this exact real line
+would silently overwrite `dbHandle` with a row count instead,
+corrupting every subsequent `db_exec`/`db_fetch`/`db_close` call on
+that connection for the rest of that code path. **Zero real corpus
+evidence anywhere supports the FluffOS shape; 100% of this project's
+real corpus evidence for `db_*` requires and actively depends on the
+LDMud shape specifically** -- a real demand question already settled
+by the evidence, not a "current FluffOS also defines something with
+this name" completeness question, confirmed rather than assumed.
+
+**The resolution, and the reasoning behind it, stated before choosing
+(the same discipline every other real design decision in this project
+has used).** Two live options were on the table: dialect-gate `db_*` so
+`dialect: ldmud` and `dialect: fluffos` each get their own real
+signature under the same name (the precedent `shadow()`/connect-
+disconnect/`replace_program()`'s own no-arg form already established
+for confirmed, evidence-backed dialect divergences), or keep this
+driver's own single, already-correct LDMud-shaped implementation as the
+only one. Building a real, second, FluffOS-shaped target was rejected:
+it would mean writing and shipping code with zero real corpus evidence
+anywhere to verify it against, exactly the "purely a completeness
+question, not real demand" case this project's own evidence-first
+discipline exists to decline -- the same standard the entire `.spec`
+sweep arc has applied throughout (`pcre_*`'s own six deferred names,
+GMCP/MSDP, FFI, and so on). But the *previous* state -- `db_*`
+registered unconditionally under every dialect, including this driver's
+own default (`dialect: fluffos`), confirmed directly from
+`EfunTable.cpp`'s own registration code, not assumed -- was a real,
+separate bug independent of whether a second target is ever built: a
+FluffOS-dialect mudlib author writing genuine current-FluffOS-shaped
+`db_connect(host, database)` got a silently wrong result (LDMud's own
+arg-order reinterpretation), not an error, the exact "looks real,
+isn't" risk this project has declined to introduce elsewhere (the same
+reasoning row 2.38's own `uids.spec` deferral used). **Resolution:
+dialect-gate the existing, single, evidence-backed LDMud-shaped `db_*`
+family to `dialect: ldmud` only** -- all seven real efuns
+(`db_connect`/`db_exec`/`db_fetch`/`db_close`/`db_error`/`db_handles`/
+`db_conv_string`) now check `vm.config().dialect() == "ldmud"` first and
+throw a clear, explicit "not implemented under dialect '<dialect>'"
+error otherwise, converting a silent wrong-shape footgun into an
+honest, correctly-scoped gap -- not removing any real capability, since
+every pre-existing `db_*` test already ran under an explicit
+`dialect: ldmud` harness (confirmed by re-reading each one before
+making this change), meaning the original row 2.15 author's own
+test-level intent already assumed this exact scope even though the
+driver-level code itself never enforced it until now.
+
+**`db_commit(int)`/`db_rollback(int)` excluded outright, not merely
+deferred, on a finding stronger than the doc alone.** Read directly in
+`temp/fluffos/src/packages/db/db.cc`: both real C++ functions exist and
+are genuinely wired (`db->type->commit`/`db->type->rollback`), but that
+same file's own header comment states plainly, "No database type has
+been added that supports commit or rollback, so these functions have
+not been fully implemented" -- confirmed live in the actual backend
+table: every real backend (mSQL/MySQL/SQLite3/Postgres) leaves that
+callback null, so both efuns are unconditional no-ops across the entire
+real driver today, not just per the doc's own "Not yet implemented!"
+claim taken at face value. Building either here would mean inventing
+behavior the real driver itself does not have. `db_status(void)` is
+real, implemented, and no-argument (a whole-package status report
+across every open connection, confirmed in `f_db_status()`'s own real
+body), but stays out of scope for the same reason the rest of the
+FluffOS-shaped family does: zero real corpus evidence, and it would be
+the one `db_*` name built under the dialect this driver's own `db_*`
+family does not otherwise serve.
+
+**Built.** A shared `requireLdmudDbDialect(vm, efunName)` lambda
+(`EfunTable.cpp`), checked first in all seven `db_*` registrations,
+throwing a clear, explicit error naming both the efun and the current
+dialect when `vm.config().dialect() != "ldmud"`.
+
+**2 new regression tests (794 total, up from 792):**
+`db_connect()` under the default `dialect: fluffos` throws the new
+dialect-gate error rather than silently misinterpreting a real
+current-FluffOS-shaped call (checked directly against the exact real
+current-FluffOS argument order, `db_connect(host, database)`); all
+seven `db_*` efuns throw the same gate under both `dialect: fluffos`
+and `dialect: dgd`. The full pre-existing `db_*` cluster (row 2.15's
+own 6 tests, all already written against an explicit `dialect: ldmud`
+harness) re-ran unchanged, confirming the gate does not affect real
+LDMud-dialect behavior at all.
+
+**Live-verified against the real running driver, both dialect paths.**
+Under the default config (`./build/amlp etc/driver.cfg`, `dialect:
+fluffos`), a real TCP session, `eval return db_connect("somehost",
+"somedb");` threw the exact new dialect-gate message (confirmed in the
+driver's own log: `"db_connect(): not implemented under dialect
+'fluffos' -- ..."`), and the connection stayed open and usable for the
+next `eval` in the same session, confirming the earlier connection-
+isolation fix still holds. Under a temporary scratch config (a copy of
+`etc/driver.cfg` with `dialect: ldmud` added and a spare port, reverted
+via deletion immediately after), a full real login flow worked
+normally, and a full real `db_connect`/`db_exec`/`db_fetch`/`db_close`
+round trip against a real scratch SQLite file worked exactly as row
+2.15 originally verified: handles returned on `db_connect`/`db_exec`/
+`db_close` (real LDMud contract, confirmed live, not just in the unit
+tests), the inserted row read back correctly via `db_fetch`. Driver's
+own log showed no unexpected errors on either path. Test-account/
+character files and the scratch SQLite file created during verification
+deleted afterward.
+
+**Documentation updated to match:** `ROADMAP.md` row 2.15 appended with
+a correction to its own original "not dialect-gated... since there is
+no real FluffOS-named db_connect this driver also implements to
+disambiguate against" reasoning (that reasoning conflated "not building
+a second implementation" with "therefore no gating is needed" -- two
+separate questions); row 2.40 rewritten from an open scoping note into
+the full resolution and citation trail, marked `[x]`. `COMPARISON.md`'s
+Phase 2 done-count (13/45 to 14/45) and its feature-table `db_*` row
+updated to match, with a new dated re-sweep note rather than a rewrite.
+
 **2026-08-27 (a further session, same day): the full real
 `src/packages/` tree enumerated live (21 real package `.spec` files,
 not guessed), cross-checked against everything this project had already

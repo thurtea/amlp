@@ -255,12 +255,33 @@ that each resolve to an already-stated reason rather than a new one.
 See `ROADMAP.md` rows 2.37-2.45 and `STATUS.md`'s own dated entry for
 the full trail. 3 new regression tests (792 total, up from 789).
 
+**Re-swept 2026-08-27 (a further session, same day):** the LDMud-vs-
+FluffOS `db_*` naming collision the previous sweep found (row 2.40) is
+now resolved. Both real sources read directly, not assumed from either
+side's own summary: real LDMud's own `pkg-mysql.c` and real current
+FluffOS's own `db.c`/`db.spec` (a real, locally-vendored current-FluffOS
+clone, `temp/fluffos/`) diverge on every real `db_*` name's own argument
+shape or return-value meaning. Corpus evidence checked fresh: zero real
+`db_*` call sites anywhere outside `core-lib`, and `core-lib`'s own real
+usage does not merely fit LDMud's shape, it actively depends on it (one
+line, `dbHandle = efun::db_exec(dbHandle, sqlQuery);`, only makes sense
+under LDMud's own "returns the handle on success" contract -- under real
+FluffOS's own "returns rows-affected" contract that exact real line
+would silently corrupt the handle instead). Resolution: dialect-gate
+this driver's own single, already-correct, evidence-backed LDMud-shaped
+`db_*` family to `dialect: ldmud` only, rather than building a second,
+unverifiable FluffOS-shaped target -- converting what was previously a
+silent wrong-shape footgun under this driver's own default
+(`dialect: fluffos`) into an honest "not implemented for this dialect"
+gap. See `ROADMAP.md` rows 2.15/2.40 and `STATUS.md`'s own dated entry
+for the full trail. 2 new regression tests (794 total, up from 792).
+
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 45 | 13 | 32 | 29% |
+| 2, Beyond both (novel features) | 45 | 14 | 31 | 31% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
 
 **What is left open in Phase 1, and why each item stays open** (each
@@ -416,7 +437,7 @@ applicable).
 | Hotboot (fd-passing exec, connections survive) | No (Phase 2, not started) | Yes | Yes | Yes (via statedump/restart, different mechanism) |
 | World-level statedump / object swapout | No (Phase 2, not started) |, |, | Yes (DGD's own signature architecture) |
 | TLS / WebSocket | No (Phase 2, not started) | Not in this vendored ds2.08 snapshot | Not checked | Not checked |
-| Built-in SQLite / hash / JSON efuns | Partial (SQLite `db_connect`/`db_exec`/`db_fetch`/`db_close`, row 2.15, and `hash()`, row 2.16, both built and landed; JSON efuns, row 2.17, not started) | Some (own DB package options) | Some | Some |
+| Built-in SQLite / hash / JSON efuns | Partial (SQLite `db_connect`/`db_exec`/`db_fetch`/`db_close`, row 2.15, real LDMud shape specifically, dialect-gated to `dialect: ldmud` per row 2.40 -- real current FluffOS's own `db.spec` has a genuinely different `db_*` contract this driver does not implement; `hash()`, row 2.16, built and landed; JSON efuns, row 2.17, not started) | Some (own DB package options) | Some | Some |
 | LSP server (`--lsp`) | No (Phase 2, not started) |, |, |: |
 | Generational GC (replacing `shared_ptr`) | No (Phase 3, not started) | Real GC | Real GC | Real GC |
 | Full privilege/uid trust hierarchy | Partial (`privs()`, no full uid/euid/domain hierarchy) | Yes | Yes | Yes (own model) |
@@ -440,15 +461,17 @@ applicable).
   Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
   conformance suite, generational GC -- all still have a real
   `instruct.md` and zero implementation, and none of them should be
-  described as "in progress." Thirteen Phase 2 rows are the exception,
+  described as "in progress." Fourteen Phase 2 rows are the exception,
   real and landed rather than planned: the apply cache (2.9), the full
-  PCRE suite (2.12), built-in SQLite (2.15), the `hash()` efun (2.16),
+  PCRE suite (2.12), built-in SQLite (2.15, now correctly dialect-gated
+  to `ldmud` per row 2.40), the `hash()` efun (2.16),
   `time_ns()`/`perf_counter_ns()` (2.23), `secure_random()` (2.24),
   `log2()`/`round()` (2.25), `trim()`/`ltrim()`/`rtrim()` (2.26),
   `explode_reversible()` (2.27), `call_out_walltime()` (2.28),
   `enable_wizard()`/`disable_wizard()`/`wizardp()` (2.29),
-  `sys_network_ports()` (2.30), and `roll_MdN()`/`vowel()`/`add_a()`
-  (2.37) -- along with Phase 3's own row 3.9, a
+  `sys_network_ports()` (2.30), `roll_MdN()`/`vowel()`/`add_a()`
+  (2.37), and the LDMud-vs-FluffOS `db_*` naming-collision resolution
+  itself (2.40) -- along with Phase 3's own row 3.9, a
   real third-party mudlib boot-and-play confirmation.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger

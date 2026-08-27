@@ -25084,6 +25084,93 @@ static void testDbExecOnAnUnknownHandleThrowsIllegalHandle() {
     std::cout << "testDbExecOnAnUnknownHandleThrowsIllegalHandle OK\n";
 }
 
+// db_* dialect gate (ROADMAP.md row 2.40, added 2026-08-27): this
+// driver's own db_* family matches real LDMud's own pkg-mysql.c
+// signature/return semantics specifically, confirmed to diverge from
+// real current FluffOS's own db.c/db.spec in every real argument shape
+// and return contract (host-first db_connect vs. no host at all,
+// rows-affected-or-error-string db_exec vs. handle-or-zero, row-indexed
+// two-arg db_fetch vs. sequential single-arg, a 1/0 db_close vs. the
+// handle number) -- with zero real corpus evidence anywhere for the
+// FluffOS shape. Rather than silently offering LDMud's own contract
+// under every dialect including this driver's own default
+// ("dialect: fluffos"), db_* now throws a clear, honest "not
+// implemented under this dialect" error there instead -- converting a
+// silent wrong-shape footgun into an honest gap, the same "throw rather
+// than silently misbehave" principle this codebase already applies
+// elsewhere. The pre-existing db_* tests just above already all ran
+// under an explicit "dialect: ldmud" harness, confirming (both before
+// and after this gate) that real LDMud-dialect behavior is completely
+// unaffected -- these two tests cover the new, previously-silent-wrong
+// "dialect: fluffos"/"dialect: dgd" rejection side specifically.
+
+static void testDbConnectThrowsCleanlyUnderFluffosDialectInsteadOfSilentlyMisinterpretingArguments() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness; // default dialect: fluffos, this driver's own default
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_fluffos_probe.c",
+        "int do_connect(string a, string b) { return db_connect(a, b); }\n");
+    auto ob = harness.objects.cloneObject("/db_fluffos_probe");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    std::string message;
+    try {
+        // A real current-FluffOS-style call: db_connect(host, database).
+        // Under the old, ungated behavior this driver would have
+        // silently reinterpreted "host_value" as the LDMud-shaped
+        // database name and "db_value" as the LDMud-shaped user --
+        // wrong, not an error. It must now throw instead.
+        harness.vm.callFunction(ob, "do_connect",
+            {amlp::Value(std::string("host_value")), amlp::Value(std::string("db_value"))});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        message = e.what();
+    }
+    assert(threw);
+    assert(message.find("db_connect") != std::string::npos);
+    assert(message.find("dialect") != std::string::npos);
+
+    std::cout << "testDbConnectThrowsCleanlyUnderFluffosDialectInsteadOfSilentlyMisinterpretingArguments OK\n";
+}
+
+static void testAllSevenDbEfunsThrowTheDialectGateUnderFluffosAndDgd() {
+    for (const char* dialectCfg : {"dialect: fluffos\n", "dialect: dgd\n", ""}) {
+        amlp::DbRegistry::resetForTests();
+        ObjectVarHarness harness(dialectCfg);
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+        assert(harness.objects.loadMasterObject());
+        harness.writeFile("/db_gate_probe.c",
+            "int do_connect() { return db_connect(\"x\"); }\n"
+            "int do_exec() { return db_exec(1, \"x\"); }\n"
+            "mixed do_fetch() { return db_fetch(1); }\n"
+            "int do_close() { return db_close(1); }\n"
+            "mixed do_error() { return db_error(1); }\n"
+            "int *do_handles() { return db_handles(); }\n"
+            "string do_conv() { return db_conv_string(\"x\"); }\n");
+        auto ob = harness.objects.cloneObject("/db_gate_probe");
+        assert(ob != nullptr);
+
+        for (const char* fn : {"do_connect", "do_exec", "do_fetch", "do_close",
+                                "do_error", "do_handles", "do_conv"}) {
+            bool threw = false;
+            try {
+                harness.vm.callFunction(ob, fn, {});
+            } catch (const amlp::LpcRuntimeError&) {
+                threw = true;
+            }
+            assert(threw);
+        }
+    }
+
+    std::cout << "testAllSevenDbEfunsThrowTheDialectGateUnderFluffosAndDgd OK\n";
+}
+
 // ROADMAP.md row 2.5's own first slice (C++20 coroutine scheduler).
 // Real row 2.6 async/await grammar does not exist yet -- no async/await
 // token appears anywhere under src/compiler, confirmed directly -- so
@@ -26115,6 +26202,8 @@ int main() {
     testDbConnectDeniedByPrivilegeViolationThrows();
     testDbConnectWithNoMasterPrivilegeViolationLfunHardErrors();
     testDbExecOnAnUnknownHandleThrowsIllegalHandle();
+    testDbConnectThrowsCleanlyUnderFluffosDialectInsteadOfSilentlyMisinterpretingArguments();
+    testAllSevenDbEfunsThrowTheDialectGateUnderFluffosAndDgd();
     testAsyncFunctionSuspendsOnAwaitAndResumesWithLocalStatePreserved();
     testOrdinarySynchronousFunctionUnaffectedByAsyncMachineryExistingInTheSameBinary();
     testAwaitReachedThroughANestedPlainCallPropagatesSuspendCorrectly();

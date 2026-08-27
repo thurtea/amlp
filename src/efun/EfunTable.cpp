@@ -9921,7 +9921,8 @@ void registerCoreEfuns() {
         return Value(arr);
     });
 
-    // --- db_* (ROADMAP.md row 2.15, scoped 2026-08-21) ----------------
+    // --- db_* (ROADMAP.md row 2.15, scoped 2026-08-21; dialect-gated
+    // 2026-08-27, ROADMAP.md row 2.40) --------------------------------
     // Real LDMud's own db_* family (temp/ldmud/src/pkg-mysql.c), not
     // FluffOS's -- see DbRegistry.hpp's own header comment for the full
     // evidence chain (core-lib's own README.md states it targets LDMud;
@@ -9936,9 +9937,56 @@ void registerCoreEfuns() {
     // in pkg-mysql.c passes MY_TRUE). db_conv_string is the one real
     // exception -- its own real doc/source has no check_privilege() call
     // at all, so it is not gated here either.
+    //
+    // Dialect-gated to "ldmud" only, added this session after a full
+    // .spec-sweep pass confirmed real current FluffOS's own db.spec/
+    // db.cc (temp/fluffos/src/packages/db/) diverges from this family in
+    // every real signature: db_connect(host, database, user, type) vs.
+    // LDMud's db_connect(database, user, password) -- host is FIRST
+    // under real FluffOS, absent entirely under real LDMud; db_exec()
+    // returns rows-affected-or-error-string under real FluffOS vs. the
+    // handle-on-success/0-on-error real LDMud returns; db_fetch(handle,
+    // row) is row-indexed under real FluffOS vs. LDMud's sequential,
+    // single-arg db_fetch(handle); db_close() returns a 1/0 success flag
+    // under real FluffOS vs. the handle number real LDMud returns; real
+    // FluffOS gates on a differently-named valid_database() master apply,
+    // not check_privilege(). Every real corpus this project has evidence
+    // for was re-checked directly (not assumed): zero real db_* call
+    // sites anywhere outside core-lib (dead-souls, es2_mudlib, lima,
+    // nightmare3, reference-lpc-mud-library, this project's own bundled
+    // mudlib all confirmed clean), and core-lib's own real usage does
+    // not merely happen to fit LDMud's shape, it actively depends on it
+    // -- secure/simulated-efuns/database.c's own "dbHandle =
+    // efun::db_exec(dbHandle, sqlQuery);" idiom only makes sense under
+    // real LDMud's own "db_exec returns the handle on success" contract;
+    // under real FluffOS's own "returns rows-affected" contract, that
+    // exact real line would silently overwrite dbHandle with a row count
+    // instead, corrupting every subsequent call on that connection. Zero
+    // real evidence anywhere justifies building a second, FluffOS-shaped
+    // db_* target -- gating this driver's own single, real, evidence-
+    // backed implementation to the one dialect it is actually correct
+    // for converts what was previously a silent wrong-shape footgun
+    // under "dialect: fluffos" (this driver's own default) into an
+    // honest "not implemented for this dialect" gap instead, the same
+    // "throw rather than silently misbehave" principle this codebase
+    // already applies elsewhere (an unsupported sscanf/sprintf format,
+    // an unsupported explode_reversible() delimiter, and so on).
+    auto requireLdmudDbDialect = [](VM& vm, const char* efunName) {
+        if (vm.config().dialect() != "ldmud") {
+            throw LpcRuntimeError(std::string(efunName) +
+                "(): not implemented under dialect '" + vm.config().dialect() +
+                "' -- this driver's db_* family matches real LDMud's own "
+                "pkg-mysql.c signature and return semantics specifically, "
+                "confirmed to diverge from real current FluffOS's own "
+                "db.c/db.spec in every real db_* argument shape and return "
+                "contract, with zero real corpus evidence anywhere for the "
+                "FluffOS shape (see ROADMAP.md row 2.40)");
+        }
+    };
 
     // int db_connect(string database, string|void user, string|void password)
-    t.registerEfun("db_connect", [](VM& vm, std::vector<Value>& args) -> Value {
+    t.registerEfun("db_connect", [requireLdmudDbDialect](VM& vm, std::vector<Value>& args) -> Value {
+        requireLdmudDbDialect(vm, "db_connect");
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("db_connect: expected a database name string");
         }
@@ -9961,7 +10009,8 @@ void registerCoreEfuns() {
     });
 
     // int db_exec(int handle, string statement)
-    t.registerEfun("db_exec", [](VM& vm, std::vector<Value>& args) -> Value {
+    t.registerEfun("db_exec", [requireLdmudDbDialect](VM& vm, std::vector<Value>& args) -> Value {
+        requireLdmudDbDialect(vm, "db_exec");
         if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data) ||
             !std::holds_alternative<std::string>(args[1].data)) {
             throw LpcRuntimeError("db_exec: expected (int handle, string statement)");
@@ -9975,7 +10024,8 @@ void registerCoreEfuns() {
     });
 
     // mixed db_fetch(int handle)
-    t.registerEfun("db_fetch", [](VM& vm, std::vector<Value>& args) -> Value {
+    t.registerEfun("db_fetch", [requireLdmudDbDialect](VM& vm, std::vector<Value>& args) -> Value {
+        requireLdmudDbDialect(vm, "db_fetch");
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("db_fetch: expected an int handle argument");
         }
@@ -9987,7 +10037,8 @@ void registerCoreEfuns() {
     });
 
     // int db_close(int handle)
-    t.registerEfun("db_close", [](VM& vm, std::vector<Value>& args) -> Value {
+    t.registerEfun("db_close", [requireLdmudDbDialect](VM& vm, std::vector<Value>& args) -> Value {
+        requireLdmudDbDialect(vm, "db_close");
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("db_close: expected an int handle argument");
         }
@@ -9999,7 +10050,8 @@ void registerCoreEfuns() {
     });
 
     // string|int db_error(int handle)
-    t.registerEfun("db_error", [](VM& vm, std::vector<Value>& args) -> Value {
+    t.registerEfun("db_error", [requireLdmudDbDialect](VM& vm, std::vector<Value>& args) -> Value {
+        requireLdmudDbDialect(vm, "db_error");
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("db_error: expected an int handle argument");
         }
@@ -10011,7 +10063,8 @@ void registerCoreEfuns() {
     });
 
     // int *db_handles()
-    t.registerEfun("db_handles", [](VM& vm, std::vector<Value>&) -> Value {
+    t.registerEfun("db_handles", [requireLdmudDbDialect](VM& vm, std::vector<Value>&) -> Value {
+        requireLdmudDbDialect(vm, "db_handles");
         if (!vm.privilegeViolation("mysql", {Value(std::string("db_handles"))})) {
             throw LpcRuntimeError("db_handles(): Privilege violation.");
         }
@@ -10021,7 +10074,8 @@ void registerCoreEfuns() {
     });
 
     // string db_conv_string(string str)
-    t.registerEfun("db_conv_string", [](VM&, std::vector<Value>& args) -> Value {
+    t.registerEfun("db_conv_string", [requireLdmudDbDialect](VM& vm, std::vector<Value>& args) -> Value {
+        requireLdmudDbDialect(vm, "db_conv_string");
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("db_conv_string: expected a string argument");
         }

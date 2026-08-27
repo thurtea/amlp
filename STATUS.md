@@ -9,6 +9,175 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): the full real
+`src/packages/` tree enumerated live (21 real package `.spec` files,
+not guessed), cross-checked against everything this project had already
+swept -- found `dwlib`/`uids`/`mudlib_stats`/`compress`/`external`/
+`async`/`develop`/`ffi`/`matrix`/`jsbridge` had never actually been
+checked. `dwlib.spec` yielded three small, independently-verifiable
+names, built this session; the rest named and scoped as eight new
+deferred rows with concrete reasons, including one real, worth-naming
+finding: this driver's own already-shipped `db_*` family was built
+against real LDMud's own db package, not real current FluffOS's own
+`db.spec` at all. 792 tests passing (up from 789), all three built
+efuns live-verified against the real running driver.**
+
+**The enumeration, and what it found.** `curl`'d the GitHub API's own
+recursive tree listing for `fluffos/fluffos@master` directly (not
+assumed from memory of prior sessions' own cached file lists), filtered
+to `src/packages/*/*.spec`: 21 real files, an exact, confirmed count,
+matching what this project had already accumulated piecemeal across
+several sessions but never formally enumerated in one pass. Cross-
+referenced against what had already been swept: `math.spec`/`core.spec`/
+`trim.spec`/`contrib.spec`/`ops.spec` in the immediately prior session;
+`sockets.spec`/`pcre.spec`/`db.spec` when those Phase 0/2 rows were
+originally built (rows 0.x, 2.12, 2.15) -- confirmed this by actually
+re-running this session's own extraction-and-cross-reference method
+against all three rather than trusting the "already covered" framing
+outright, since the point of a systematic sweep is not re-trusting
+partial coverage from a different discipline (see below for what that
+re-check actually found). Ten real files had genuinely never been
+checked this way at all: `dwlib`/`uids`/`mudlib_stats`/`compress`/
+`external`/`async`/`develop`/`ffi`/`matrix`/`jsbridge`.
+
+**Re-checking `sockets.spec`/`pcre.spec`/`db.spec`, rather than trusting
+"already covered" at face value, surfaced two real, worth-naming
+findings.** `sockets.spec`: 12 of 14 real names already implemented,
+the 2 gaps (`socket_get_option`/`socket_set_option`) both genuinely
+new-since-2.9 and both exclusively about TLS socket configuration this
+driver has no equivalent of at all -- a real gap, correctly explained by
+row 2.13 (TLS) not yet landing, not a sweep failure. `pcre.spec`: the
+real gap here (`pcre_version`/`pcre_match_all`/`pcre_extract`/
+`pcre_replace`/`pcre_replace_callback`/`pcre_cache`, 6 of 8 real names)
+turned out to already be fully documented in `EfunTable.cpp`'s own
+existing comment on `pcre_match()`/`pcre_assoc()`'s own registration --
+this row's own original 2026-08-21 session already found and named all
+six, deliberately excluded on zero-real-corpus-evidence grounds (this
+project's own long-standing discipline for Phase 0/1 rows). Not a newly
+discovered gap, confirmed and reported as such rather than re-presented
+as new. `db.spec` is where the real, worth-naming finding actually is:
+this driver's own already-shipped `db_connect`/`db_exec`/`db_fetch`/
+`db_close` family (row 2.15) was built and cited entirely against real
+**LDMud's** own `pkg-mysql.c`, never against real FluffOS's own
+`db.c`/`db.spec` at all -- confirmed directly from `DbRegistry.hpp`'s
+own header comment, which already states this plainly and cites the
+real signature differences (`db_connect`'s own host argument, `db_exec`'s
+own return shape, `db_fetch`'s own row-vs-sequential indexing, the
+`db_error`/`db_handles`/`db_conv_string` names FluffOS's own package
+never had at all). A real, deliberate, well-reasoned choice at the
+time (LDMud was this driver's own real corpus evidence for the row, not
+FluffOS), but it means this driver's own `db_*` family, despite sharing
+efun *names* with real current FluffOS, does not actually honor real
+FluffOS's own `db_*` *contract* -- a genuine divergence from "current
+FluffOS," the exact thing this whole multi-session arc has been
+checking for, found here specifically because this session re-verified
+rather than trusted a prior session's own "already covered" framing.
+
+**Two real `db.spec` names, `db_commit()`/`db_rollback()`, excluded
+outright rather than deferred -- their own real docs settle it.**
+Fetched live (`docs/efun/db/db_commit.md`/`db_rollback.md`): both state,
+verbatim, **"Not yet implemented!"** Real current FluffOS itself has
+never actually implemented either one. Building them here would mean
+inventing behavior the real driver does not have, the opposite of this
+project's own "port the real behavior" discipline -- confirmed via the
+real doc directly, not assumed from the name looking plausible.
+
+**Ranked by the same independent-verifiability standard as every
+session in this arc.** `dwlib.spec` (11 real names, `src/packages/dwlib/
+dwlib.spec`, fetched live) was found the same way `math.spec`/`trim.spec`
+were: cross-referenced against `EfunTable.cpp`'s own `registerEfun()`
+calls, then checked against the vendored 2.9 reference. Three cleared
+the bar this session:
+
+- **`vowel(int c)`**: a plain ASCII a/e/i/o/u check, both cases. As
+  airtight as any check in this whole arc -- a fixed, tiny input space,
+  fully enumerable in one test.
+- **`add_a(string str)`**: "a"/"an" prefixing by phonetic sound, not
+  just first-letter, with two real special cases (`"us..."` and
+  `"hour..."`). Real `f_add_a()` (`dwlib.cc`, fetched live) was read
+  and traced by hand against every one of the real doc's own worked/
+  implied examples before writing a single line of driver code or a
+  single test assertion -- fully deterministic, zero live-instance
+  dependency, the exact same "port the real algorithm, verify every
+  branch by hand first" discipline this project has used since row
+  0.13a's own `parse_*` work.
+- **`roll_MdN(int rolls, int sides, int bonus default:0)`**: real
+  `f_roll_MdN()` (`src/packages/contrib/contrib.cc`, fetched live --
+  declared in `dwlib.spec` but actually implemented in the contrib
+  package, confirmed directly rather than assumed from the file split)
+  sums `rolls` draws of `1 + random_number(sides)` plus `bonus`, but
+  only when both `rolls` and `sides` are positive -- a real edge case
+  (bonus not added on non-positive dice either) confirmed from the
+  real guard's own scope, not assumed symmetric. Reuses this driver's
+  own already-ported `random()` efun directly, the same pattern this
+  driver's own pre-existing `roll_weapon_damage_dice()` combat helper
+  already established -- real `roll_MdN()` has no floor-at-1 the way
+  that AMLP-invented neighbor does, a real, deliberate difference
+  named explicitly rather than silently copied over.
+
+**Built.** All three registered in `EfunTable.cpp`, `roll_MdN()`
+placed right next to the pre-existing `roll_weapon_damage_dice()`
+helper it structurally resembles (and explicitly differs from),
+`vowel()`/`add_a()` nearby.
+
+**3 new regression tests (792 total, up from 789):** `roll_MdN()`
+stays within formula-derived bounds across 3000 draws per case
+(mirroring `testRollWeaponDamageDiceStaysWithinFormulaDerivedBounds
+AcrossManyDraws`'s own established shape), including the real
+non-positive-dice-means-no-bonus edge case; `vowel()` against every
+ASCII vowel both cases plus several non-vowels; `add_a()` against
+every real doc example and both special-case branches.
+
+**Live-verified against the real running driver** (`./build/amlp
+etc/driver.cfg`, a real TCP session, the same real bundled mudlib and
+gatehouse login flow prior sessions used), via real `eval` calls:
+`vowel('a')`/`vowel('b')` returned `1`/`0`; `add_a("apple")`/
+`add_a("cat")`/`add_a("user")`/`add_a("usher")`/`add_a("hour")`
+returned `"an apple"`/`"a cat"`/`"a user"`/`"an usher"`/`"an hour"`
+exactly; `roll_MdN(3, 6, 0)` returned a real in-range roll (`10`);
+`roll_MdN(0, 6, 5)` returned `0`, confirming the real non-positive-dice
+guard live, not just in the unit test. Zero errors in the driver's own
+log throughout. Test-account/character files created during
+verification (`specsweep27`/`SpecSweepChar`) deleted afterward.
+
+**Eight real names/families found and deliberately deferred, each with
+a concrete reason, not dropped silently** (full citation trail in each
+row's own `ROADMAP.md` cell, summarized here): `seteuid`/`geteuid`/
+`getuid`/`export_uid` (`uids.spec`) -- a real, meaningful UID/EUID trust
+hierarchy, directly the same gap `COMPARISON.md`'s own accounting
+already names, deliberately not approximated as a bare, ungated flag
+pair the way the wizard flag was, since an ungated stand-in for a
+security-relevant mechanism would look real while providing none of
+the real guarantees; `socket_get_option`/`socket_set_option` -- real,
+but entirely TLS-only, deferred alongside row 2.13 specifically;
+`db_status()` -- entangled with the real LDMud-vs-FluffOS `db_*`
+contract question found above, not a quick addition; `domain_stats`/
+`author_stats` (`mudlib_stats.spec`) -- needs a genuinely new,
+continuously-updated per-domain/per-author bookkeeping subsystem this
+driver has none of; `compress`/`uncompress`/`compress_file`/
+`uncompress_file` (`compress.spec`) -- blocked on the same missing
+buffer type row 2.33 already named, plus a new zlib dependency;
+`external_start` (`external.spec`) -- real subprocess spawning with a
+real security surface, gated by the same missing runtime-config
+registry row 2.34 (`set_config()`) already named; `async_read`/
+`async_write`/`async_getdir`/`async_db_exec` (`async.spec`) -- needs
+real background I/O wired through this driver's own `Scheduler`, the
+same size class as the already-landed coroutine scheduler (row 2.5)
+but for I/O specifically; and a final group (`ffi.spec`'s 18 names,
+`develop.spec`'s remaining 12, `matrix.spec`'s 8, `jsbridge.spec`'s 3)
+that each resolve to an already-stated reason (buffer type, driver-
+internals-diagnostics category already scoped in row 2.36, a niche
+3D-mud package, a WASM-only bridge this native driver has no analog
+for) rather than a new one, checked directly against this session's
+own real `.spec` fetch rather than assumed to overlap.
+
+**Documentation updated to match:** nine new `ROADMAP.md` rows,
+2.37 (`[x]`, the three built efuns, full citation trail) and 2.38-2.45
+(`[ ]`, the eight deferred names/families, each with its own concrete,
+source-cited reason); `COMPARISON.md`'s Phase 2 done-count (12/36 to
+13/45) and its "what AMLP does not have" bullet updated to match, with
+a new dated re-sweep note rather than a rewrite.
+
 **2026-08-27 (a further session, same day): the row 2.25 method
 (cross-check an already-partially-implemented efun category's real
 current `.spec` file against this driver's own registered efuns, not

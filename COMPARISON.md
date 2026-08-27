@@ -222,12 +222,45 @@ diagnostics. See `ROADMAP.md` rows 2.26-2.36 and `STATUS.md`'s own
 dated entry for the full trail. 12 new regression tests (789 total, up
 from 776).
 
+**Re-swept 2026-08-27 (a further session, same day):** the full real
+`src/packages/` directory enumerated live (21 real package `.spec`
+files, confirmed via the GitHub API tree, not guessed) and cross-checked
+against what this project had already swept -- `math`/`core`/`trim`/
+`contrib`/`ops` in the prior sweep, `sockets`/`pcre`/`db` when those
+Phase 0/2 rows were originally built. Found `dwlib`/`uids`/
+`mudlib_stats`/`compress`/`external`/`async`/`develop`/`ffi`/`matrix`/
+`jsbridge` had never actually been checked against this driver's
+registered efuns. `dwlib.spec` yielded three small, independently-
+verifiable names, built as row 2.37 (`roll_MdN`/`vowel`/`add_a`). The
+rest named and scoped as eight new deferred rows (2.38-2.45) rather
+than built speculatively: a real UID/EUID trust hierarchy correctly
+declined as a bare, ungated stand-in (the same "looks real, isn't"
+risk that would matter more here than it did for the wizard flag,
+since uid/euid is explicitly security-relevant); TLS-only socket
+options, deferred alongside row 2.13; `db_commit`/`db_rollback`,
+excluded outright once their own real docs turned out to say **"Not
+yet implemented!"** in real current FluffOS itself; a real, separate
+finding along the way worth naming precisely -- this driver's own
+already-shipped `db_*` family (row 2.15) was built and cited against
+real **LDMud's** own db package, not real current FluffOS's own
+`db.spec` at all (confirmed directly from `DbRegistry.hpp`'s own header
+comment, not newly asserted), so `db_status()` is entangled with a
+real, larger "which `db_*` contract does this driver actually honor"
+question rather than a quick addition; a new mudlib-statistics
+subsystem; zlib compression pending the same missing buffer type row
+2.33 already named; subprocess spawning with a real security surface;
+real async I/O architecture; and a group of remaining names (FFI,
+further debug internals, a niche 3D-math package, a WASM-only bridge)
+that each resolve to an already-stated reason rather than a new one.
+See `ROADMAP.md` rows 2.37-2.45 and `STATUS.md`'s own dated entry for
+the full trail. 3 new regression tests (792 total, up from 789).
+
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 36 | 12 | 24 | 33% |
+| 2, Beyond both (novel features) | 45 | 13 | 32 | 29% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
 
 **What is left open in Phase 1, and why each item stays open** (each
@@ -407,14 +440,15 @@ applicable).
   Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
   conformance suite, generational GC -- all still have a real
   `instruct.md` and zero implementation, and none of them should be
-  described as "in progress." Twelve Phase 2 rows are the exception,
+  described as "in progress." Thirteen Phase 2 rows are the exception,
   real and landed rather than planned: the apply cache (2.9), the full
   PCRE suite (2.12), built-in SQLite (2.15), the `hash()` efun (2.16),
   `time_ns()`/`perf_counter_ns()` (2.23), `secure_random()` (2.24),
   `log2()`/`round()` (2.25), `trim()`/`ltrim()`/`rtrim()` (2.26),
   `explode_reversible()` (2.27), `call_out_walltime()` (2.28),
-  `enable_wizard()`/`disable_wizard()`/`wizardp()` (2.29), and
-  `sys_network_ports()` (2.30) -- along with Phase 3's own row 3.9, a
+  `enable_wizard()`/`disable_wizard()`/`wizardp()` (2.29),
+  `sys_network_ports()` (2.30), and `roll_MdN()`/`vowel()`/`add_a()`
+  (2.37) -- along with Phase 3's own row 3.9, a
   real third-party mudlib boot-and-play confirmation.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger

@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <dirent.h>
 #include <fnmatch.h>
@@ -7702,6 +7703,143 @@ void registerCoreEfuns() {
         }
         damage += bonus;
         return Value(damage > 0 ? damage : int64_t{1});
+    });
+
+    // int roll_MdN(int rolls, int sides, int bonus default: 0) --
+    // current FluffOS's own real, genuinely new-since-2.9 efun
+    // (confirmed absent from temp/reference/fluffos-2.9-ds2.08 entirely:
+    // no roll_MdN anywhere in that tree). Found via a systematic sweep
+    // of src/packages/dwlib/dwlib.spec against this driver's registered
+    // efuns, the same method rows 2.16/2.23-2.30 used. Signature
+    // confirmed directly: dwlib.spec's own "int roll_MdN(int, int, int
+    // default:0);". Real f_roll_MdN() (src/packages/contrib/contrib.cc,
+    // fetched live -- declared in dwlib.spec but actually implemented
+    // in the contrib package, confirmed directly rather than assumed
+    // from the file split): "if (rolls > 0 && sides > 0) { while
+    // (rolls--) { roll += 1 + random_number(sides); } roll += bonus; }"
+    // -- rolls dice.sides()-many draws of 1 + random_number(sides) (a
+    // uniform [1, sides] die, the same real random_number() this
+    // driver's own random() efun already ports faithfully, reused
+    // directly below via EfunTable::call() the same way this driver's
+    // own pre-existing roll_weapon_damage_dice() helper immediately
+    // above already does), sums them, adds bonus -- but ONLY when both
+    // rolls and sides are positive; a non-positive rolls or sides
+    // returns a real, plain 0, bonus NOT added in that case either,
+    // confirmed directly from the real guard's own scope rather than
+    // assumed symmetric with the positive case. Unlike this driver's
+    // own roll_weapon_damage_dice() neighbor above (an AMLP-invented,
+    // damage-specific helper that floors its own result at 1), real
+    // roll_MdN() has no such floor -- a real, deliberate difference,
+    // not an oversight, since the two are unrelated real functions that
+    // merely resemble each other in shape.
+    t.registerEfun("roll_MdN", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("roll_MdN: expected (int rolls, int sides, int bonus default: 0)");
+        }
+        int64_t rolls = std::get<int64_t>(args[0].data);
+        int64_t sides = std::get<int64_t>(args[1].data);
+        int64_t bonus = 0;
+        if (args.size() > 2 && std::holds_alternative<int64_t>(args[2].data)) {
+            bonus = std::get<int64_t>(args[2].data);
+        }
+        int64_t roll = 0;
+        if (rolls > 0 && sides > 0) {
+            std::vector<Value> sidesArg{ Value(sides) };
+            for (int64_t j = 0; j < rolls; ++j) {
+                Value draw = EfunTable::instance().call("random", vm, sidesArg);
+                roll += std::get<int64_t>(draw.data) + 1;
+            }
+            roll += bonus;
+        }
+        return Value(roll);
+    });
+
+    // int vowel(int c) -- current FluffOS's own real, genuinely
+    // new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08 entirely). Found the same sweep
+    // as roll_MdN() above. Signature confirmed directly:
+    // dwlib.spec's own "int vowel(int);" (the real doc,
+    // docs/efun/contrib/vowel.md, fetched live: "test whether a
+    // character is a vowel"). Real f_vowel() (dwlib.cc, fetched live):
+    // "char const v = (char)sp->u.number; if (v == 'a' || ... || v ==
+    // 'U') { sp->u.number = 1; } else { sp->u.number = 0; }" -- a plain
+    // ASCII a/e/i/o/u check, both cases, ported verbatim.
+    t.registerEfun("vowel", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("vowel: expected an int argument");
+        }
+        char c = static_cast<char>(std::get<int64_t>(args[0].data));
+        bool isVowel = c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' ||
+                       c == 'A' || c == 'E' || c == 'I' || c == 'O' || c == 'U';
+        return Value(static_cast<int64_t>(isVowel ? 1 : 0));
+    });
+
+    // string add_a(string str) -- current FluffOS's own real, genuinely
+    // new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08 entirely). Found the same
+    // sweep. Signature confirmed directly: dwlib.spec's own "string
+    // add_a(string);". Real f_add_a() (dwlib.cc, fetched live), ported
+    // step for step, not approximated: skip leading spaces; an
+    // all-spaces (or now-empty) string returns "a " outright; a string
+    // already starting with "a "/"an " (case-insensitive) is returned
+    // unchanged; otherwise the decision character defaults to the
+    // (space-trimmed) string's own first character, with two real
+    // special cases before the vowel check runs -- a leading "us"
+    // (case-insensitive) redirects the decision character to the third
+    // character instead (the letter right after "us"), starting the
+    // "an" decision pre-flipped true ("a use"/"a user"/"a usurper" all
+    // redirect to a vowel there and flip back to "a "; "an usher"
+    // redirects to a consonant there and stays "an "); a leading "hour"
+    // (case-insensitive) forces the decision character to 'o'. The
+    // decision character is then checked against a/e/i/o/u (both
+    // cases): a vowel there flips the "an" state, anything else leaves
+    // it alone -- "an " is prepended if the final state is true,
+    // otherwise "a ". Every one of the real doc's own worked/implied
+    // examples was traced through this exact algorithm by hand before
+    // writing the regression tests: "an apple", "a cat", "a user",
+    // "a use", "a usurper", "an usher", "an hour" -- all real, all
+    // deterministic, zero live-current-FluffOS-instance dependency
+    // needed to verify any of them.
+    t.registerEfun("add_a", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("add_a: expected a string argument");
+        }
+        const std::string& raw = std::get<std::string>(args[0].data);
+        size_t start = 0;
+        while (start < raw.size() && raw[start] == ' ') ++start;
+        if (start == raw.size()) return Value(std::string("a "));
+
+        std::string str = raw.substr(start);
+        auto startsWithCI = [&str](const char* prefix) -> bool {
+            size_t n = std::strlen(prefix);
+            if (str.size() < n) return false;
+            for (size_t i = 0; i < n; ++i) {
+                if (std::tolower(static_cast<unsigned char>(str[i])) !=
+                    std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
+            }
+            return true;
+        };
+        if (startsWithCI("a ") || startsWithCI("an ")) return Value(str);
+
+        char first = str[0];
+        bool an = false;
+        if (startsWithCI("us") && str.size() > 2) {
+            first = str[2];
+            an = true;
+        }
+        if (startsWithCI("hour")) {
+            first = 'o';
+        }
+        switch (first) {
+            case 'a': case 'e': case 'i': case 'o': case 'u':
+            case 'A': case 'E': case 'I': case 'O': case 'U':
+                an = !an;
+                break;
+            default:
+                break;
+        }
+        return Value((an ? std::string("an ") : std::string("a ")) + str);
     });
 
     // Shared helper for query_strike_bonus/query_parry_bonus below: real

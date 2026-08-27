@@ -15716,6 +15716,100 @@ static void testRollWeaponDamageDiceStaysWithinFormulaDerivedBoundsAcrossManyDra
     std::cout << "testRollWeaponDamageDiceStaysWithinFormulaDerivedBoundsAcrossManyDraws OK\n";
 }
 
+// roll_MdN(int, int, int default:0)/vowel(int)/add_a(string) -- current
+// FluffOS's own real, genuinely new-since-2.9 efuns (confirmed absent
+// from the vendored 2.9 ds2.08 reference entirely), found via a
+// systematic sweep of src/packages/dwlib/dwlib.spec against this
+// driver's registered efuns -- see EfunTable.cpp's own citation on each
+// registration for the full trail.
+
+static void testRollMdNStaysWithinFormulaDerivedBoundsAndAddsBonusOnlyWhenDiceArePositive() {
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    struct Case { int64_t rolls, sides, bonus, lo, hi; };
+    Case cases[] = {
+        {3, 6, 0, 3, 18},     // 3d6, no bonus
+        {2, 4, 100, 102, 108}, // large positive bonus
+        {1, 4, -10, -9, -6},  // real roll_MdN has no floor, unlike this
+                              // driver's own roll_weapon_damage_dice()
+        {0, 6, 5, 0, 0},      // rolls == 0: real guard skips the bonus too
+        {2, 0, 5, 0, 0},      // sides == 0: same real guard, same result
+    };
+    for (const auto& c : cases) {
+        bool sawMin = false, sawMax = (c.lo == c.hi);
+        for (int trial = 0; trial < 3000; ++trial) {
+            std::vector<amlp::Value> args{
+                amlp::Value(c.rolls), amlp::Value(c.sides), amlp::Value(c.bonus) };
+            amlp::Value result = amlp::EfunTable::instance().call("roll_MdN", vm, args);
+            assert(std::holds_alternative<int64_t>(result.data));
+            int64_t roll = std::get<int64_t>(result.data);
+            assert(roll >= c.lo && roll <= c.hi);
+            if (roll == c.lo) sawMin = true;
+            if (roll == c.hi) sawMax = true;
+        }
+        if (c.lo != c.hi) {
+            assert(sawMin);
+            assert(sawMax);
+        }
+    }
+
+    std::cout << "testRollMdNStaysWithinFormulaDerivedBoundsAndAddsBonusOnlyWhenDiceArePositive OK\n";
+}
+
+static void testVowelMatchesAsciiAeiouBothCases() {
+    ObjectVarHarness harness;
+    harness.writeFile("/vowel_probe.c", "int probe(int c) { return vowel(c); }\n");
+    auto ob = harness.objects.cloneObject("/vowel_probe");
+    assert(ob != nullptr);
+
+    auto probe = [&](char c) -> int64_t {
+        amlp::Value r = harness.vm.callFunction(ob, "probe", {amlp::Value(int64_t{c})});
+        return std::get<int64_t>(r.data);
+    };
+
+    for (char c : {'a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U'}) {
+        assert(probe(c) == 1);
+    }
+    for (char c : {'b', 'c', 'z', 'Z', '5', ' '}) {
+        assert(probe(c) == 0);
+    }
+
+    std::cout << "testVowelMatchesAsciiAeiouBothCases OK\n";
+}
+
+static void testAddAMatchesRealAlgorithmAcrossEveryDocExample() {
+    ObjectVarHarness harness;
+    harness.writeFile("/add_a_probe.c", "string probe(string s) { return add_a(s); }\n");
+    auto ob = harness.objects.cloneObject("/add_a_probe");
+    assert(ob != nullptr);
+
+    auto probe = [&](const std::string& s) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "probe", {amlp::Value(s)});
+        return std::get<std::string>(r.data);
+    };
+
+    // Real doc's own example set, every case traced by hand against
+    // real f_add_a()'s own algorithm before being written here, not
+    // guessed: ordinary vowel/consonant words, the "us..." special case
+    // (both directions), the "hour..." special case, an already-
+    // prefixed string left unchanged, and an all-spaces string.
+    assert(probe("apple") == "an apple");
+    assert(probe("cat") == "a cat");
+    assert(probe("user") == "a user");
+    assert(probe("use") == "a use");
+    assert(probe("usurper") == "a usurper");
+    assert(probe("usher") == "an usher");
+    assert(probe("hour") == "an hour");
+    assert(probe("hourglass") == "an hourglass");
+    assert(probe("a cat") == "a cat");
+    assert(probe("an apple") == "an apple");
+    assert(probe("   ") == "a ");
+
+    std::cout << "testAddAMatchesRealAlgorithmAcrossEveryDocExample OK\n";
+}
+
 // Shared harness for query_strike_bonus/query_parry_bonus/
 // query_dodge_bonus: these call back into LPC for player stats/env/
 // property reads and into a mock ADDICTION_D daemon, so they need a
@@ -25804,6 +25898,9 @@ int main() {
     testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural();
     testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases();
     testRollWeaponDamageDiceStaysWithinFormulaDerivedBoundsAcrossManyDraws();
+    testRollMdNStaysWithinFormulaDerivedBoundsAndAddsBonusOnlyWhenDiceArePositive();
+    testVowelMatchesAsciiAeiouBothCases();
+    testAddAMatchesRealAlgorithmAcrossEveryDocExample();
     testQueryStrikeBonusEfunMatchesLpcAcrossPlayerStates();
     testQueryParryBonusEfunMatchesLpcAcrossPlayerStates();
     testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus();

@@ -142,13 +142,15 @@ Most of the directories Phase 2/3 work would live in (`src/jit`,
 nothing but their own planning `instruct.md`, and the large novel-
 architecture items (coroutine scheduling, JIT compilation, hotboot,
 world-level statedump, TLS, generational GC) are all still real,
-considered plans, not real code. But four Phase 2 rows and one Phase 3
+considered plans, not real code. But six Phase 2 rows and one Phase 3
 row are now real, landed code, not plans: the apply cache (2.9), the
 full PCRE `pcre_match`/`pcre_assoc` suite (2.12), built-in SQLite
-`db_*` efuns (2.15), the `hash()` efun (2.16, landed 2026-08-27), and a
-real third-party mudlib boot-and-play confirmation (3.9). See the table
-immediately below for the current fraction of each phase, not the
-"zero" framing an earlier revision of this file gave both.
+`db_*` efuns (2.15), the `hash()` efun (2.16, landed 2026-08-27),
+`time_ns()`/`perf_counter_ns()` (2.23, landed 2026-08-27) and
+`secure_random()` (2.24, landed 2026-08-27), and a real third-party
+mudlib boot-and-play confirmation (3.9). See the table immediately
+below for the current fraction of each phase, not the "zero" framing an
+earlier revision of this file gave both.
 
 **Re-swept 2026-08-27:** row 2.16 (`hash()`) landed this session,
 picked specifically because it is real *current* FluffOS surface (this
@@ -159,12 +161,29 @@ never had, confirmed absent from it entirely rather than assumed. See
 `ROADMAP.md` row 2.16 for the full citation trail, the OpenSSL EVP-based
 implementation, and its 3 new regression tests (764 total, up from 761).
 
+**Re-swept 2026-08-27 (a further session, same day):** two new rows,
+2.23 (`time_ns()`/`perf_counter_ns()`) and 2.24 (`secure_random()`),
+picked up directly from that same session's own ranked modernization
+research (its top two candidates), both real, genuinely new-since-2.9
+current FluffOS efuns, confirmed absent from the vendored 2.9 ds2.08
+reference entirely and confirmed against real current source (not
+guessed) before writing any code. `secure_random()` is a real, distinct
+security gap this driver's own pre-existing `random()` never filled
+(a seeded, non-cryptographic PRNG, fine for gameplay, not for anything
+security-sensitive) -- deliberately ported to match real FluffOS's own
+actual `std::random_device("/dev/urandom")` mechanism exactly rather
+than reusing this driver's own already-linked OpenSSL dependency via
+`RAND_bytes()`, since real FluffOS itself never uses OpenSSL for this.
+See `ROADMAP.md` rows 2.23/2.24 for the full citation trail, and
+`STATUS.md`'s own dated entry for the live-verification account. 6 new
+regression tests (773 total, up from 767).
+
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 22 | 4 | 18 | 18% |
+| 2, Beyond both (novel features) | 24 | 6 | 18 | 25% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
 
 **What is left open in Phase 1, and why each item stays open** (each
@@ -344,10 +363,11 @@ applicable).
   Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
   conformance suite, generational GC -- all still have a real
   `instruct.md` and zero implementation, and none of them should be
-  described as "in progress." Four Phase 2 rows are the exception,
+  described as "in progress." Six Phase 2 rows are the exception,
   real and landed rather than planned: the apply cache (2.9), the full
-  PCRE suite (2.12), built-in SQLite (2.15), and the `hash()` efun
-  (2.16) -- along with Phase 3's own row 3.9, a real third-party mudlib
+  PCRE suite (2.12), built-in SQLite (2.15), the `hash()` efun (2.16),
+  `time_ns()`/`perf_counter_ns()` (2.23), and `secure_random()` (2.24)
+  -- along with Phase 3's own row 3.9, a real third-party mudlib
   boot-and-play confirmation.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger

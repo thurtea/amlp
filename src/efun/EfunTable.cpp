@@ -5625,6 +5625,55 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(std::time(nullptr)));
     });
 
+    // int time_ns() -- current FluffOS's own real, genuinely new-since-
+    // 2.9 efun (confirmed absent from temp/reference/fluffos-2.9-ds2.08:
+    // no time_ns/perf_counter_ns anywhere in that tree at all), confirmed
+    // directly against current real source rather than guessed:
+    // src/packages/core/core.spec:373 declares "int time_ns();", no
+    // arguments; src/packages/core/time.cc's own f_time_ns() (guarded
+    // "#ifdef F_TIME_NS", this driver has no equivalent compile switch so
+    // it is simply always registered): "auto now =
+    // std::chrono::system_clock::now(); push_number(duration_cast<
+    // nanoseconds>(now.time_since_epoch()).count());" -- wall-clock
+    // nanoseconds since the Unix epoch, the real testsuite's own
+    // testsuite/single/tests/efuns/time_ns.lpc confirming this
+    // epoch-relative shape directly: "ASSERT(x > 1685382080000000);", a
+    // real epoch-nanosecond lower bound (~June 2023), not a
+    // no-fixed-epoch monotonic counter.
+    t.registerEfun("time_ns", [](VM&, std::vector<Value>&) -> Value {
+        auto now = std::chrono::system_clock::now();
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch());
+        return Value(static_cast<int64_t>(ns.count()));
+    });
+
+    // int perf_counter_ns() -- current FluffOS's own real sibling of
+    // time_ns() above, same confirmed-absent-from-2.9 status.
+    // src/packages/core/core.spec:371 declares "int perf_counter_ns();"
+    // (that spec file's own comment, "return highest resolution clock in
+    // platform dependent unit", is stale against the real implementation
+    // below, which always converts to nanoseconds regardless of
+    // platform, matching the function's own "_ns" name and the real
+    // testsuite's own direct int-to-int comparison of two calls). Real
+    // f_perf_counter_ns() (time.cc, non-Windows branch -- this driver has
+    // no Windows target, so only that branch is real scope here): "auto
+    // now = std::chrono::high_resolution_clock::now();
+    // push_number(duration_cast<nanoseconds>(now.time_since_epoch())
+    // .count());" -- ported verbatim, including the real (if slightly
+    // loose) choice of std::chrono::high_resolution_clock rather than
+    // std::chrono::steady_clock: real testsuite/single/tests/efuns/
+    // perf_counter_ns.lpc only ever asserts monotonicity between two
+    // successive calls ("ASSERT(b >= a);"), never an absolute
+    // epoch-relative bound the way time_ns()'s own test does, matching
+    // real high_resolution_clock's own implementation-defined (not
+    // guaranteed-steady) nature -- deliberately not "improved" to
+    // steady_clock here, since that would diverge from what real
+    // FluffOS's own shipped code actually does.
+    t.registerEfun("perf_counter_ns", [](VM&, std::vector<Value>&) -> Value {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch());
+        return Value(static_cast<int64_t>(ns.count()));
+    });
+
     // string ctime(int|void clock) -- real efun wraps C's own ctime(),
     // including its trailing newline; clock defaults to time() (real
     // func_spec.c: "string ctime(int|void);", efuns_main.c's own
@@ -5744,6 +5793,58 @@ void registerCoreEfuns() {
         static std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<int64_t> dist(0, n - 1);
         return Value(dist(rng));
+    });
+
+    // int secure_random(int n) -- current FluffOS's own real, genuinely
+    // new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08: no secure_random anywhere in
+    // that tree at all), a real, distinct security gap this driver's own
+    // random() above does not fill: random() seeds a std::mt19937 once
+    // from std::random_device and draws every subsequent number from
+    // that same seeded, non-cryptographic PRNG, exactly matching real
+    // random_number()'s own equivalent shape (src/base/internal/port.cc)
+    // -- fine for gameplay randomness, not for anything security-
+    // sensitive (session tokens, reset codes), since a predictable-once-
+    // seeded PRNG is not the same guarantee as a real CSPRNG.
+    //
+    // Signature confirmed directly against real current source, not
+    // guessed: src/packages/core/core.spec:66 declares
+    // "int secure_random(int);", one argument. Real
+    // secure_random_number() (src/base/internal/port.cc:32-44, called by
+    // f_secure_random(), efuns_main.cc): "static std::random_device rd(
+    // "/dev/urandom"); ... std::uniform_int_distribution<int64_t>
+    // dist(0, n - 1); return dist(rd);" -- on Linux/OSX (this driver's
+    // own only real target; the file's own Windows branch is out of
+    // scope here), std::random_device is used DIRECTLY as the
+    // distribution's own engine, drawing fresh entropy from /dev/urandom
+    // on every single call, not seeding a separate deterministic PRNG
+    // the way random_number() does -- ported verbatim below, including
+    // the exact "/dev/urandom" token libstdc++ recognizes (this driver
+    // already builds against libstdc++, confirmed by this same
+    // environment's own toolchain). n <= 0 returns 0, the same guard
+    // real secure_random_number() has (an UB guard against
+    // uniform_int_distribution's own "requires a <= b" precondition,
+    // confirmed by that function's own comment). Real doc
+    // (docs/efun/numbers/secure_random.md, fetched live): "Return a
+    // cryptographically secure random number from the range
+    // [0 .. (n-1)] (inclusive). On Linux & OSX, this function explicitly
+    // use randomness from /dev/urandom." Deliberately NOT built on this
+    // driver's own already-linked libcrypto/OpenSSL dependency
+    // (RAND_bytes()) despite that being the more obvious-looking choice
+    // given hash()'s own precedent: confirmed directly against real
+    // source that real FluffOS itself never uses OpenSSL for this at
+    // all, only std::random_device -- matching the real implementation
+    // exactly took priority over introducing a different (arguably
+    // equally valid) mechanism the real driver does not actually use.
+    t.registerEfun("secure_random", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("secure_random: expected an int argument");
+        }
+        int64_t n = std::get<int64_t>(args[0].data);
+        if (n <= 0) return Value(int64_t{0});
+        static std::random_device rd("/dev/urandom");
+        std::uniform_int_distribution<int64_t> dist(0, n - 1);
+        return Value(dist(rd));
     });
 
     // int uptime() -- real efuns_main.c's f_uptime(): "push_number(

@@ -9,6 +9,152 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): the prior session's top two
+ranked modernization candidates, `time_ns()`/`perf_counter_ns()` and
+`secure_random()`, both real and confirmed absent from the vendored 2.9
+reference, confirmed directly against real current FluffOS source
+(not guessed) and built. New `ROADMAP.md` rows 2.23/2.24. 773 tests
+passing (up from 767), both live-verified against the real running
+driver via real `eval` calls.**
+
+**`time_ns()`/`perf_counter_ns()`: real signatures and semantics,
+confirmed from source, not guessed.** `src/packages/core/core.spec`
+(fetched live from `github.com/fluffos/fluffos@master`, the same
+GitHub-API-tree-plus-raw-fetch method the SETJMP-vs-exception research
+used last session): line 371 `int perf_counter_ns();`, line 373
+`int time_ns();`, both zero-argument. Real bodies,
+`src/packages/core/time.cc:9-36`: `f_time_ns()` is
+`std::chrono::system_clock::now()`, `duration_cast<nanoseconds>` of
+`time_since_epoch()`, pushed as the return value -- wall-clock
+nanoseconds since the Unix epoch. `f_perf_counter_ns()` (non-Windows
+branch, the only real scope here) is the same cast applied to
+`std::chrono::high_resolution_clock::now()` instead. Real FluffOS's own
+testsuite (`testsuite/single/tests/efuns/time_ns.lpc`/
+`perf_counter_ns.lpc`, fetched live, not assumed) confirms the shape
+directly: `time_ns()` is asserted against a real epoch-nanosecond lower
+bound (`ASSERT(x > 1685382080000000);`, real June-2023 epoch
+nanoseconds); `perf_counter_ns()` is only ever asserted monotonic
+between two successive calls (`ASSERT(b >= a);`), never against a fixed
+or epoch-relative value. One real, worth-naming inconsistency found in
+the real source itself, not this driver's own: `core.spec`'s own
+comment on `perf_counter_ns()` ("return highest resolution clock in
+platform dependent unit") is stale against the real implementation,
+which always converts to nanoseconds regardless of platform -- ported
+to match the real *code*, not the stale comment. Both efuns confirmed
+absent from `temp/reference/fluffos-2.9-ds2.08` entirely (no
+`time_ns`/`perf_counter_ns` anywhere in that tree), genuinely new since
+2.9.
+
+**Built to match, zero new dependency.** Both registered in
+`EfunTable.cpp` right after `real_time()`, reusing `std::chrono`
+(already `#include`d, already used by this driver's other time-related
+efuns) exactly the way real FluffOS's own `time.cc` does: `time_ns()`
+via `std::chrono::system_clock::now()`, `perf_counter_ns()` via
+`std::chrono::high_resolution_clock::now()`, both
+`duration_cast<nanoseconds>(now.time_since_epoch()).count()`, ported
+verbatim including real FluffOS's own choice of `high_resolution_clock`
+rather than `steady_clock` for `perf_counter_ns()` -- not "improved" to
+a textbook-stricter monotonic clock, since that would diverge from what
+real FluffOS's own shipped code actually does (this project's own
+established "port the real behavior, not just the sensible version"
+discipline).
+
+**3 new regression tests** (`test_lexer.cpp`): `time_ns()` bracketed
+between two independent `std::chrono::system_clock::now()` measurements
+taken immediately before/after the LPC call (mirrors
+`testRealTimeReturnsCurrentUnixTime`'s own exact shape), plus the real
+testsuite's own epoch-nanosecond lower bound reproduced directly;
+`perf_counter_ns()` called twice in one LPC function, asserting the
+second is `>=` the first (mirrors the real testsuite's own exact
+assertion); a real `std::this_thread::sleep_for(50ms)` between two
+`time_ns()` calls, asserting the returned delta falls between a 30ms
+floor (scheduler-jitter tolerance) and a 1s ceiling -- proving the
+value genuinely advances at real nanosecond resolution across a real
+measured interval, the "measured sleep interval reflected correctly"
+verification this session was asked for specifically.
+
+**`secure_random(int n)`: real signature and semantics, confirmed from
+source, not guessed.** `core.spec:66`: `int secure_random(int);`, one
+argument. Real `secure_random_number()` (`src/base/internal/port.cc:
+32-44`, called by `f_secure_random()`, `efuns_main.cc`), found by
+searching for the real entropy-source keywords the real doc promised
+("/dev/urandom") after `core.spec`'s own declaration did not point
+directly at an implementation file: on Linux/OSX (this driver's own
+only real target), `static std::random_device rd("/dev/urandom");
+std::uniform_int_distribution<int64_t> dist(0, n - 1); return dist(rd);`
+-- `std::random_device` used DIRECTLY as the distribution's own engine,
+drawing fresh entropy from `/dev/urandom` on every single call, not
+seeding a separate deterministic PRNG the way this driver's own
+pre-existing `random()` (and real FluffOS's own equivalent
+`random_number()`, same file) does. `n <= 0` returns 0, the same
+`uniform_int_distribution`-UB guard real `secure_random_number()` has.
+Real doc (`docs/efun/numbers/secure_random.md`, fetched live): "Return
+a cryptographically secure random number from the range
+[0 .. (n - 1)] (inclusive). On Linux & OSX, this function explicitly
+use randomness from /dev/urandom."
+
+**One real, worth-naming divergence from this session's own starting
+assumption, corrected against confirmed source rather than followed
+blindly.** This session's own brief suggested reusing this driver's
+already-linked `libcrypto`/OpenSSL dependency (added for `hash()`,
+row 2.16) via `RAND_bytes()`. Confirmed directly against real current
+source that this is not what real FluffOS actually does: real
+`secure_random_number()` never touches OpenSSL at all, only
+`std::random_device`. Matching the real implementation exactly took
+priority over the suggested approach -- ported real FluffOS's own
+actual mechanism verbatim instead, named here explicitly rather than
+silently substituting the "obvious-looking" OpenSSL route without
+flagging the divergence from what was asked.
+
+**Built.** `secure_random` registered in `EfunTable.cpp` right after
+`random()`, same `<random>` include already in use there, real
+implementation ported verbatim as described above (`libstdc++`'s own
+`"/dev/urandom"` token, confirmed this driver already builds against
+`libstdc++` in this environment).
+
+**3 new regression tests** (`test_lexer.cpp`): `n <= 0` returns 0
+(mirrors `testRandomOfNonPositiveArgumentIsZero`); stays within
+`[0, n)` across 200 draws (mirrors `testRandomStaysWithinZeroToN
+ExclusiveAcrossManyDraws`, and matches real
+`testsuite/single/tests/efuns/secure_random.lpc`'s own exact structural
+range-check shape, fetched live: `ASSERT(secure_random(5) >= 0);
+ASSERT(secure_random(5) < 5);` in a loop); 50 draws from a wide range
+(`secure_random(1000000)`) require at least 45 distinct values, a
+coarse tripwire against a fixed-seed/deterministic regression --
+verified structurally throughout, as this session's own brief asked
+for, never against a fixed test vector, since real cryptographically
+secure randomness has no fixed expected output by design.
+
+**Live-verified against the real running driver** (`./build/amlp
+etc/driver.cfg`, a real Python TCP client, the same real bundled
+mudlib and gatehouse login flow the connection-isolation session just
+above used), via real `eval` calls this time rather than a temporary
+debug command, since both new efuns are directly callable from `eval`
+with no mudlib change needed: `eval return time_ns();` returned a real,
+plausible current epoch-nanosecond value (`1787853390401282579`, ~=
+2026-08-27, matching this environment's own real date); `eval return
+sprintf("%d %d", perf_counter_ns(), perf_counter_ns());` returned a
+correctly non-decreasing pair from two calls in the same expression; a
+real ~1 second sleep between two separate `eval return time_ns();`
+calls (network round trip included) showed up as a closely matching
+real nanosecond delta in the driver's own returned values (`1.858s`
+driver-measured against `1.875s` Python-side wall-clock, the small gap
+fully accounted for by round-trip/processing overhead); five real
+`eval return secure_random(10);` calls returned genuinely varied values
+(9, 2, 9, 1, 3), all within range; `eval return secure_random(0);`
+returned `0`. Driver's own log showed no errors throughout. Test-
+account/character files created during verification
+(`livecheck27`/`livecheck27b`, `livecheckchar`/`livecheckchar2`)
+deleted afterward, matching this project's own established cleanup
+precedent.
+
+**Documentation updated to match:** new `ROADMAP.md` rows 2.23
+(`time_ns()`/`perf_counter_ns()`) and 2.24 (`secure_random()`), both
+`[x]`, full citation trail in each row's own cell; `COMPARISON.md`'s
+Phase 2 done-count (4/22 to 6/24) and its "what AMLP does not have"
+bullet updated to match, with a new dated re-sweep note rather than a
+rewrite.
+
 **2026-08-27 (a further session, same day): the connection-isolation gap
 row 3.9's own combat pass found and deferred (an uncaught command error
 closes the whole connection instead of isolating just that command) is

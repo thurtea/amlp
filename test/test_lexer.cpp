@@ -45,6 +45,7 @@
 #include <thread>
 #include <functional>
 #include <cstring>
+#include <set>
 
 static void testBasicTokenize() {
     std::string src =
@@ -13904,6 +13905,78 @@ static void testRandomStaysWithinZeroToNExclusiveAcrossManyDraws() {
     std::cout << "testRandomStaysWithinZeroToNExclusiveAcrossManyDraws OK\n";
 }
 
+// secure_random(int n) -- current FluffOS's own real, genuinely
+// new-since-2.9 efun (confirmed absent from the vendored 2.9 ds2.08
+// reference entirely), signature and semantics confirmed directly
+// against real current source: src/packages/core/core.spec's own
+// "int secure_random(int);", and src/base/internal/port.cc's own
+// secure_random_number() body -- see EfunTable.cpp's own citation on
+// this registration for the full trail. Mirrors real
+// testsuite/single/tests/efuns/secure_random.lpc's own exact structural
+// range-check shape ("ASSERT(secure_random(5) >= 0); ASSERT(secure_
+// random(5) < 5);" in a loop), plus this driver's own established
+// testRandomOfNonPositiveArgumentIsZero/testRandomStaysWithinZeroTo
+// NExclusiveAcrossManyDraws shape -- verified structurally throughout,
+// never against a fixed test vector, since real cryptographically
+// secure randomness has no fixed expected output by design.
+
+static void testSecureRandomOfNonPositiveArgumentIsZero() {
+    amlp::Value result = runProbe("return secure_random(0) + secure_random(-5);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+    std::cout << "testSecureRandomOfNonPositiveArgumentIsZero OK\n";
+}
+
+static void testSecureRandomStaysWithinZeroToNExclusiveAcrossManyDraws() {
+    amlp::Value result = runProbe(
+        "int i;\n"
+        "int bad;\n"
+        "for(i = 0; i < 200; i++) {\n"
+        "    int r;\n"
+        "    r = secure_random(6);\n"
+        "    if(r < 0 || r >= 6) bad = 1;\n"
+        "}\n"
+        "return bad;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+    std::cout << "testSecureRandomStaysWithinZeroToNExclusiveAcrossManyDraws OK\n";
+}
+
+// Structural proof this is real entropy, not a fixed-seed/deterministic
+// pattern: draws 50 values from a wide range and requires most of them
+// to be distinct. A real per-call /dev/urandom draw (this efun's own
+// real, confirmed implementation) passes this trivially; a regression
+// that accidentally seeded one fixed PRNG once and returned the same
+// value every call, or otherwise degenerated into a narrow repeating
+// sequence, would fail it hard. Not a statistical-quality test of
+// /dev/urandom itself (out of this driver's own control and not this
+// test's job) -- just a coarse, deterministic-regression tripwire.
+static void testSecureRandomProducesVariedOutputNotAFixedSeedPattern() {
+    amlp::Value result = runProbe(
+        "int i;\n"
+        "int *draws = allocate(50);\n"
+        "for (i = 0; i < 50; i++) {\n"
+        "    draws[i] = secure_random(1000000);\n"
+        "}\n"
+        "return draws;\n");
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr && arr->items.size() == 50);
+
+    std::set<int64_t> distinct;
+    for (const auto& v : arr->items) {
+        assert(std::holds_alternative<int64_t>(v.data));
+        distinct.insert(std::get<int64_t>(v.data));
+    }
+    // 50 draws from a range of 1,000,000: a collision-free real random
+    // sequence is overwhelmingly likely, so this threshold is generous
+    // (allows a handful of coincidental repeats) while still catching
+    // any "returns the same value every call" or similarly degenerate
+    // regression outright.
+    assert(distinct.size() >= 45);
+
+    std::cout << "testSecureRandomProducesVariedOutputNotAFixedSeedPattern OK\n";
+}
+
 // set_heart_beat()/query_heart_beat() -- surfaced live: std/user.c's own
 // setup() calling set_heart_beat(1) unconditionally.
 static void testSetHeartBeatThenQueryHeartBeatRoundTrips() {
@@ -16752,6 +16825,90 @@ static void testRealTimeReturnsCurrentUnixTime() {
     assert(got >= before && got <= after);
 
     std::cout << "testRealTimeReturnsCurrentUnixTime OK\n";
+}
+
+// time_ns()/perf_counter_ns() -- current FluffOS's own real, genuinely
+// new-since-2.9 efuns (confirmed absent from the vendored 2.9 ds2.08
+// reference entirely), signatures and semantics confirmed directly
+// against real current source: src/packages/core/core.spec's own
+// "int time_ns();"/"int perf_counter_ns();", and time.cc's own
+// f_time_ns()/f_perf_counter_ns() bodies -- see EfunTable.cpp's own
+// citation on both registrations for the full trail. Mirrors
+// testRealTimeReturnsCurrentUnixTime's own bracket-with-two-
+// independent-measurements shape.
+
+static void testTimeNsReturnsWallClockNanosecondsSinceEpoch() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tns_probe.c", "int probe() { return time_ns(); }\n");
+    auto ob = harness.objects.cloneObject("/tns_probe");
+    assert(ob != nullptr);
+
+    auto toNs = [](std::chrono::system_clock::time_point tp) -> int64_t {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+    };
+
+    int64_t before = toNs(std::chrono::system_clock::now());
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    int64_t after = toNs(std::chrono::system_clock::now());
+    int64_t got = std::get<int64_t>(result.data);
+    assert(got >= before && got <= after);
+
+    // Real testsuite/single/tests/efuns/time_ns.lpc's own worked bound
+    // ("ASSERT(x > 1685382080000000);", a real epoch-nanosecond value
+    // from June 2023): confirms this is genuinely epoch-relative
+    // wall-clock time, not a no-fixed-epoch monotonic counter that could
+    // return a small number.
+    assert(got > 1685382080000000LL);
+
+    std::cout << "testTimeNsReturnsWallClockNanosecondsSinceEpoch OK\n";
+}
+
+static void testPerfCounterNsIsMonotonicAcrossTwoSuccessiveCalls() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pcns_probe.c",
+        "int *probe() { int a = perf_counter_ns(); int b = perf_counter_ns(); return ({ a, b }); }\n");
+    auto ob = harness.objects.cloneObject("/pcns_probe");
+    assert(ob != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr && arr->items.size() == 2);
+    int64_t a = std::get<int64_t>(arr->items[0].data);
+    int64_t b = std::get<int64_t>(arr->items[1].data);
+
+    // Real testsuite/single/tests/efuns/perf_counter_ns.lpc's own exact
+    // assertion shape: "ASSERT(b >= a);" -- monotonic, never going
+    // backward across two successive calls.
+    assert(b >= a);
+
+    std::cout << "testPerfCounterNsIsMonotonicAcrossTwoSuccessiveCalls OK\n";
+}
+
+static void testTimeNsReflectsAMeasuredSleepIntervalCorrectly() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tns_sleep_probe.c", "int probe() { return time_ns(); }\n");
+    auto ob = harness.objects.cloneObject("/tns_sleep_probe");
+    assert(ob != nullptr);
+
+    amlp::Value first = harness.vm.callFunction(ob, "probe", {});
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    amlp::Value second = harness.vm.callFunction(ob, "probe", {});
+
+    int64_t a = std::get<int64_t>(first.data);
+    int64_t b = std::get<int64_t>(second.data);
+    int64_t elapsedNs = b - a;
+
+    // Real-world plausibility, not an exact bound: a real ~50ms sleep
+    // must show up as at least a large fraction of that in nanoseconds
+    // (30ms floor tolerates scheduler jitter under a loaded test run),
+    // and comfortably less than a generous 1-second ceiling -- proving
+    // the value genuinely advances at real wall-clock nanosecond
+    // resolution across a real measured interval, not just "any
+    // monotonic int".
+    assert(elapsedNs >= 30'000'000LL);
+    assert(elapsedNs < 1'000'000'000LL);
+
+    std::cout << "testTimeNsReflectsAMeasuredSleepIntervalCorrectly OK\n";
 }
 
 static void testRemoveInteractiveClosesConnectionWithoutDestructingAndReturnsZeroWhenNotInteractive() {
@@ -25166,6 +25323,9 @@ int main() {
     testObjectPlusStringPrependsItsFilename();
     testRandomOfNonPositiveArgumentIsZero();
     testRandomStaysWithinZeroToNExclusiveAcrossManyDraws();
+    testSecureRandomOfNonPositiveArgumentIsZero();
+    testSecureRandomStaysWithinZeroToNExclusiveAcrossManyDraws();
+    testSecureRandomProducesVariedOutputNotAFixedSeedPattern();
     testSetHeartBeatThenQueryHeartBeatRoundTrips();
     testCallOutFiresOnceDueTimeArrivesWithExtraArgsInOrder();
     testCallOutSelfReschedulingSurvivesTickIteration();
@@ -25269,6 +25429,9 @@ int main() {
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();
     testRealTimeReturnsCurrentUnixTime();
+    testTimeNsReturnsWallClockNanosecondsSinceEpoch();
+    testPerfCounterNsIsMonotonicAcrossTwoSuccessiveCalls();
+    testTimeNsReflectsAMeasuredSleepIntervalCorrectly();
     testRemoveInteractiveClosesConnectionWithoutDestructingAndReturnsZeroWhenNotInteractive();
     testFileLengthCountsNewlinesAndReturnsNegativeForMissingOrDirectory();
     testRefsReflectsSharedReferenceCountMinusOne();

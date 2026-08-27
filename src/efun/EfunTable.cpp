@@ -7884,6 +7884,24 @@ void registerCoreEfuns() {
         return Value(std::log10(x));
     });
 
+    // float log2(float|int x) -- current FluffOS's own real, genuinely
+    // new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08: no log2/f_log2 anywhere in that
+    // tree at all -- only log()/log10() existed there). Signature and
+    // semantics confirmed directly against real current source, not
+    // guessed: src/packages/math/math.spec's own "float log2(float|int);",
+    // and src/packages/math/math.cc's own f_log2(): int-or-float
+    // argument (an int promoted to float first), "error("math: log2(x)
+    // with (x <= 0.0)\n");" on a non-positive argument, otherwise real
+    // C library log2(). Same domain-guard shape this driver's own
+    // log()/log10() right above already use, ported the same way.
+    t.registerEfun("log2", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("log2: expected a numeric argument");
+        double x = asFloat(args[0]);
+        if (x <= 0.0) throw LpcRuntimeError("math: log2(x) with (x <= 0.0)");
+        return Value(std::log2(x));
+    });
+
     // float pow(float, float) -- packages/math_spec.c.
     t.registerEfun("pow", [asFloat](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2) throw LpcRuntimeError("pow: expected two numeric arguments");
@@ -7907,6 +7925,24 @@ void registerCoreEfuns() {
     t.registerEfun("ceil", [asFloat](VM&, std::vector<Value>& args) -> Value {
         if (args.empty()) throw LpcRuntimeError("ceil: expected a numeric argument");
         return Value(std::ceil(asFloat(args[0])));
+    });
+
+    // float round(float f) -- current FluffOS's own real, genuinely
+    // new-since-2.9 efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08: no round/f_round anywhere in
+    // that tree at all). Signature and semantics confirmed directly
+    // against real current source: src/packages/math/math.spec's own
+    // "float round(float);" (float-only there, unlike log2()'s
+    // float|int; this driver promotes int to float here too, matching
+    // its own already-established floor()/ceil() precedent right above,
+    // not a real-signature deviation but the same local leniency
+    // convention). Real f_round() (src/packages/math/math.cc):
+    // "sp->u.real = round(sp->u.real);" -- plain C library round(),
+    // round-half-away-from-zero (round(2.5) == 3.0, round(-2.5) ==
+    // -3.0), no domain restriction, no error case.
+    t.registerEfun("round", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("round: expected a numeric argument");
+        return Value(std::round(asFloat(args[0])));
     });
 
     // mixed abs(int | float) -- packages/contrib.c f_abs(): negates negative

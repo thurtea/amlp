@@ -9,6 +9,140 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): `json_encode()`/`json_decode()`
+(row 2.17) re-examined on request, specifically to check whether their
+own real formatting semantics were actually specified in source rather
+than assumed unspecified. Found something stronger: they are not real
+current-FluffOS efuns at all. Fell back to fresh research, found
+`log2()`/`round()` (new row 2.25), both confirmed genuinely
+new-since-2.9 and built the same way as `hash()`/`time_ns()`/
+`secure_random()`. 776 tests passing (up from 773), live-verified
+against the real running driver via real `eval` calls.**
+
+**The `json_encode`/`json_decode` re-examination, and its real verdict.**
+The prior session's own ranking deferred this row because its real
+formatting choices (mapping key order, float precision) seemed
+unverifiable without a live current-FluffOS instance to check subtle
+behavior against. This session checked the premise directly rather than
+accepting it: is that formatting genuinely unspecified, or does real
+source actually pin it down? The check found something more definitive
+than either answer. `src/svalue_json.cc` -- the one file path in
+`github.com/fluffos/fluffos@master`'s own tree whose name suggested a
+real svalue-to-JSON bridge -- is a genuinely empty placeholder (`git`
+blob size `0`, the well-known empty-blob SHA `e69de29b...`, confirmed
+directly via the GitHub API tree listing, not assumed from the path
+existing). Every real package `.spec` file was then fetched and checked
+in full (`core.spec` plus all 20 other `src/packages/*/*.spec` files,
+`async`/`compress`/`contrib`/`crypto`/`db`/`develop`/`dwlib`/`external`/
+`ffi`/`jsbridge`/`math`/`matrix`/`mudlib_stats`/`ops`/`parser`/`pcre`/
+`sha1`/`sockets`/`trim`/`uids`): zero declare `json_encode`,
+`json_decode`, or any `json`-named efun anywhere. `docs/efun/` (425 real
+doc pages, the same tree `hash()`/`time_ns()`/`secure_random()` were all
+confirmed against) has zero pages for either name under any category.
+**Verdict: `json_encode()`/`json_decode()` are not real current-FluffOS
+efuns at all** -- the formatting-ambiguity concern that deferred this
+row previously never actually arises, because there is no real efun
+target to match in the first place. This is a stronger, more concrete
+finding than "hard to verify," and this row's own `ROADMAP.md` cell is
+updated to say so precisely rather than repeat the older, softer framing.
+
+**What real current FluffOS actually has instead, found along the way:**
+`json2o`/`o2json`, a real, documented pair of standalone CLI binaries
+(`src/main_json2o.cc`/`src/main_o2json.cc`, real docs fetched live at
+`docs/cli/json2o.md`/`o2json.md`) that convert an on-disk `.o` save file
+to/from a specific JSON schema (`{"program_name", "variables":
+[{"name", "value": {"type", "value"}}]}`, every `type` value enumerated
+in the doc: `"int"`, `"float"`, `"string"`, `"array"`, `"mapping"`,
+`"buffer"`). A real, ops-facing build-time tool operating on save
+files, never an LPC-callable efun a running mudlib invokes -- confirmed
+structurally different from what row 2.17's own title ever described,
+not a substitute worth building in its place this session (a different
+row, a different real gap, and its own real formatting schema is
+already fully specified if it is ever picked up on its own merits
+later).
+
+**Falling back to fresh research, same discipline as the `time_ns()`/
+`secure_random()` session.** Surveyed the remaining real current-FluffOS
+efun doc categories this project's own research had not yet fully swept
+(`floats`, `general`, `objects`, `internals`, and the other categories
+outside the ones `hash()`/`time_ns()`/`secure_random()` already covered),
+cross-checked against this driver's own already-implemented efun set
+directly in `EfunTable.cpp` rather than guessed. Also checked, and ruled
+out for this session specifically: `http_get`/`http_post` (row 2.18)
+confirmed not real current-FluffOS efuns either (only vendored
+third-party `libevent`/`libwebsockets` internals turned up, no
+LPC-exposed HTTP client efun anywhere in the real source); `recompile_object()`
+(row 2.21) remains the large, multi-session item an earlier research
+session already scoped it as (live-frame-on-call-stack detection,
+by-name variable-layout migration across every clone, stale
+function-pointer invalidation); `assert_equal`/`assert_throws` (row
+2.22) remains confirmed, from an earlier session, not real
+current-FluffOS efun surface either.
+
+**`log2()`/`round()`: real signatures and semantics, confirmed from
+source, not guessed.** This driver's own already-implemented math efun
+set (`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`sqrt`/`log`/`log10`/`pow`/
+`exp`/`floor`/`ceil`, all confirmed present directly in `EfunTable.cpp`
+before assuming a gap) was checked against the real current
+`src/packages/math/math.spec` (fetched live): two real declared efuns
+were missing, `float log2(float|int);` and `float round(float);`. Both
+confirmed genuinely new since 2.9 (`temp/reference/fluffos-2.9-ds2.08`
+has no `log2`/`round`/`f_log2`/`f_round` anywhere in it at all -- only
+`log()`/`log10()`/`floor()`/`ceil()` existed there). Real bodies
+(`src/packages/math/math.cc`, fetched live): `f_log2()` accepts an int
+or a float (an int promoted to float first), `error("math: log2(x)
+with (x <= 0.0)\n");` on a non-positive argument, otherwise real C
+library `log2()`; `f_round()` is `"sp->u.real = round(sp->u.real);"`,
+plain C library `round()`, round-half-away-from-zero, no domain
+restriction at all. `round()`'s own real spec is float-only, unlike
+`log2()`'s `float|int` -- this driver promotes int to float for
+`round()` too, deliberately, matching its own already-established
+`floor()`/`ceil()` precedent (both real-float-only-in-spec, already
+ported leniently the same way) rather than introducing a new,
+inconsistent strict-float-only special case; named here as a local-
+consistency choice, not a real-signature deviation.
+
+**Built.** Both registered in `EfunTable.cpp`: `log2()` right after
+`log10()`, `round()` right after `ceil()`, reusing the same `asFloat()`
+helper and domain-guard shape this driver's other math efuns already
+use. Zero new dependency: `<cmath>`, already included and already used
+by every other math efun here.
+
+**3 new regression tests** (`test_lexer.cpp`): `log2()` checked against
+plain standard math identities (`log2(1)==0`, `log2(8)==3`,
+`log2(1024)==10`, plus the `2^log2(x)==x` round-trip identity,
+independent of any particular implementation's own rounding) and throws
+on `x<=0` (both `0.0` and a negative value); `round()` checked
+round-half-away-from-zero across positive/negative halves and
+non-halves, each cross-checked directly against `std::round()` rather
+than a hand-picked expected value -- no fixed test vector risk the way
+`json_encode()`'s own formatting questions carried, matching the
+independent-verifiability bar this session was asked to hold every
+candidate to.
+
+**Live-verified against the real running driver** (`./build/amlp
+etc/driver.cfg`, a real Python TCP client, the same real bundled mudlib
+and gatehouse login flow prior sessions used), via real `eval` calls:
+`eval return log2(8.0);` / `eval return log2(1024.0);` returned
+`3.000000` / `10.000000`; `eval return log2(0.0);` / `eval return
+log2(-3.0);` both errored, the driver's own log showing the exact real
+error text (`"math: log2(x) with (x <= 0.0)"`) and confirming, as a
+useful side effect, that the connection-isolation fix from an earlier
+session still holds -- the connection stayed open and every subsequent
+`eval` in the same session kept working normally; `eval return
+round(2.5);` / `round(-2.5);` / `round(2.4);` / `round(-2.4);` returned
+`3.000000` / `-3.000000` / `2.000000` / `-2.000000`, matching
+round-half-away-from-zero exactly. Driver's own log showed no
+unexpected errors throughout. Test-account/character files created
+during verification (`mathcheck27`, `MathCheckChar`) deleted afterward,
+matching this project's own established cleanup precedent.
+
+**Documentation updated to match:** `ROADMAP.md` row 2.17 appended with
+the definitive re-examination finding (not rewritten); new row 2.25
+(`log2()`/`round()`), `[x]`, full citation trail in its own cell;
+`COMPARISON.md`'s Phase 2 done-count (6/24 to 7/25) and its "what AMLP
+does not have" bullet updated to match, with a new dated re-sweep note.
+
 **2026-08-27 (a further session, same day): the prior session's top two
 ranked modernization candidates, `time_ns()`/`perf_counter_ns()` and
 `secure_random()`, both real and confirmed absent from the vendored 2.9

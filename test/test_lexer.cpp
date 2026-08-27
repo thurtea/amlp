@@ -46,6 +46,7 @@
 #include <functional>
 #include <cstring>
 #include <set>
+#include <cmath>
 
 static void testBasicTokenize() {
     std::string src =
@@ -8379,6 +8380,94 @@ static void testSqrtNegativeArgThrows() {
     }
     assert(threw);
     std::cout << "testSqrtNegativeArgThrows OK\n";
+}
+
+// log2(float|int)/round(float) -- current FluffOS's own real, genuinely
+// new-since-2.9 efuns (confirmed absent from the vendored 2.9 ds2.08
+// reference entirely: no log2/round anywhere in that tree, only
+// log()/log10()/floor()/ceil() existed there). Signatures and semantics
+// confirmed directly against real current source:
+// src/packages/math/math.spec's own "float log2(float|int);"/
+// "float round(float);", and math.cc's own f_log2()/f_round() bodies --
+// see EfunTable.cpp's own citation on both registrations for the full
+// trail. Verified against plain, standard math identities (log2/round
+// have no ambiguity to resolve, unlike json_encode()'s own formatting
+// questions), the same independent-verifiability standard hash()/
+// time_ns()/secure_random() were all held to.
+
+static void testLog2ReturnsBaseTwoLogarithmMatchingStandardIdentities() {
+    ObjectVarHarness harness;
+    harness.writeFile("/log2_probe.c",
+        "float probe(float x) { return log2(x); }\n");
+    auto obj = harness.objects.cloneObject("/log2_probe");
+    assert(obj != nullptr);
+
+    auto probe = [&](double x) -> double {
+        amlp::Value r = harness.vm.callFunction(obj, "probe", {amlp::Value(x)});
+        assert(std::holds_alternative<double>(r.data));
+        return std::get<double>(r.data);
+    };
+
+    assert(std::abs(probe(1.0) - 0.0) < 1e-9);
+    assert(std::abs(probe(8.0) - 3.0) < 1e-9);
+    assert(std::abs(probe(1024.0) - 10.0) < 1e-9);
+    // 2^log2(x) round-trips back to x -- a standard identity, independent
+    // of any particular implementation's own rounding choices.
+    assert(std::abs(std::pow(2.0, probe(1234.5)) - 1234.5) < 1e-6);
+
+    std::cout << "testLog2ReturnsBaseTwoLogarithmMatchingStandardIdentities OK\n";
+}
+
+static void testLog2ThrowsOnNonPositiveArgumentLikeRealFLog2() {
+    ObjectVarHarness harness;
+    harness.writeFile("/log2_err.c",
+        "float probe_zero() { return log2(0.0); }\n"
+        "float probe_neg() { return log2(-5.0); }\n");
+    auto obj = harness.objects.cloneObject("/log2_err");
+    assert(obj != nullptr);
+
+    bool threwZero = false, threwNeg = false;
+    try {
+        harness.vm.callFunction(obj, "probe_zero", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threwZero = true;
+    }
+    try {
+        harness.vm.callFunction(obj, "probe_neg", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threwNeg = true;
+    }
+    assert(threwZero);
+    assert(threwNeg);
+
+    std::cout << "testLog2ThrowsOnNonPositiveArgumentLikeRealFLog2 OK\n";
+}
+
+static void testRoundRoundsHalfAwayFromZeroMatchingRealCLibrarySemantics() {
+    ObjectVarHarness harness;
+    harness.writeFile("/round_probe.c",
+        "float probe(float x) { return round(x); }\n");
+    auto obj = harness.objects.cloneObject("/round_probe");
+    assert(obj != nullptr);
+
+    auto probe = [&](double x) -> double {
+        amlp::Value r = harness.vm.callFunction(obj, "probe", {amlp::Value(x)});
+        assert(std::holds_alternative<double>(r.data));
+        return std::get<double>(r.data);
+    };
+
+    // Real f_round()'s own "sp->u.real = round(sp->u.real);" -- plain C
+    // library round(), round-half-away-from-zero, cross-checked directly
+    // against std::round() (not this driver's own implementation) rather
+    // than assumed.
+    assert(probe(2.4) == std::round(2.4));
+    assert(probe(2.5) == std::round(2.5));
+    assert(probe(2.5) == 3.0); // half rounds away from zero, not to even
+    assert(probe(-2.5) == std::round(-2.5));
+    assert(probe(-2.5) == -3.0);
+    assert(probe(-2.4) == std::round(-2.4));
+
+    std::cout << "testRoundRoundsHalfAwayFromZeroMatchingRealCLibrarySemantics OK\n";
 }
 
 // --- simul_efun resolution tier ------------------------------------------
@@ -25058,6 +25147,9 @@ int main() {
     testGlobalIncludeFileMacroUnresolvedWhenNotConfigured();
     testGlobalIncludeFileIsANoOpForMudlibsThatNeverSetIt();
     testSqrtNegativeArgThrows();
+    testLog2ReturnsBaseTwoLogarithmMatchingStandardIdentities();
+    testLog2ThrowsOnNonPositiveArgumentLikeRealFLog2();
+    testRoundRoundsHalfAwayFromZeroMatchingRealCLibrarySemantics();
     testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero();
     testRegexpThirdArgIllegalForStringFormThrows();
     testRegexpArrayFormSelectsMatchingLinesWithIndexAndInvertFlags();

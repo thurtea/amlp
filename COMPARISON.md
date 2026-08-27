@@ -142,15 +142,16 @@ Most of the directories Phase 2/3 work would live in (`src/jit`,
 nothing but their own planning `instruct.md`, and the large novel-
 architecture items (coroutine scheduling, JIT compilation, hotboot,
 world-level statedump, TLS, generational GC) are all still real,
-considered plans, not real code. But six Phase 2 rows and one Phase 3
+considered plans, not real code. But seven Phase 2 rows and one Phase 3
 row are now real, landed code, not plans: the apply cache (2.9), the
 full PCRE `pcre_match`/`pcre_assoc` suite (2.12), built-in SQLite
 `db_*` efuns (2.15), the `hash()` efun (2.16, landed 2026-08-27),
-`time_ns()`/`perf_counter_ns()` (2.23, landed 2026-08-27) and
-`secure_random()` (2.24, landed 2026-08-27), and a real third-party
-mudlib boot-and-play confirmation (3.9). See the table immediately
-below for the current fraction of each phase, not the "zero" framing an
-earlier revision of this file gave both.
+`time_ns()`/`perf_counter_ns()` (2.23, landed 2026-08-27),
+`secure_random()` (2.24, landed 2026-08-27), and `log2()`/`round()`
+(2.25, landed 2026-08-27), and a real third-party mudlib boot-and-play
+confirmation (3.9). See the table immediately below for the current
+fraction of each phase, not the "zero" framing an earlier revision of
+this file gave both.
 
 **Re-swept 2026-08-27:** row 2.16 (`hash()`) landed this session,
 picked specifically because it is real *current* FluffOS surface (this
@@ -178,12 +179,33 @@ See `ROADMAP.md` rows 2.23/2.24 for the full citation trail, and
 `STATUS.md`'s own dated entry for the live-verification account. 6 new
 regression tests (773 total, up from 767).
 
+**Re-swept 2026-08-27 (a further session, same day):** row 2.17
+(`json_encode`/`json_decode`) re-examined on request, specifically to
+check whether its own real formatting semantics (mapping key order,
+float precision) were actually specified in real current source rather
+than assumed unspecified -- the check went further than that question
+and found the row's own premise was wrong: `json_encode`/`json_decode`
+are not real current-FluffOS efuns at all (a genuinely empty
+`src/svalue_json.cc` placeholder, zero declarations across all 21 real
+package `.spec` files, zero `docs/efun/` pages), only an unrelated
+save-file CLI conversion pair (`json2o`/`o2json`) with a fully
+documented but structurally different JSON schema. Deferred on
+stronger, more definitive grounds than before, not built. Row 2.25
+(`log2()`/`round()`) landed instead, this session's own fallback
+candidate, found the same way rows 2.16/2.23/2.24 were: real,
+genuinely new-since-2.9 current FluffOS efuns confirmed absent from the
+vendored 2.9 reference, verified via plain standard math identities
+with zero live-current-FluffOS-instance dependency, the same bar
+`hash()`/`time_ns()`/`secure_random()` were held to. See `ROADMAP.md`
+rows 2.17/2.25 and `STATUS.md`'s own dated entry for the full trail. 3
+new regression tests (776 total, up from 773).
+
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 24 | 6 | 18 | 25% |
+| 2, Beyond both (novel features) | 25 | 7 | 18 | 28% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
 
 **What is left open in Phase 1, and why each item stays open** (each
@@ -363,12 +385,12 @@ applicable).
   Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
   conformance suite, generational GC -- all still have a real
   `instruct.md` and zero implementation, and none of them should be
-  described as "in progress." Six Phase 2 rows are the exception,
+  described as "in progress." Seven Phase 2 rows are the exception,
   real and landed rather than planned: the apply cache (2.9), the full
   PCRE suite (2.12), built-in SQLite (2.15), the `hash()` efun (2.16),
-  `time_ns()`/`perf_counter_ns()` (2.23), and `secure_random()` (2.24)
-  -- along with Phase 3's own row 3.9, a real third-party mudlib
-  boot-and-play confirmation.
+  `time_ns()`/`perf_counter_ns()` (2.23), `secure_random()` (2.24), and
+  `log2()`/`round()` (2.25) -- along with Phase 3's own row 3.9, a real
+  third-party mudlib boot-and-play confirmation.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger
   master-object callback surface: see the section above. LDMud's

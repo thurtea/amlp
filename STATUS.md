@@ -9,6 +9,95 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27: first pass at modernizing AMLP against *current* FluffOS
+specifically, not just the vendored 2.9 ds2.08 reference this project
+otherwise cites throughout -- research first, then one bounded
+implementation. `hash(string algo, string str)` (`ROADMAP.md` row 2.16)
+landed: real current FluffOS's own single string-package efun, confirmed
+via its live documentation site (`docs/efun/strings/hash.md`) and,
+separately, confirmed genuinely absent from the vendored 2.9 reference
+(no LPC-visible `hash()` efun anywhere in
+`temp/reference/fluffos-2.9-ds2.08`, only an unrelated internal
+`whashstr()` C helper sharing the file name `hash.c`/`hash.h`) -- real
+evidence this driver is behind current FluffOS specifically, a gap this
+project's usual corpus-citation discipline (checking vendored mudlib
+corpora, all of which predate this efun) would never surface on its own.**
+
+**Why this row, over the other open Phase 2 items.** TLS (2.13),
+WebSocket framing (2.14), and `recompile_object()`-style hot code reload
+(researched this session, not in `ROADMAP.md` as a titled row at all)
+were all considered and set aside as too large for one session: TLS/
+WebSocket need real I/O-path surgery in `src/net`; `recompile_object()`
+needs live-frame-on-call-stack detection, by-name variable-layout
+transfer across every clone, and stale-function-pointer invalidation --
+a multi-session feature, not a bounded slice. `json_encode`/`json_decode`
+(2.17) was the other real candidate, same "genuinely new since 2.9,
+zero corpus evidence" shape as `hash()`, but was set aside in `hash()`'s
+favor specifically because this driver cannot run a real current FluffOS
+instance to verify subtle type-mapping/formatting choices against (mapping
+key order, float formatting, escaping) the way this project's own
+discipline otherwise insists on before calling something done --
+`hash()`'s correctness, by contrast, is independently, exactly verifiable
+against standard NIST/RFC test vectors with no live reference driver
+needed at all, confirmed directly against Python's own `hashlib` before
+writing any test.
+
+**Real semantics, confirmed from the real current docs, not inferred**:
+signature `string hash(string algo, string str)`, case-insensitive
+algorithm-name matching, unknown algorithm throws (real
+`"hash() unknown hash type: %s"`), real algorithm list is md4/md5/
+ripemd160, md2/mdc2 (OpenSSL 1.x-2.x only), sha1/sha224/sha256/sha384/
+sha512, sha3-224/256/384/512, blake2s256/blake2b512, sm3 -- notably no
+`bcrypt`, correcting this row's own original 2026-08-21 title
+("SHA-256/SHA-512/MD5/bcrypt/BLAKE2"), which had invented a `bcrypt`
+algorithm name real `hash()` never actually had.
+
+**Built:** `hash()` registered in `EfunTable.cpp` via OpenSSL's EVP
+digest interface (`EVP_get_digestbyname`/`EVP_DigestInit_ex`/
+`EVP_DigestUpdate`/`EVP_DigestFinal_ex`), lowercased algorithm name
+before lookup, lowercase hex-string output. New dependency: `libcrypto`,
+added to `src/efun/CMakeLists.txt` via `pkg_check_modules`, the same
+pattern already used there for `libpcre2-8`/`sqlite3` -- confirmed
+available in this environment (OpenSSL 3.5.7) before adding it, not
+assumed. Two real, confirmed-live gaps against the full algorithm list,
+both probed directly against a standalone EVP test program before
+writing any driver code: `md2`/`mdc2` are absent outright (removed
+upstream in OpenSSL 3.x, matching the real doc's own compatibility
+note) and `md4` resolves a name but fails at digest-init time (moved to
+OpenSSL 3.x's "legacy" provider, not loaded by default in this build) --
+both distinguished in the implementation from a genuinely unknown
+algorithm name (still a real error either way, just a different one).
+
+**3 new regression tests (764 total, up from 761):** known digests for
+several algorithms cross-checked against the real doc's own worked
+example (`md5("Something")` = `"73f9977556584a369800e775b48f3dbe"`)
+plus independent NIST/RFC test vectors on `sha1`/`sha256`/`sha512`
+(`"abc"` and `""`), each verified against Python's own `hashlib`
+independently before writing the test, not derived from this driver's
+own output (one real transcription bug this caught during development:
+the initial `sha1("abc")` vector in the test was missing its own final
+hex digit, `hashlib` cross-check caught it before the fix was trusted).
+Also: case-insensitive algorithm-name matching (`"sha256"` and
+`"SHA256"` produce the same digest); throwing on a genuinely unknown
+algorithm name. The original 761 re-run unchanged.
+
+**Build verified:** `cmake -B build -S .` (picks up the new `libcrypto`
+`pkg_check_modules` line cleanly) and `cmake --build build -j4` both
+clean, `ctest --test-dir build --output-on-failure` 100% passing (764/764).
+
+**Documentation updated to match:** `ROADMAP.md` row 2.16 marked `[x]`
+(partial) with the full citation trail above; `COMPARISON.md`'s Phase 2
+done-count (3/22 to 4/22), its "what AMLP does not have" bullet, its
+feature-by-feature table's hash/JSON row, and a new dated re-sweep note
+all updated to match, not left stale.
+
+**Out of scope, deliberately:** TLS/WebSocket (2.13/2.14), full hot
+reload / `recompile_object()` (not a titled row, researched this session
+only), `json_encode`/`json_decode` (2.17, same shape as this row but
+harder to verify without a live current-FluffOS reference), and
+`bcrypt` specifically (a real, separate self-motivated want over
+`crypt()`'s own dated salting, not a real `hash()` algorithm at all).
+
 **2026-08-25 (a further session, same day): the array-form `call_other()`
 gap the previous session's broader pass found (real FluffOS's own
 `object *` first-argument form for `call_other()`/`->`, not supported

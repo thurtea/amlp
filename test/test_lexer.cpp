@@ -16440,6 +16440,84 @@ static void testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt() {
     std::cout << "testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt OK\n";
 }
 
+// hash(string algo, string str) -- current FluffOS's own string-package
+// efun, real docs/efun/strings/hash.md, absent from the vendored 2.9
+// ds2.08 reference (confirmed: no LPC-visible hash() efun anywhere in
+// temp/reference/fluffos-2.9-ds2.08, only an unrelated internal
+// whashstr() string-hashing helper of the same file name). Expected
+// values below are the real doc's own worked example ("Something" ->
+// md5 "73f9977556584a369800e775b48f3dbe") plus standard, independently
+// verifiable NIST test vectors, not values derived from this driver's
+// own implementation -- confirmed directly against this build's OpenSSL
+// 3.5 via a standalone EVP probe before writing this driver's own code.
+static void testHashComputesKnownDigestsForSeveralRealFluffosAlgorithmNames() {
+    ObjectVarHarness harness;
+    harness.writeFile("/hash_probe.c",
+        "string probe(string algo, string str) { return hash(algo, str); }\n");
+    auto ob = harness.objects.cloneObject("/hash_probe");
+    assert(ob != nullptr);
+
+    auto probe = [&](const std::string& algo, const std::string& str) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "probe",
+            {amlp::Value(algo), amlp::Value(str)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    // Real doc's own worked example.
+    assert(probe("md5", "Something") == "73f9977556584a369800e775b48f3dbe");
+
+    // Standard NIST/RFC test vectors, independent of this driver.
+    assert(probe("sha1", "abc") == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    assert(probe("sha256", "abc") ==
+           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert(probe("sha256", "") ==
+           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert(probe("sha512", "abc") ==
+           "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39"
+           "a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+
+    std::cout << "testHashComputesKnownDigestsForSeveralRealFluffosAlgorithmNames OK\n";
+}
+
+static void testHashMatchesAlgorithmNamesCaseInsensitivelyLikeRealFHash() {
+    ObjectVarHarness harness;
+    harness.writeFile("/hash_probe2.c",
+        "string probe(string algo, string str) { return hash(algo, str); }\n");
+    auto ob = harness.objects.cloneObject("/hash_probe2");
+    assert(ob != nullptr);
+
+    amlp::Value lower = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("sha256")), amlp::Value(std::string("Something"))});
+    amlp::Value upper = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("SHA256")), amlp::Value(std::string("Something"))});
+    amlp::Value mixed = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("Sha3-256")), amlp::Value(std::string("Something"))});
+    assert(std::get<std::string>(lower.data) == std::get<std::string>(upper.data));
+    assert(!std::get<std::string>(mixed.data).empty());
+
+    std::cout << "testHashMatchesAlgorithmNamesCaseInsensitivelyLikeRealFHash OK\n";
+}
+
+static void testHashThrowsOnUnknownAlgorithmNameLikeRealFHash() {
+    ObjectVarHarness harness;
+    harness.writeFile("/hash_probe3.c",
+        "string probe(string algo, string str) { return hash(algo, str); }\n");
+    auto ob = harness.objects.cloneObject("/hash_probe3");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe",
+            {amlp::Value(std::string("not-a-real-algorithm")), amlp::Value(std::string("x"))});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testHashThrowsOnUnknownAlgorithmNameLikeRealFHash OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -25050,6 +25128,9 @@ int main() {
     testEvalCostAndMaxEvalCostQueryWithoutMutatingStateThenExplicitArgumentSetsCeiling();
     testRemoveShadowSplicesOutOfChainAndReturnsZeroWhenNotShadowing();
     testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt();
+    testHashComputesKnownDigestsForSeveralRealFluffosAlgorithmNames();
+    testHashMatchesAlgorithmNamesCaseInsensitivelyLikeRealFHash();
+    testHashThrowsOnUnknownAlgorithmNameLikeRealFHash();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

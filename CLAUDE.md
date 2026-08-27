@@ -36,7 +36,7 @@ must continue unchanged.
 - `temp/reference/fluffos-2.9-ds2.08/` is the vendored real FluffOS 2.9
   source used for every citation throughout this repo (`efun_defs.c`,
   `func_spec.c`, `object.c`, `simulate.c`, etc.). It is intentionally
-  untracked (relocated 2026-08-24 from its previous tracked location at
+  untracked (relocated 2026-08-17 from its previous tracked location at
   `reference/fluffos-2.9-ds2.08/`, alongside the six vendored mudlib
   corpora already under `temp/`, none of which are tracked either -- see
   `.gitignore`'s own `temp/` line and STATUS.md's 2026-08-24 entry).

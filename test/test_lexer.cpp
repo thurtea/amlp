@@ -17906,6 +17906,59 @@ static void testVectorAngleAndBadArgsThrow() {
     std::cout << "testVectorAngleAndBadArgsThrow OK\n";
 }
 
+// int string_difference(string, string) (packages/contrib/contrib.cc
+// f_string_difference() + levenshtein(), genuinely new since the 2.9
+// reference which has no string_difference/levenshtein anywhere). The
+// classic Levenshtein edit distance: insert, delete and substitute each
+// cost 1. Equal strings short-circuit to 0. The four expected values
+// below are FluffOS's own testsuite vectors
+// (testsuite/single/tests/efuns/string_difference.lpc), each hand-checked,
+// not read back from this driver.
+static void testStringDifferenceIsLevenshteinDistance() {
+    ObjectVarHarness harness;
+    harness.writeFile("/strdiff_probe.c",
+        "int sd(string a, string b) { return string_difference(a, b); }\n"
+        "int sd_badarg() { mixed m = 7; return string_difference(\"x\", m); }\n"
+        "int sd_onearg() { return string_difference(\"x\"); }\n");
+    auto ob = harness.objects.cloneObject("/strdiff_probe");
+    assert(ob != nullptr);
+
+    auto sd = [&](const char* a, const char* b) -> int64_t {
+        amlp::Value r = harness.vm.callFunction(
+            ob, "sd", {amlp::Value(std::string(a)), amlp::Value(std::string(b))});
+        assert(std::holds_alternative<int64_t>(r.data));
+        return std::get<int64_t>(r.data);
+    };
+
+    // FluffOS testsuite vectors.
+    assert(sd("abc", "abc") == 0);
+    assert(sd("abc", "abd") == 1);
+    assert(sd("kitten", "sitting") == 3);
+    assert(sd("", "abc") == 3);
+
+    // A few more hand-checked cases. Symmetry, a pure deletion run, a
+    // pure insertion run, and a mixed edit.
+    assert(sd("sitting", "kitten") == 3);          // symmetric
+    assert(sd("abcdef", "abc") == 3);              // 3 deletions
+    assert(sd("abc", "abcdef") == 3);              // 3 insertions
+    assert(sd("", "") == 0);                       // both empty
+    assert(sd("flaw", "lawn") == 2);               // delete 'f', insert 'n'
+    assert(sd("gumbo", "gambol") == 2);            // substitute + insert
+
+    // Wrong argument type and too few arguments both throw.
+    for (const char* fn : {"sd_badarg", "sd_onearg"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testStringDifferenceIsLevenshteinDistance OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26727,6 +26780,7 @@ int main() {
     testIsDaylightSavingsTimeReflectsZoneAndDate();
     testVectorNormDotprodDistanceKnownValues();
     testVectorAngleAndBadArgsThrow();
+    testStringDifferenceIsLevenshteinDistance();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

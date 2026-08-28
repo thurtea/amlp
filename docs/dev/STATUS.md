@@ -9,6 +9,86 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-28 (a further session, same day): `contrib.spec` string efun,
+`string_difference(string, string)`, the Levenshtein edit distance. One
+pure self-contained function, string in and int out, no VM internals, no
+new subsystem, hand-verifiable. 807 tests passing (up from 806). New
+`ROADMAP.md` row 2.52.**
+
+**Why this slice.** After the `math.spec` vector efuns (row 2.51), a
+package-by-package sweep of `temp/fluffos/src/packages/*/*.spec` against
+this driver's registered efuns still shows small self-contained gaps in
+`contrib.spec`. `string_difference` is the cleanest of them: a pure
+function with no dependency, no new subsystem, no VM-internals contact,
+and it is independently verifiable by hand-computing edit distances. The
+other `contrib.spec` gaps each need something more: `test_load` the
+object loader and `destruct` path, `get_os_env`/`set_os_env` a runtime
+config allow-list table, the class family a class value type, `event`
+the call-out/apply machinery, `has_cycle`/`find_cycles`/`break_cycles` a
+value-graph walk that mutates VM-managed slots, and
+`program_info`/`memory_summary`/`network_stats`/`get_garbage` are the
+already-scoped diagnostic family (row 2.36).
+
+**Genuinely new since 2.9, confirmed from source.**
+`temp/reference/fluffos-2.9-ds2.08` has no `string_difference` and no
+`levenshtein` anywhere in that tree (grepped the whole tree, not just
+the package spec). The current locally-vendored clone
+`temp/fluffos/src/packages/contrib/contrib.cc` adds both `levenshtein()`
+and `f_string_difference()`, and `contrib.spec` there declares
+`int string_difference(string, string);`. A grep of `EfunTable.cpp`
+confirmed it was not already registered. Same category as row 2.46's
+`sha1()`, the `log2()`/`round()` row, and row 2.51's vector efuns: real
+current-FluffOS surface the 2.9 reference never carried, not an old
+always-present gap.
+
+**Real semantics, confirmed from `contrib.cc`.** From `levenshtein()`
+and `f_string_difference()`:
+
+  - `f_string_difference()` reads its two string arguments, and if
+    `strcmp(a, b) == 0` returns 0 immediately. Otherwise it calls
+    `levenshtein()`, passing the shorter string first (a speed choice
+    only; the distance is symmetric).
+  - `levenshtein()` strips the common prefix and the common suffix
+    (noting in its own comment "This doesn't change the result"), then
+    runs a one-row dynamic program: `table[j]` holds the running cost,
+    `skew`/`nskew` carry the diagonal, and each cell is
+    `min3(table[j-1] + 1, table[j] + 1, skew)` where `skew` counts a
+    substitution when `a[i] != b[j-1]`. This is the classic Levenshtein
+    edit distance with insert, delete and substitute each costing 1.
+  - Both arguments are handled as C strings (`strcmp`/`strlen`), so a
+    literal embedded NUL byte terminates them.
+
+**Built.** `string_difference` registered in `EfunTable.cpp` directly
+after `upper_case`, among the other contrib string efuns. It rejects a
+missing second argument or a non-string argument with `LpcRuntimeError`
+(this codebase's established precedent for an unsupported argument
+shape, e.g. `sha1()` row 2.46). Each argument is truncated at its first
+NUL byte via `.c_str()` to match the real `strcmp`/`strlen` handling, a
+named local choice rather than silently scoring the bytes past the NUL.
+Equal strings short-circuit to 0. Otherwise a plain single running row
+of costs (`O(min(|a|,|b|))` space, the shorter string chosen as the
+inner axis) computes the distance; prefix/suffix stripping is omitted
+because it is a pure optimization that cannot change the answer. No new
+include (`<algorithm>` and the vector/string headers are already
+pulled in).
+
+**1 new regression test (807 total, up from 806):**
+`testStringDifferenceIsLevenshteinDistance` -- FluffOS's own testsuite
+vectors (`testsuite/single/tests/efuns/string_difference.lpc`):
+`("abc","abc")` is 0, `("abc","abd")` is 1, `("kitten","sitting")` is 3,
+`("","abc")` is 3. Plus more hand-checked cases: symmetry
+(`("sitting","kitten")` is also 3), a pure 3-deletion run
+(`("abcdef","abc")`), a pure 3-insertion run (`("abc","abcdef")`),
+both-empty is 0, `("flaw","lawn")` is 2 (delete `f`, insert `n`), and
+`("gumbo","gambol")` is 2 (substitute `u`->`a`, insert `l`). A
+wrong-type second argument passed through a `mixed` and a one-argument
+call both throw `LpcRuntimeError`. Every expected distance was
+hand-computed, not read back from this driver.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.52
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-28 (a further session, same day): `math.spec` vector efuns,
 `norm()`, `dotprod()`, `distance()`, `angle()`. Four pure float-math
 functions from the `math` package, the same shape as the `matrix.spec`

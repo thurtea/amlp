@@ -3051,6 +3051,74 @@ void registerCoreEfuns() {
         return Value(s);
     });
 
+    // int string_difference(string, string) -- current FluffOS's own real,
+    // genuinely new-since-2.9 contrib efun (confirmed absent from
+    // temp/reference/fluffos-2.9-ds2.08 entirely: no string_difference /
+    // levenshtein anywhere in that tree; the current locally-vendored
+    // clone temp/fluffos/src/packages/contrib/contrib.cc adds it). Same
+    // category as sha1() (row 2.46), the log2()/round() row, and the
+    // math.spec vector efuns (row 2.51): real current-FluffOS surface the
+    // 2.9 reference never carried.
+    //
+    // Signature from temp/fluffos/src/packages/contrib/contrib.spec:
+    //   int string_difference(string, string);
+    // The doc (docs/efun/contrib/string_difference.md) says only "return
+    // levenshtein difference".
+    //
+    // Semantics from contrib.cc's own levenshtein() + f_string_difference():
+    //   - Equal strings (strcmp == 0) short-circuit to 0.
+    //   - Otherwise the classic Levenshtein edit distance (insert / delete /
+    //     substitute each cost 1). The real code strips the common prefix
+    //     and suffix and passes the shorter string first purely for speed;
+    //     the distance is symmetric and prefix/suffix stripping does not
+    //     change it, so a plain single-row DP gives the identical result.
+    //   - The real code treats both arguments as C strings (strcmp /
+    //     strlen), so a literal embedded NUL byte terminates them; this
+    //     driver truncates each argument at the first NUL to match, rather
+    //     than silently scoring the bytes past it.
+    // Verified against FluffOS's own testsuite
+    // (testsuite/single/tests/efuns/string_difference.lpc): ("abc","abc")
+    // -> 0, ("abc","abd") -> 1, ("kitten","sitting") -> 3, ("","abc") -> 3.
+    //
+    // Corpus call-site frequency, checked before implementing: grepped
+    // every vendored corpus under temp/ (core-lib, dead-souls, es2_mudlib,
+    // lima, nightmare3, reference-lpc-mud-library, wiz_tools, lil) plus the
+    // bundled mudlib/ for string_difference(: zero real LPC call sites (the
+    // only hits anywhere under temp/ are FluffOS's own docs and testsuite).
+    // Motivation is FluffOS-surface parity, the same honestly-named basis
+    // as rows 2.16/2.24/2.25/2.46/2.47/2.48/2.49/2.50/2.51; edit distance
+    // is independently verifiable by hand with no live-instance dependency.
+    t.registerEfun("string_difference", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("string_difference: expected (string, string)");
+        }
+        // C-string semantics: stop at the first embedded NUL, like strlen.
+        std::string a(std::get<std::string>(args[0].data).c_str());
+        std::string b(std::get<std::string>(args[1].data).c_str());
+        if (a == b) return Value(static_cast<int64_t>(0));
+
+        // Single running row of costs, O(min(|a|,|b|)) space.
+        const std::string& x = a.size() <= b.size() ? a : b;
+        const std::string& y = a.size() <= b.size() ? b : a;
+        const std::size_t n = x.size();
+        const std::size_t m = y.size();
+        std::vector<int> row(m + 1);
+        for (std::size_t j = 0; j <= m; ++j) row[j] = static_cast<int>(j);
+        for (std::size_t i = 1; i <= n; ++i) {
+            int diag = row[0];
+            row[0] = static_cast<int>(i);
+            for (std::size_t j = 1; j <= m; ++j) {
+                int up = row[j];
+                int sub = diag + (x[i - 1] == y[j - 1] ? 0 : 1);
+                row[j] = std::min({row[j - 1] + 1, up + 1, sub});
+                diag = up;
+            }
+        }
+        return Value(static_cast<int64_t>(row[m]));
+    });
+
     // string trim(string str, string|void ch) / ltrim(...) / rtrim(...)
     // -- current FluffOS's own real, genuinely new-since-2.9 string
     // efuns (confirmed absent from temp/reference/fluffos-2.9-ds2.08

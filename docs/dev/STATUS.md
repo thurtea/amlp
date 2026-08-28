@@ -9,6 +9,120 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-28 (a further session, same day): `pcre.spec` read-side efuns,
+`pcre_version()`, `pcre_extract()`, `pcre_match_all()`. The three
+`pcre.spec` names that only read match data, continuing row 2.12's own
+named deferral of the six `pcre_*` efuns it did not build. 810 tests
+passing (up from 807). New `ROADMAP.md` row 2.53.**
+
+**Why this slice.** Row 2.12 built `pcre_match()` / `pcre_assoc()` from
+the separately-vendored current-FluffOS tree
+(`temp/fluffos/src/packages/pcre/`, a package the pinned 2.9 ds2.08
+reference never had at all, whole-tree "pcre" grep of
+`temp/reference/fluffos-2.9-ds2.08` still returns nothing) and
+explicitly named the other six `pcre.spec` names as out of scope that
+slice. This slice takes the three that only read match data:
+`pcre_version()`, `pcre_extract()`, `pcre_match_all()`. It needs nothing
+new (PCRE2 is already linked and already wrapped, `compileRegex()` and
+the `pcreCompileOptions` / `pcreMatchOptions` flag helpers already
+exist), the same continue-the-named-deferral pattern the `matrix.spec`
+slices (rows 2.47-2.49) used. `pcre_replace()` / `pcre_replace_callback()`
+/ `pcre_cache()` stay deferred: `pcre_replace()` has an unusual "one
+replacement string per capture group, counts must match" contract plus
+non-overlapping copy logic, the callback form calls back into LPC per
+match, and the cache is an internal-structure introspection this driver
+organizes differently.
+
+**Signatures** from `temp/fluffos/src/packages/pcre/pcre.spec`:
+`string pcre_version(void);`,
+`string *pcre_extract(string, string, void | int, void | int);`,
+`mixed pcre_match_all(string, string, void | int);`.
+
+**Real semantics, confirmed from `pcre.cc`.** From `f_pcre_version()`,
+`f_pcre_extract()` + `pcre_get_substrings()`, and `f_pcre_match_all()` +
+the file-static `pcre_match_all()`:
+
+  - `pcre_version()`: real pushes the linked engine's version string
+    (`pcre_version()`, PCRE1). This driver links PCRE2, so it returns
+    PCRE2's version via `pcre2_config(PCRE2_CONFIG_VERSION)`, a string
+    like `"10.42 2022-12-11"`. A named engine substitution, the same
+    kind row 2.12 already made wrapping PCRE2 in place of the 2.9 Henry
+    Spencer engine and row 2.16's `hash()` made using OpenSSL EVP.
+
+  - `pcre_extract(subject, pattern, [include_names], [pcre_flags])`:
+    match `pattern` against `subject` once. No match returns an empty
+    array (real `the_null_array`). On a match, return the captured
+    substrings for groups 1..N where N = `rc - 1` and `rc` is
+    `pcre2_match()`'s return (one more than the highest-numbered group
+    that was set); group 0, the whole match, is NOT included
+    (`pcre_get_substrings()` fills `ret->item[i-1]` starting from
+    `i = 1`, and the `if (run->rc != 1)` guard makes a group-less
+    pattern return an empty array). A group that did not participate
+    yields `""` (real reads the `ovector[-1]` slots as a zero-length
+    span). If `include_names` (the optional 3rd argument, any nonzero
+    int) is set, a mapping of `{named-group name: that group's captured
+    value}` is appended as the last array element, covering named groups
+    whose number is in 1..N. The optional 4th argument is a `pcre_flags`
+    bitmask, the same `PCRE_I` / `M` / `S` / `U` / `X` / `A` set as
+    `pcre_match()` / `pcre_assoc()`.
+
+  - `pcre_match_all(subject, pattern, [pcre_flags])`: return an array
+    with one element per non-overlapping match, each element itself an
+    array `[whole-match, group1, ..., group_{rc-1}]` (`rc` elements,
+    group 0 first this time). Iterates with the standard empty-match
+    idiom: after a zero-length match, retry at the same offset with
+    `PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED`, and if that fails advance
+    one UTF-8 character. The real loop guard is `offset < s_length`
+    (strictly), so a trailing zero-length match at end-of-string is not
+    reported and an empty subject yields an empty array; this driver
+    matches that guard exactly.
+
+**One narrow named fidelity gap.** Real `pcre_get_substrings()` omits a
+named group from the `include_names` mapping when it did not participate
+(`ovector` slot `< 0`). This driver's shared group vector collapses "did
+not participate" and "matched empty" both to `""`, so a non-participating
+named group is mapped to `""` rather than omitted. Only visible for an
+optional named group like `(?<x>a)?`; a plain `(?<x>...)` that matched is
+unaffected.
+
+**Built.** A shared local lambda `pcreMatchGroups(code, subject,
+byteOffset, matchOpts, groups, mStart, mEnd)` runs one `pcre2_match` and
+fills `groups` with the substring for capture groups 0..(rc-1) (an unset
+group gives `""`), returning the pair count or 0 on `PCRE2_ERROR_NOMATCH`
+and throwing on any other PCRE2 error. `pcre_version` calls
+`pcre2_config`. `pcre_extract` compiles once, calls `pcreMatchGroups`
+once, returns `groups[1..]` (dropping group 0), and when `include_names`
+is set walks the pattern's name table
+(`pcre2_pattern_info` `NAMECOUNT` / `NAMEENTRYSIZE` / `NAMETABLE`, each
+entry a 2-byte big-endian group number then a NUL-terminated name) to
+build the trailing mapping. `pcre_match_all` loops `pcreMatchGroups` with
+a growing offset and the empty-match retry flags, pushing one inner array
+per match. All three registered in `EfunTable.cpp` immediately after
+`pcre_assoc`. No new include or dependency.
+
+**3 new regression tests (810 total, up from 807):**
+`testPcreVersionReturnsAVersionString` -- the result is a non-empty
+string that starts with a digit and contains a `.`.
+`testPcreExtractReturnsCaptureGroups` -- `([0-9]+)-([0-9]+)` on
+`"call 555-1234 now"` gives `({ "555", "1234" })`, no match and a
+group-less pattern (`[0-9]+`) both give an empty array, `(a)(b)?(c)` on
+`"ac"` gives `({ "a", "", "c" })` (optional group did not participate),
+`PCRE_I` as the 4th argument makes `([a-c]+)` match `"__ABC__"` as
+`({ "ABC" })` while the same pattern without the flag returns an empty
+array, and `include_names` on
+`(?<year>[0-9]{4})-(?<mon>[0-9]{2})` over `"2026-08"` appends
+`([ "year": "2026", "mon": "08" ])` as the third element.
+`testPcreMatchAllReturnsEveryMatch` -- `[0-9]+` over `"a1b22c333"` gives
+three single-element rows `"1"` / `"22"` / `"333"`, `([a-z])([0-9])` over
+`"a1 b2"` gives `[whole, g1, g2]` rows, no match gives an empty array,
+and `a*` over `"baa"` gives the leading empty match then `"aa"` with no
+trailing empty (the `offset < s_length` guard). Expected match arrays
+were hand-written from the patterns, not read back from this driver.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.53
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-28 (a further session, same day): `contrib.spec` string efun,
 `string_difference(string, string)`, the Levenshtein edit distance. One
 pure self-contained function, string in and int out, no VM internals, no

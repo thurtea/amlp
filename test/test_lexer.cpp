@@ -17959,6 +17959,167 @@ static void testStringDifferenceIsLevenshteinDistance() {
     std::cout << "testStringDifferenceIsLevenshteinDistance OK\n";
 }
 
+// pcre.spec read-side efuns (packages/pcre/pcre.cc, a package the pinned
+// 2.9 reference never had; row 2.12 built pcre_match()/pcre_assoc() and
+// named the rest deferred). pcre_version() returns the linked engine's
+// version string; this driver links PCRE2 so it returns PCRE2's, a
+// "MAJOR.MINOR date" string.
+static void testPcreVersionReturnsAVersionString() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrever_probe.c",
+        "string v() { return pcre_version(); }\n");
+    auto ob = harness.objects.cloneObject("/pcrever_probe");
+    assert(ob != nullptr);
+
+    amlp::Value r = harness.vm.callFunction(ob, "v", {});
+    assert(std::holds_alternative<std::string>(r.data));
+    const std::string& s = std::get<std::string>(r.data);
+    assert(!s.empty());
+    assert(s[0] >= '0' && s[0] <= '9');          // starts with a version number
+    assert(s.find('.') != std::string::npos);    // MAJOR.MINOR form
+
+    std::cout << "testPcreVersionReturnsAVersionString OK\n";
+}
+
+// string *pcre_extract(string subject, string pattern, void|int
+// include_names, void|int pcre_flags) -- f_pcre_extract() +
+// pcre_get_substrings(): the captured substrings for groups 1..N (group
+// 0, the whole match, is NOT included), an empty array on no match or a
+// pattern with no groups, "" for a group that did not participate, and
+// with include_names an appended mapping of named-group name to value.
+static void testPcreExtractReturnsCaptureGroups() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pcreextract_probe.c",
+        "string *ex(string s, string p) { return pcre_extract(s, p); }\n"
+        "string *ex_i(string s, string p) { return pcre_extract(s, p, 0, PCRE_I); }\n"
+        "mixed *ex_named(string s, string p) { return pcre_extract(s, p, 1); }\n");
+    auto ob = harness.objects.cloneObject("/pcreextract_probe");
+    assert(ob != nullptr);
+
+    auto arr = [&](const char* fn, const char* s, const char* p) -> std::shared_ptr<amlp::Array> {
+        amlp::Value r = harness.vm.callFunction(
+            ob, fn, {amlp::Value(std::string(s)), amlp::Value(std::string(p))});
+        assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(r.data));
+        return std::get<std::shared_ptr<amlp::Array>>(r.data);
+    };
+    auto strs = [](const std::shared_ptr<amlp::Array>& a) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        for (const auto& el : a->items) {
+            assert(std::holds_alternative<std::string>(el.data));
+            out.push_back(std::get<std::string>(el.data));
+        }
+        return out;
+    };
+
+    // Two groups.
+    assert((strs(arr("ex", "call 555-1234 now", "([0-9]+)-([0-9]+)"))
+            == std::vector<std::string>{"555", "1234"}));
+    // No match -> empty array.
+    assert(arr("ex", "no digits here", "([0-9]+)-([0-9]+)")->items.empty());
+    // Pattern with no capture groups -> empty array (rc == 1).
+    assert(arr("ex", "abc123", "[0-9]+")->items.empty());
+    // Optional middle group that did not participate -> "".
+    assert((strs(arr("ex", "ac", "(a)(b)?(c)"))
+            == std::vector<std::string>{"a", "", "c"}));
+
+    // pcre_flags: PCRE_I as the 4th argument makes a lowercase char class
+    // match uppercase input; without it the same pattern does not match.
+    {
+        amlp::Value r = harness.vm.callFunction(
+            ob, "ex_i", {amlp::Value(std::string("__ABC__")), amlp::Value(std::string("([a-c]+)"))});
+        auto a = std::get<std::shared_ptr<amlp::Array>>(r.data);
+        assert((strs(a) == std::vector<std::string>{"ABC"}));
+    }
+    assert(arr("ex", "__ABC__", "([a-c]+)")->items.empty());  // no flag -> no match
+
+    // include_names: last element is a mapping of named group -> value.
+    {
+        amlp::Value r = harness.vm.callFunction(
+            ob, "ex_named",
+            {amlp::Value(std::string("2026-08")),
+             amlp::Value(std::string("(?<year>[0-9]{4})-(?<mon>[0-9]{2})"))});
+        auto a = std::get<std::shared_ptr<amlp::Array>>(r.data);
+        assert(a->items.size() == 3);  // "2026", "08", ([...])
+        assert(std::get<std::string>(a->items[0].data) == "2026");
+        assert(std::get<std::string>(a->items[1].data) == "08");
+        assert(std::holds_alternative<std::shared_ptr<amlp::Mapping>>(a->items[2].data));
+        auto m = std::get<std::shared_ptr<amlp::Mapping>>(a->items[2].data);
+        assert(m->entries.size() == 2);
+        bool sawYear = false, sawMon = false;
+        for (const auto& e : m->entries) {
+            const std::string& k = std::get<std::string>(e.first.data);
+            const std::string& val = std::get<std::string>(e.second.data);
+            if (k == "year") { sawYear = true; assert(val == "2026"); }
+            else if (k == "mon") { sawMon = true; assert(val == "08"); }
+            else { assert(false); }
+        }
+        assert(sawYear && sawMon);
+    }
+
+    std::cout << "testPcreExtractReturnsCaptureGroups OK\n";
+}
+
+// mixed pcre_match_all(string subject, string pattern, void|int
+// pcre_flags) -- f_pcre_match_all() + pcre_match_all(): one element per
+// non-overlapping match, each [whole-match, group1, ..., groupN]. The
+// standard empty-match idiom, and the real "offset < s_length" loop
+// guard so a trailing zero-length match at end-of-string is not
+// reported.
+static void testPcreMatchAllReturnsEveryMatch() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrematchall_probe.c",
+        "mixed *ma(string s, string p) { return pcre_match_all(s, p); }\n");
+    auto ob = harness.objects.cloneObject("/pcrematchall_probe");
+    assert(ob != nullptr);
+
+    auto matches = [&](const char* s, const char* p) -> std::vector<std::vector<std::string>> {
+        amlp::Value r = harness.vm.callFunction(
+            ob, "ma", {amlp::Value(std::string(s)), amlp::Value(std::string(p))});
+        assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(r.data));
+        auto outer = std::get<std::shared_ptr<amlp::Array>>(r.data);
+        std::vector<std::vector<std::string>> out;
+        for (const auto& el : outer->items) {
+            assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(el.data));
+            auto inner = std::get<std::shared_ptr<amlp::Array>>(el.data);
+            std::vector<std::string> row;
+            for (const auto& g : inner->items) {
+                assert(std::holds_alternative<std::string>(g.data));
+                row.push_back(std::get<std::string>(g.data));
+            }
+            out.push_back(row);
+        }
+        return out;
+    };
+
+    // Three matches, no capture groups: each row is just [whole-match].
+    {
+        auto m = matches("a1b22c333", "[0-9]+");
+        assert(m.size() == 3);
+        assert((m[0] == std::vector<std::string>{"1"}));
+        assert((m[1] == std::vector<std::string>{"22"}));
+        assert((m[2] == std::vector<std::string>{"333"}));
+    }
+    // With capture groups: [whole, g1, g2] per match.
+    {
+        auto m = matches("a1 b2", "([a-z])([0-9])");
+        assert(m.size() == 2);
+        assert((m[0] == std::vector<std::string>{"a1", "a", "1"}));
+        assert((m[1] == std::vector<std::string>{"b2", "b", "2"}));
+    }
+    // No match -> empty array.
+    assert(matches("nothing", "[0-9]+").empty());
+    // Empty-match idiom: "a*" over "baa" yields the leading empty match
+    // then "aa", and NOT a trailing empty at end-of-string.
+    {
+        auto m = matches("baa", "a*");
+        assert(m.size() == 2);
+        assert((m[0] == std::vector<std::string>{""}));
+        assert((m[1] == std::vector<std::string>{"aa"}));
+    }
+
+    std::cout << "testPcreMatchAllReturnsEveryMatch OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26781,6 +26942,9 @@ int main() {
     testVectorNormDotprodDistanceKnownValues();
     testVectorAngleAndBadArgsThrow();
     testStringDifferenceIsLevenshteinDistance();
+    testPcreVersionReturnsAVersionString();
+    testPcreExtractReturnsCaptureGroups();
+    testPcreMatchAllReturnsEveryMatch();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

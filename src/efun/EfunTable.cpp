@@ -9569,6 +9569,248 @@ void registerCoreEfuns() {
     });
 
     // -------------------------------------------------------------------------
+    // pcre.spec read-side efuns: pcre_version(), pcre_extract(),
+    // pcre_match_all(). Row 2.12 built pcre_match()/pcre_assoc() from the
+    // separately-vendored current-FluffOS tree (temp/fluffos/src/packages/
+    // pcre/, a package the pinned 2.9 ds2.08 reference never had at all --
+    // whole-tree "pcre" grep of temp/reference/fluffos-2.9-ds2.08 is still
+    // empty) and named the other six pcre.spec names as out of scope that
+    // slice. This slice takes the three that only read match data (no LPC
+    // callback trampoline, no replacement-array plumbing): the same
+    // continue-the-named-deferral pattern the matrix.spec slices (rows
+    // 2.47-2.49) used. pcre_replace()/pcre_replace_callback()/pcre_cache()
+    // stay deferred (replace has an unusual "one replacement string per
+    // capture group, counts must match" contract plus non-overlapping
+    // copy logic, the callback form calls back into LPC per match, and the
+    // cache is an internal-structure introspection this driver organizes
+    // differently).
+    //
+    // Signatures from temp/fluffos/src/packages/pcre/pcre.spec:
+    //   string pcre_version(void);
+    //   string *pcre_extract(string, string, void | int, void | int);
+    //   mixed pcre_match_all(string, string, void | int);
+    //
+    // Semantics confirmed from pcre.cc's own f_pcre_version() /
+    // f_pcre_extract() + pcre_get_substrings() / f_pcre_match_all() +
+    // pcre_match_all():
+    //
+    //   - pcre_version(): real pushes the linked engine's version string
+    //     (real: pcre_version(), PCRE1). This driver links PCRE2, so it
+    //     returns PCRE2's version via pcre2_config(PCRE2_CONFIG_VERSION),
+    //     a string like "10.42 2022-12-11". A named engine substitution,
+    //     the same kind row 2.12 already made wrapping PCRE2 in place of
+    //     the real 2.9 Henry Spencer engine, and row 2.16's hash() made
+    //     using OpenSSL EVP -- not a silent divergence.
+    //
+    //   - pcre_extract(subject, pattern, [include_names], [pcre_flags]):
+    //     match pattern against subject once. No match -> empty array
+    //     (real: the_null_array). On a match, return an array of the
+    //     captured substrings for groups 1..N where N = rc - 1 and rc is
+    //     pcre2_match()'s return (one more than the highest-numbered group
+    //     that was set); group 0 (the whole match) is NOT included
+    //     (pcre_get_substrings() fills ret->item[i-1] from i = 1). A group
+    //     that did not participate yields "" (real reads ovector[-1]
+    //     slots as a zero-length span). If include_names (the optional 3rd
+    //     argument, any nonzero int) is set, a mapping of {named-group
+    //     name: that group's captured value} is appended as the last array
+    //     element, covering only named groups whose number is in 1..N and
+    //     which participated (pcre_get_substrings()'s own name-table
+    //     walk). The optional 4th argument is a pcre_flags bitmask, same
+    //     PCRE_I/M/S/U/X/A set as pcre_match()/pcre_assoc() above.
+    //
+    //   - pcre_match_all(subject, pattern, [pcre_flags]): return an array
+    //     with one element per non-overlapping match, each element itself
+    //     an array [whole-match, group1, ..., group_{rc-1}] (rc elements,
+    //     group 0 first this time). Iterates with the standard
+    //     empty-match idiom (pcre.cc's own pcre_match_all()): after a
+    //     zero-length match, retry at the same offset with
+    //     NOTEMPTY_ATSTART | ANCHORED, and if that fails advance one UTF-8
+    //     character; otherwise resume at ovector[1].
+    //
+    // Corpus call-site frequency, checked before implementing: grepped
+    // every vendored corpus under temp/ (core-lib, dead-souls, es2_mudlib,
+    // lima, nightmare3, reference-lpc-mud-library, wiz_tools, lil) plus the
+    // bundled mudlib/ for pcre_version( / pcre_extract( / pcre_match_all(:
+    // zero real LPC call sites (row 2.12 already recorded the same for
+    // these three). Motivation is FluffOS-surface parity, the same
+    // honestly-named basis as rows 2.12/2.16/2.24/2.46/2.51/2.52; regex
+    // capture extraction is independently verifiable against hand-written
+    // patterns with no live-instance dependency.
+    // -------------------------------------------------------------------------
+
+    // Runs one pcre2_match at byteOffset. On a match, fills `groups` with
+    // the substring for capture groups 0..(rc-1) (group 0 is the whole
+    // match; a non-participating group yields ""), sets mStart/mEnd to the
+    // whole-match byte span, and returns the pair count rc (>= 1). Returns
+    // 0 on PCRE2_ERROR_NOMATCH; any other PCRE2 error throws.
+    auto pcreMatchGroups = [](pcre2_code* code, const std::string& subject,
+                              size_t byteOffset, uint32_t matchOpts,
+                              std::vector<std::string>& groups,
+                              size_t& mStart, size_t& mEnd) -> int {
+        groups.clear();
+        if (byteOffset > subject.size()) return 0;
+        pcre2_match_data* md = pcre2_match_data_create_from_pattern(code, nullptr);
+        int rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(subject.data()),
+                             static_cast<PCRE2_SIZE>(subject.size()),
+                             static_cast<PCRE2_SIZE>(byteOffset), matchOpts, md, nullptr);
+        if (rc < 0) {
+            pcre2_match_data_free(md);
+            if (rc == PCRE2_ERROR_NOMATCH) return 0;
+            throw LpcRuntimeError("pcre: match error");
+        }
+        // rc == 0 means the ovector was too small; impossible with match
+        // data sized from the pattern, but fall back to its real count.
+        uint32_t pairs = (rc == 0) ? pcre2_get_ovector_count(md)
+                                   : static_cast<uint32_t>(rc);
+        PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
+        mStart = static_cast<size_t>(ov[0]);
+        mEnd = static_cast<size_t>(ov[1]);
+        for (uint32_t i = 0; i < pairs; ++i) {
+            PCRE2_SIZE s = ov[2 * i], e = ov[2 * i + 1];
+            if (s == PCRE2_UNSET || e == PCRE2_UNSET || e < s) {
+                groups.emplace_back();
+            } else {
+                groups.emplace_back(subject.substr(s, e - s));
+            }
+        }
+        pcre2_match_data_free(md);
+        return static_cast<int>(pairs);
+    };
+
+    t.registerEfun("pcre_version", [](VM&, std::vector<Value>&) -> Value {
+        char buf[64] = {0};
+        int n = pcre2_config(PCRE2_CONFIG_VERSION, buf);
+        if (n <= 0) return Value(std::string("unknown"));
+        return Value(std::string(buf));
+    });
+
+    t.registerEfun("pcre_extract", [pcreCompileOptions, pcreMatchOptions, pcreMatchGroups](
+            VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("pcre_extract: expected (string subject, string pattern, void|int include_names, void|int pcre_flags)");
+        }
+        const std::string& subject = std::get<std::string>(args[0].data);
+        const std::string& pattern = std::get<std::string>(args[1].data);
+
+        bool includeNames = false;
+        if (args.size() > 2) {
+            if (!std::holds_alternative<int64_t>(args[2].data)) {
+                throw LpcRuntimeError("Bad argument 3 to pcre_extract()");
+            }
+            includeNames = std::get<int64_t>(args[2].data) != 0;
+        }
+        int64_t pcreFlags = 0;
+        if (args.size() > 3) {
+            if (!std::holds_alternative<int64_t>(args[3].data)) {
+                throw LpcRuntimeError("Bad argument 4 to pcre_extract()");
+            }
+            pcreFlags = std::get<int64_t>(args[3].data);
+        }
+
+        auto code = compileRegex(pattern, pcreCompileOptions(pcreFlags));
+        std::vector<std::string> groups;
+        size_t ms = 0, me = 0;
+        int rc = pcreMatchGroups(code.get(), subject, 0, pcreMatchOptions(pcreFlags),
+                                 groups, ms, me);
+
+        auto result = std::make_shared<Array>();
+        if (rc <= 0) return Value(result);  // no match -> empty array
+
+        // Groups 1..(rc-1); group 0 (the whole match) is not included.
+        for (size_t i = 1; i < groups.size(); ++i) {
+            result->items.push_back(Value(groups[i]));
+        }
+
+        if (includeNames && !result->items.empty()) {
+            auto names = std::make_shared<Mapping>();
+            uint32_t nameCount = 0, nameEntrySize = 0;
+            PCRE2_SPTR nameTable = nullptr;
+            pcre2_pattern_info(code.get(), PCRE2_INFO_NAMECOUNT, &nameCount);
+            pcre2_pattern_info(code.get(), PCRE2_INFO_NAMEENTRYSIZE, &nameEntrySize);
+            pcre2_pattern_info(code.get(), PCRE2_INFO_NAMETABLE, &nameTable);
+            for (uint32_t k = 0; k < nameCount; ++k) {
+                PCRE2_SPTR entry = nameTable + k * nameEntrySize;
+                int groupNum = (entry[0] << 8) | entry[1];
+                if (groupNum <= 0 || static_cast<size_t>(groupNum) >= groups.size()) {
+                    continue;  // whole match, or a group past what rc reported
+                }
+                // Real pcre_get_substrings() skips a named group that did
+                // not participate (ovector slot < 0). This driver's groups
+                // vector collapses "did not participate" and "matched
+                // empty" both to "", so a non-participating named group is
+                // mapped to "" here rather than omitted -- a narrow,
+                // named fidelity gap that only shows for optional named
+                // groups, never for a plain (?<name>...) that matched.
+                std::string name(reinterpret_cast<const char*>(entry + 2));
+                names->entries.emplace_back(Value(name),
+                                            Value(groups[static_cast<size_t>(groupNum)]));
+            }
+            result->items.push_back(Value(names));
+        }
+        return Value(result);
+    });
+
+    t.registerEfun("pcre_match_all", [pcreCompileOptions, pcreMatchOptions, pcreMatchGroups](
+            VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("pcre_match_all: expected (string subject, string pattern, void|int pcre_flags)");
+        }
+        const std::string& subject = std::get<std::string>(args[0].data);
+        const std::string& pattern = std::get<std::string>(args[1].data);
+        int64_t pcreFlags = 0;
+        if (args.size() > 2) {
+            if (!std::holds_alternative<int64_t>(args[2].data)) {
+                throw LpcRuntimeError("Bad argument 3 to pcre_match_all()");
+            }
+            pcreFlags = std::get<int64_t>(args[2].data);
+        }
+
+        auto code = compileRegex(pattern, pcreCompileOptions(pcreFlags));
+        uint32_t baseOpts = pcreMatchOptions(pcreFlags);
+
+        auto outer = std::make_shared<Array>();
+        size_t offset = 0;
+        uint32_t retryOpts = 0;
+        // Real pcre_match_all()'s own loop guard is "offset < s_length"
+        // (strictly), so a trailing zero-length match at end-of-string is
+        // not reported and an empty subject yields an empty array.
+        while (offset < subject.size()) {
+            std::vector<std::string> groups;
+            size_t ms = 0, me = 0;
+            int rc = pcreMatchGroups(code.get(), subject, offset, baseOpts | retryOpts,
+                                     groups, ms, me);
+            if (rc <= 0) {
+                if (retryOpts == 0) break;
+                // Previous match was empty and nothing non-empty matches
+                // anchored here: step over one UTF-8 character and rescan.
+                ++offset;
+                while (offset < subject.size() &&
+                       (static_cast<unsigned char>(subject[offset]) & 0xC0) == 0x80) {
+                    ++offset;
+                }
+                retryOpts = 0;
+                continue;
+            }
+            auto match = std::make_shared<Array>();
+            for (const auto& g : groups) match->items.push_back(Value(g));
+            outer->items.push_back(Value(match));
+
+            if (me == ms) {
+                retryOpts = PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
+                offset = me;  // unchanged; the retry runs at this same spot
+            } else {
+                retryOpts = 0;
+                offset = me;
+            }
+        }
+        return Value(outer);
+    });
+
+    // -------------------------------------------------------------------------
     // Phase 0.13 efun growth batch (post-restructure) - test_bit/set_bit/
     // clear_bit, crc32, cp, inherits, get_config, query_load_average, say,
     // save_variable/restore_variable. Found this round by diffing this

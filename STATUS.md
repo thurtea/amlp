@@ -9,6 +9,121 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): with the `.spec` sweep arc
+finished, the first real slice of one of the three remaining deferred
+subsystems (rows 2.43-2.45) landed. Picked `matrix.spec` (row 2.45's
+bucket) as the one with the smallest independently-shippable slice, and
+implemented three of its eight names: `id_matrix()`, `translate(float
+*, float, float, float)`, `scale(float *, float, float, float)`. 798
+tests passing (up from 796). New `ROADMAP.md` row 2.47.**
+
+**Why `matrix`, and why this slice.** Rows 2.43-2.45 are the three real
+remaining gaps, each a multi-session subsystem. `external_start` (2.43)
+needs real `fork()`/`exec()`/pipe plumbing plus an enumerated-command
+registry this driver has no equivalent of, and is a genuine arbitrary-
+command-execution security surface. `async_*` (2.44) needs real
+background I/O (a thread pool or `io_uring`) wired through `Scheduler`
+or any "async" efun is a blocking call wearing a callback, not a real
+first slice. `matrix.spec` (2.45) is pure, deterministic float math on
+16-element arrays: no new dependency, no buffer type, no scheduler
+wiring, no security surface, and independently verifiable against hand-
+computed matrices with zero live-instance dependency. Within it, the
+smallest coherent unit is `id_matrix()` (the neutral starting matrix)
+plus `translate()` and `scale()` (the two simplest transforms, sharing
+exactly one helper, the row-major 4x4 multiply). The `rotate_x/y/z()`
+trio (adds `RADIANS_PER_DEGREE` plus trig) and `lookat_rotate()`/
+`lookat_rotate2()` (add the `Vector` helpers `normalize_array`/
+`cross_product`/`points_to_array`; `lookat_rotate2` also needs the
+`min_arg > 4` compiler support the 2.9 spec's own comment says was
+missing, still `#if 0` there) are the natural later slices, named in
+row 2.47.
+
+**Which names, and the real source cited.** This is an old, always-
+present gap, not new-since-2.9: `temp/reference/fluffos-2.9-ds2.08/
+packages/` already carries `matrix.c`, `matrix.h`, `matrix_spec.c`, and
+the locally-vendored current clone (`temp/fluffos/src/packages/
+matrix/`) has the identical math. Signatures from `matrix_spec.c` (both
+trees, byte-identical): `float *id_matrix(); float *translate(float *,
+float, float, float); float *scale(float *, float, float, float);`.
+Grep of `EfunTable.cpp` confirmed none of the three were registered.
+
+**Real semantics, confirmed from source.** From
+`temp/reference/fluffos-2.9-ds2.08/packages/matrix.c`'s own
+`f_id_matrix()`/`f_translate()`/`f_scale()` plus `translate_matrix()`/
+`scale_matrix()`/`mult_matrix()` (re-checked against the current clone,
+identical): `id_matrix()` returns a fresh 16-element float array holding
+the row-major 4x4 identity (`{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}`).
+`translate(m,x,y,z)` computes `m = m * T`, where `T` is the identity
+with elements 12,13,14 set to x,y,z. `scale(m,x,y,z)` computes `m = m *
+S`, where `S` is `diag(x,y,z,1)`. `mult_matrix` is the plain row-major
+product `m[4r+c] = sum_k a[4r+k] * b[4k+c]`. The passed array is
+mutated IN PLACE and that same array is the return value, not a copy
+(current clone's own docs, `temp/fluffos/docs/efun/general/
+{id_matrix,translate,scale}.md`, state this explicitly: "the return
+value is the very array you passed in, not a copy"). This driver
+returns the identical `std::shared_ptr<Array>` it was handed, so LPC
+aliasing matches real FluffOS exactly.
+
+**Two deliberate local conventions, named rather than silent.** (1) The
+current clone added an explicit `error("matrix transform requires a
+16-element array.\n")` / `"...float array.\n"` guard that the 2.9 tree
+lacked entirely (2.9 read 16 slots off `(sp-3)->u.arr` unconditionally,
+over-reading a short array). This driver ports that guard: it has
+tagged Values, so a short or non-float matrix argument throws
+`LpcRuntimeError` rather than being misread. (2) Real `f_translate()`/
+`f_scale()` `bad_arg()` only on a non-`T_REAL` 3rd or 4th argument (the
+2nd, x, is read via `(sp-2)->u.real` with no type check in 2.9). This
+driver coerces all three coordinates via the same `asFloat()` helper
+its math package already uses, matching this codebase's own established
+int-to-float leniency (see the math-package comment block right above
+the matrix registration) rather than reproducing a union-misread
+quirk.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`, this
+project's own bundled `mudlib/`, `wiz_tools`, `lil`) for `id_matrix`,
+`translate(`, `scale(`, `rotate_x`, `rotate_y`, `rotate_z`,
+`lookat_rotate`: zero real LPC call sites. The only `translate(`/
+`scale(` hits at all are unrelated (NPC language-translation code in
+`core-lib`/`dead-souls`, the word "scale" in prose). So this pass's
+motivation is FluffOS-surface parity specifically, named honestly, the
+same basis as rows 2.16/2.24/2.25/2.46, and matrix math clears the
+independent-verifiability bar those rows were held to: every expected
+value in the tests is hand-computed from `matrix.c`'s definitions, no
+live instance needed.
+
+**Built.** `id_matrix`/`translate`/`scale` registered in
+`EfunTable.cpp` directly after the math package's `round()`, with two
+shared local lambdas: `matrixArg16` (the validate-and-fetch guard
+above) and `multMatrix` (the row-major 4x4 product). `id_matrix()`
+builds the 16-element identity array; `translate()`/`scale()` read the
+current matrix into a `double[16]`, build the transform, call
+`multMatrix`, write the result back into the same `Array`, and return
+it. Zero new dependency (no `<cmath>` even -- pure arithmetic for this
+slice).
+
+**2 new regression tests (798 total, up from 796):**
+`testIdMatrixAndTranslateScaleProduceKnownMatrices` -- `id_matrix()` is
+the exact identity; `translate(id, 10, 0, 5)` is the identity with
+elements 12,13,14 = 10,0,5; `scale(id, 2, 3, 4)` is `diag(2,3,4,1)`;
+`translate(id, 1, 2, 3)` then `scale(m, 2, 2, 2)` composes to `T * S`
+(translation row scaled to 2,4,6; diagonal entries to 2). Every
+expected matrix is hand-computed from `matrix.c`, not read back from
+this driver. `testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices`
+-- reading an element after the call sees the mutation (in place); the
+return value aliases the passed array (mutating the returned ref
+mutates the original, element 12 = 1*1 + 1*5 = 6 after two chained
+translates); a 3-element or 15-float-plus-one-int `mixed *` argument
+throws `LpcRuntimeError` (checked at runtime via a `mixed *` local, not
+a compile-time literal-type rejection).
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.47
+(`[x]`, full citation trail in its own cell). Row 2.45's own text left
+as-is; 2.47 states plainly that it carves its three names out of that
+bucket, so the accounting lives in the new row. `COMPARISON.md` not
+touched this pass.
+
 **2026-08-27 (a further session, same day): the systematic package-by-
 package `src/packages/*/*.spec` sweep continued to `sha1.spec`, one of
 the last real package spec files never checked against this driver's own

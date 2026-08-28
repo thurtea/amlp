@@ -17279,6 +17279,119 @@ static void testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument() {
     std::cout << "testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument OK\n";
 }
 
+// Matrix package first slice: id_matrix(), translate(), scale()
+// (packages/matrix_spec.c, both the vendored 2.9 ds2.08 reference and the
+// current clone; math from packages/matrix.c's f_id_matrix/f_translate/
+// f_scale plus translate_matrix/scale_matrix/mult_matrix). Expected
+// matrices below are hand-computed from those definitions, not read back
+// from this driver. id_matrix() is the row-major 4x4 identity; translate()
+// post-multiplies by a translation (elements 12,13,14) and scale() by a
+// diagonal, both modifying the passed array in place.
+static void testIdMatrixAndTranslateScaleProduceKnownMatrices() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matrix_probe.c",
+        "float *ident() { return id_matrix(); }\n"
+        "float *do_translate() { float *m = id_matrix(); return translate(m, 10.0, 0.0, 5.0); }\n"
+        "float *do_scale() { float *m = id_matrix(); return scale(m, 2.0, 3.0, 4.0); }\n"
+        "float *compose() {\n"
+        "    float *m = id_matrix();\n"
+        "    translate(m, 1.0, 2.0, 3.0);\n"
+        "    scale(m, 2.0, 2.0, 2.0);\n"
+        "    return m;\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/matrix_probe");
+    assert(ob != nullptr);
+
+    auto rows16 = [&](const char* fn) -> std::vector<double> {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(r.data));
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(r.data);
+        assert(arr && arr->items.size() == 16);
+        std::vector<double> out;
+        for (const auto& el : arr->items) {
+            assert(std::holds_alternative<double>(el.data));
+            out.push_back(std::get<double>(el.data));
+        }
+        return out;
+    };
+
+    const std::vector<double> identity = {1., 0., 0., 0., 0., 1., 0., 0.,
+                                          0., 0., 1., 0., 0., 0., 0., 1.};
+    assert(rows16("ident") == identity);
+
+    // translate(id, 10, 0, 5): identity with elements 12,13,14 = 10,0,5.
+    std::vector<double> t = identity;
+    t[12] = 10.; t[13] = 0.; t[14] = 5.;
+    assert(rows16("do_translate") == t);
+
+    // scale(id, 2, 3, 4): diag(2, 3, 4, 1).
+    const std::vector<double> s = {2., 0., 0., 0., 0., 3., 0., 0.,
+                                   0., 0., 4., 0., 0., 0., 0., 1.};
+    assert(rows16("do_scale") == s);
+
+    // translate(id, 1, 2, 3) then scale(m, 2, 2, 2): m = T * S, so the
+    // translation row (12,13,14) is scaled to (2, 4, 6) and the diagonal
+    // (0,5,10) becomes 2.
+    std::vector<double> ts = {2., 0., 0., 0., 0., 2., 0., 0.,
+                              0., 0., 2., 0., 2., 4., 6., 1.};
+    assert(rows16("compose") == ts);
+
+    std::cout << "testIdMatrixAndTranslateScaleProduceKnownMatrices OK\n";
+}
+
+// The real docs' in-place contract: translate()/scale() overwrite the 16
+// elements of the passed array and return that very same array, not a
+// copy. Also: matrix.c's current clone rejects a non-16-element or
+// non-float matrix argument with a "matrix transform requires..." error;
+// this driver throws LpcRuntimeError the same way (checked at runtime via
+// a mixed * argument, not a compile-time literal-type rejection).
+static void testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matrix_probe2.c",
+        "float in_place() { float *m = id_matrix(); translate(m, 7.0, 8.0, 9.0); return m[13]; }\n"
+        "float returns_same_array() {\n"
+        "    float *m = id_matrix();\n"
+        "    float *r = translate(m, 1.0, 0.0, 0.0);\n"
+        "    translate(r, 5.0, 0.0, 0.0);\n"
+        "    return m[12];\n"
+        "}\n"
+        "int bad_short() {\n"
+        "    mixed *b = ({ 1.0, 2.0, 3.0 });\n"
+        "    return sizeof(translate(b, 1.0, 2.0, 3.0));\n"
+        "}\n"
+        "int bad_element() {\n"
+        "    mixed *b = ({ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,\n"
+        "                  1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1 });\n"
+        "    return sizeof(scale(b, 1.0, 2.0, 3.0));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/matrix_probe2");
+    assert(ob != nullptr);
+
+    // Mutated in place: reading m[13] after the call sees the new value.
+    amlp::Value ip = harness.vm.callFunction(ob, "in_place", {});
+    assert(std::holds_alternative<double>(ip.data));
+    assert(std::get<double>(ip.data) == 8.0);
+
+    // The return value IS the passed array: mutating r (the return of the
+    // first translate) also mutates m. m = T(1,0,0) then r = r * T(5,0,0)
+    // gives element 12 = 1*1 + 1*5 = 6.
+    amlp::Value same = harness.vm.callFunction(ob, "returns_same_array", {});
+    assert(std::holds_alternative<double>(same.data));
+    assert(std::get<double>(same.data) == 6.0);
+
+    for (const char* fn : {"bad_short", "bad_element"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26090,6 +26203,8 @@ int main() {
     testHashThrowsOnUnknownAlgorithmNameLikeRealFHash();
     testSha1ComputesKnownDigestsIncludingTheRealDocWorkedExample();
     testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument();
+    testIdMatrixAndTranslateScaleProduceKnownMatrices();
+    testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

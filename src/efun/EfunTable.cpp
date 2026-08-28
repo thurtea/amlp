@@ -8372,6 +8372,141 @@ void registerCoreEfuns() {
         return Value(std::round(asFloat(args[0])));
     });
 
+    // -------------------------------------------------------------------------
+    // Matrix package (packages/matrix_spec.c / matrix.c) - first slice only:
+    // id_matrix(), translate(), scale(). This is an old, always-present gap,
+    // not new-since-2.9: temp/reference/fluffos-2.9-ds2.08/packages/ carries
+    // matrix.c/matrix.h/matrix_spec.c already, and the current locally-
+    // vendored clone (temp/fluffos/src/packages/matrix/) has the identical
+    // math. Row 2.45 had bucketed all 8 matrix.spec names as deferred; this
+    // slice carves out the three that need nothing new (no dependency, no
+    // buffer type, no scheduler wiring, no security surface) and are
+    // independently verifiable by hand-computed known matrices.
+    //
+    // Signatures (matrix_spec.c, both trees, identical):
+    //   float *id_matrix();
+    //   float *translate(float *, float, float, float);
+    //   float *scale(float *, float, float, float);
+    //
+    // Semantics confirmed from f_id_matrix()/f_translate()/f_scale() plus
+    // translate_matrix()/scale_matrix()/mult_matrix() in
+    // temp/reference/fluffos-2.9-ds2.08/packages/matrix.c, and the in-place
+    // contract from the current clone's own docs
+    // (temp/fluffos/docs/efun/general/{id_matrix,translate,scale}.md):
+    //
+    //   - id_matrix() returns a fresh 16-element float array holding the 4x4
+    //     row-major identity ({1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}).
+    //   - translate(m,x,y,z) computes m = m * T, where T is the identity
+    //     with elements 12,13,14 set to x,y,z. scale(m,x,y,z) computes
+    //     m = m * S, where S is diag(x,y,z,1). mult_matrix is the plain
+    //     row-major product m[4r+c] = sum_k a[4r+k] * b[4k+c].
+    //   - The passed matrix array is mutated IN PLACE (its 16 elements
+    //     overwritten) and that same array is the return value, not a copy.
+    //     This driver returns the identical std::shared_ptr<Array> it was
+    //     handed, so LPC aliasing matches real FluffOS exactly.
+    //
+    // Matrix-argument validation follows the current clone, which added an
+    // explicit "matrix transform requires a 16-element array." /
+    // "...float array." error() guard that the 2.9 tree lacked (2.9 read 16
+    // slots unconditionally). This driver has tagged Values, so validating
+    // is the correct port rather than an over-read.
+    //
+    // Real f_translate()/f_scale() bad_arg() only on a non-T_REAL 3rd or 4th
+    // argument (the 2nd, x, is read unchecked in 2.9). This driver instead
+    // coerces all three numerically via the same asFloat() its math package
+    // uses, matching this codebase's own established int-to-float leniency
+    // rather than reproducing a union-misread quirk.
+    //
+    // Deferred to later slices, named: rotate_x()/rotate_y()/rotate_z()
+    // (add RADIANS_PER_DEGREE plus trig), and lookat_rotate()/
+    // lookat_rotate2() (add the Vector helpers normalize_array/
+    // cross_product/points_to_array; lookat_rotate2 additionally needs the
+    // min_arg > 4 support the 2.9 spec's own comment says the compiler
+    // lacked, still #if 0 there, only live in the current clone).
+    //
+    // Corpus call-site frequency, checked before implementing: grepped every
+    // vendored corpus under temp/ (core-lib, dead-souls, es2_mudlib, lima,
+    // nightmare3, reference-lpc-mud-library, this project's own bundled
+    // mudlib/, wiz_tools, lil) for id_matrix / translate( / scale( /
+    // rotate_x / rotate_y / rotate_z / lookat_rotate: zero real LPC call
+    // sites (the translate(/scale( hits are all unrelated -- NPC language
+    // translation, the word "scale" in prose). Motivation is FluffOS-
+    // surface parity specifically, the same honestly-named basis as rows
+    // 2.16/2.24/2.25/2.46; matrix math is independently verifiable against
+    // hand-computable known results with no live-instance dependency.
+    // -------------------------------------------------------------------------
+    auto matrixArg16 = [](const Value& v, const char* efun) -> std::shared_ptr<Array> {
+        if (!std::holds_alternative<std::shared_ptr<Array>>(v.data)) {
+            throw LpcRuntimeError(std::string(efun) +
+                                  ": first argument must be a 16-element float array");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(v.data);
+        if (!arr || arr->items.size() < 16) {
+            throw LpcRuntimeError("matrix transform requires a 16-element array.");
+        }
+        for (const auto& el : arr->items) {
+            if (!std::holds_alternative<double>(el.data)) {
+                throw LpcRuntimeError("matrix transform requires a 16-element float array.");
+            }
+        }
+        return arr;
+    };
+
+    // m[4r+c] = sum_k a[4r+k] * b[4k+c] -- matrix.c's mult_matrix(), the
+    // plain row-major 4x4 product, expanded here the same way.
+    auto multMatrix = [](const double* a, const double* b, double* out) {
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out[4 * r + c] = a[4 * r + 0] * b[0 * 4 + c] +
+                                 a[4 * r + 1] * b[1 * 4 + c] +
+                                 a[4 * r + 2] * b[2 * 4 + c] +
+                                 a[4 * r + 3] * b[3 * 4 + c];
+            }
+        }
+    };
+
+    t.registerEfun("id_matrix", [](VM&, std::vector<Value>& args) -> Value {
+        (void)args;
+        static const double ident[16] = {1., 0., 0., 0., 0., 1., 0., 0.,
+                                         0., 0., 1., 0., 0., 0., 0., 1.};
+        auto arr = std::make_shared<Array>();
+        arr->items.reserve(16);
+        for (double d : ident) arr->items.emplace_back(Value(d));
+        return Value(arr);
+    });
+
+    t.registerEfun("translate", [asFloat, matrixArg16, multMatrix](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 4) {
+            throw LpcRuntimeError("translate: expected (float *matrix, float x, float y, float z)");
+        }
+        auto m = matrixArg16(args[0], "translate");
+        double x = asFloat(args[1]), y = asFloat(args[2]), z = asFloat(args[3]);
+        double cur[16];
+        for (int i = 0; i < 16; ++i) cur[i] = std::get<double>(m->items[i].data);
+        const double trans[16] = {1., 0., 0., 0., 0., 1., 0., 0.,
+                                  0., 0., 1., 0., x,  y,  z,  1.};
+        double res[16];
+        multMatrix(cur, trans, res);
+        for (int i = 0; i < 16; ++i) m->items[i] = Value(res[i]);
+        return Value(m);
+    });
+
+    t.registerEfun("scale", [asFloat, matrixArg16, multMatrix](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 4) {
+            throw LpcRuntimeError("scale: expected (float *matrix, float x, float y, float z)");
+        }
+        auto m = matrixArg16(args[0], "scale");
+        double x = asFloat(args[1]), y = asFloat(args[2]), z = asFloat(args[3]);
+        double cur[16];
+        for (int i = 0; i < 16; ++i) cur[i] = std::get<double>(m->items[i].data);
+        const double scaling[16] = {x,  0., 0., 0., 0., y,  0., 0.,
+                                    0., 0., z,  0., 0., 0., 0., 1.};
+        double res[16];
+        multMatrix(cur, scaling, res);
+        for (int i = 0; i < 16; ++i) m->items[i] = Value(res[i]);
+        return Value(m);
+    });
+
     // mixed abs(int | float) -- packages/contrib.c f_abs(): negates negative
     // numbers in-place; preserves the exact input type (int in → int out,
     // float in → float out), not a float-returning function.

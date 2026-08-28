@@ -9810,6 +9810,131 @@ void registerCoreEfuns() {
         return Value(outer);
     });
 
+    // string pcre_replace(string subject, string pattern, string
+    // *replacements, void | int pcre_flags) -- packages/pcre/pcre.spec.
+    // The remaining self-contained pcre.spec name after row 2.53's
+    // read-side trio (pcre_replace_callback() still deferred: it calls
+    // back into LPC once per match; pcre_cache() still deferred:
+    // internal-structure introspection).
+    //
+    // This is NOT an ordinary regex substitution. Semantics from pcre.cc's
+    // own f_pcre_replace() + pcre_get_replace(): match the pattern against
+    // the subject ONCE, then rebuild the subject with each SELECTED
+    // capture group replaced by the correspondingly-indexed element of the
+    // replacements array (group i by replacements[i-1]). A group is
+    // "selected" only when it starts at or after the end of the last
+    // selected group, so a nested or overlapping inner group is left
+    // alone; a non-participating group is likewise skipped (real reads its
+    // ovector slot as -1, which is < prev). Text between selected groups,
+    // and the prefix/suffix around them, is copied through verbatim.
+    //
+    // Real edge cases, all reproduced:
+    //   - No match: return the subject unchanged (real f_pcre_replace()
+    //     pop_2_elems() and returns, leaving the subject on the stack).
+    //   - rc == 1 (pattern has no capture groups): return the subject
+    //     unchanged (real's own "if (run->rc == 1)" early return).
+    //   - (rc - 1) != sizeof(replacements): error "Number of captured
+    //     substrings and replacements do not match, %d vs %d.".
+    //   - A non-string element in replacements: error "Bad argument 3 to
+    //     pcre_replace(): replacement array must contain only strings.".
+    //   - A non-array 3rd argument: error "Bad argument 3 to
+    //     pcre_replace()".
+    // The optional 4th argument is the same pcre_flags bitmask
+    // (PCRE_I/M/S/U/X/A) as pcre_match()/pcre_extract() above.
+    //
+    // One narrow named divergence from real: real f_pcre_replace()
+    // initializes its running gate from ovector[2] (group 1's start)
+    // directly, so a pattern whose very first group is optional and did
+    // not participate makes real copy a bogus (size_t)(-1)-derived prefix
+    // length (then clamped). This driver instead treats a non-
+    // participating group-1 start as 0 for the prefix and gate, so the
+    // pathological input produces a sane result rather than a clamped
+    // one. Every case where group 1 actually participated is identical.
+    //
+    // Corpus call-site frequency, checked before implementing: grepped
+    // every vendored corpus under temp/ (core-lib, dead-souls, es2_mudlib,
+    // lima, nightmare3, reference-lpc-mud-library, wiz_tools, lil) plus the
+    // bundled mudlib/ for pcre_replace(: zero real LPC call sites (rows
+    // 2.12 and 2.53 recorded the same). Motivation is FluffOS-surface
+    // parity, the same honestly-named basis as rows 2.12/2.16/2.51/2.53;
+    // the group-selection rule is independently verifiable against
+    // hand-written patterns with no live-instance dependency.
+    t.registerEfun("pcre_replace", [pcreCompileOptions, pcreMatchOptions](
+            VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("pcre_replace: expected (string subject, string pattern, string *replacements, void|int pcre_flags)");
+        }
+        if (!std::holds_alternative<std::shared_ptr<Array>>(args[2].data)) {
+            throw LpcRuntimeError("Bad argument 3 to pcre_replace()");
+        }
+        const std::string& subject = std::get<std::string>(args[0].data);
+        const std::string& pattern = std::get<std::string>(args[1].data);
+        auto replacements = std::get<std::shared_ptr<Array>>(args[2].data);
+        int64_t pcreFlags = 0;
+        if (args.size() > 3) {
+            if (!std::holds_alternative<int64_t>(args[3].data)) {
+                throw LpcRuntimeError("Bad argument 4 to pcre_replace()");
+            }
+            pcreFlags = std::get<int64_t>(args[3].data);
+        }
+
+        auto code = compileRegex(pattern, pcreCompileOptions(pcreFlags));
+        pcre2_match_data* md = pcre2_match_data_create_from_pattern(code.get(), nullptr);
+        int rc = pcre2_match(code.get(), reinterpret_cast<PCRE2_SPTR>(subject.data()),
+                             static_cast<PCRE2_SIZE>(subject.size()), 0,
+                             pcreMatchOptions(pcreFlags), md, nullptr);
+        if (rc < 0) {
+            pcre2_match_data_free(md);
+            if (rc == PCRE2_ERROR_NOMATCH) return Value(subject);  // no match -> unchanged
+            throw LpcRuntimeError("pcre_replace: match error");
+        }
+        uint32_t pairs = (rc == 0) ? pcre2_get_ovector_count(md)
+                                   : static_cast<uint32_t>(rc);
+        PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
+
+        if (pairs <= 1) {  // pattern captured nothing -> subject unchanged
+            pcre2_match_data_free(md);
+            return Value(subject);
+        }
+        const size_t groupCount = pairs - 1;
+        const size_t repCount = replacements ? replacements->items.size() : 0;
+        if (groupCount != repCount) {
+            pcre2_match_data_free(md);
+            throw LpcRuntimeError(
+                "Number of captured substrings and replacements do not match, " +
+                std::to_string(groupCount) + " vs " + std::to_string(repCount) + ".");
+        }
+        for (const auto& el : replacements->items) {
+            if (!std::holds_alternative<std::string>(el.data)) {
+                pcre2_match_data_free(md);
+                throw LpcRuntimeError(
+                    "Bad argument 3 to pcre_replace(): replacement array must contain only strings.");
+            }
+        }
+
+        // Rebuild the subject, substituting each selected group.
+        size_t firstStart = (ov[2] == PCRE2_UNSET) ? 0 : static_cast<size_t>(ov[2]);
+        std::string out = subject.substr(0, firstStart);
+        size_t gate = firstStart;      // next selected group must start >= this
+        size_t lastEnd = firstStart;   // end of the last selected group
+        for (size_t i = 1; i <= groupCount; ++i) {
+            PCRE2_SIZE gs = ov[2 * i], ge = ov[2 * i + 1];
+            if (gs == PCRE2_UNSET || ge == PCRE2_UNSET) continue;  // did not participate
+            size_t gstart = static_cast<size_t>(gs), gend = static_cast<size_t>(ge);
+            if (gstart < gate) continue;  // nested / overlapping
+            if (gstart > lastEnd) out += subject.substr(lastEnd, gstart - lastEnd);
+            out += std::get<std::string>(replacements->items[i - 1].data);
+            lastEnd = gend;
+            gate = gend;
+        }
+        if (lastEnd < subject.size()) out += subject.substr(lastEnd);
+
+        pcre2_match_data_free(md);
+        return Value(out);
+    });
+
     // -------------------------------------------------------------------------
     // Phase 0.13 efun growth batch (post-restructure) - test_bit/set_bit/
     // clear_bit, crc32, cp, inherits, get_config, query_load_average, say,

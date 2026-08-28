@@ -18120,6 +18120,76 @@ static void testPcreMatchAllReturnsEveryMatch() {
     std::cout << "testPcreMatchAllReturnsEveryMatch OK\n";
 }
 
+// string pcre_replace(string subject, string pattern, string
+// *replacements, void|int pcre_flags) -- f_pcre_replace() +
+// pcre_get_replace(). Not an ordinary substitution: match once, then
+// rebuild the subject with each SELECTED capture group (group i) replaced
+// by replacements[i-1]. A group is selected only when it starts at or
+// after the end of the last selected group, so a nested inner group is
+// left alone. Expected outputs below are traced by hand from that rule,
+// not read back from this driver.
+static void testPcreReplaceSubstitutesSelectedGroups() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrereplace_probe.c",
+        "string rp(string s, string p, string *r) { return pcre_replace(s, p, r); }\n"
+        "string rp_i(string s, string p, string *r) { return pcre_replace(s, p, r, PCRE_I); }\n"
+        "int rp_mismatch() { return sizeof(pcre_replace(\"ab\", \"(a)(b)\", ({ \"X\" }))); }\n"
+        "int rp_nonstring() {\n"
+        "    mixed *r = ({ \"X\", 5 });\n"
+        "    return sizeof(pcre_replace(\"ab\", \"(a)(b)\", r));\n"
+        "}\n"
+        "int rp_nonarray() {\n"
+        "    mixed m = \"x\";\n"
+        "    return sizeof(pcre_replace(\"ab\", \"(a)\", m));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/pcrereplace_probe");
+    assert(ob != nullptr);
+
+    auto mkarr = [](std::initializer_list<const char*> ss) {
+        auto a = std::make_shared<amlp::Array>();
+        for (const char* s : ss) a->items.push_back(amlp::Value(std::string(s)));
+        return amlp::Value(a);
+    };
+    auto rp = [&](const char* fn, const char* s, const char* p, amlp::Value r) -> std::string {
+        amlp::Value out = harness.vm.callFunction(
+            ob, fn, {amlp::Value(std::string(s)), amlp::Value(std::string(p)), std::move(r)});
+        assert(std::holds_alternative<std::string>(out.data));
+        return std::get<std::string>(out.data);
+    };
+
+    // Two groups, adjacent in the subject except for the literal space.
+    assert(rp("rp", "hello world", "([a-z]+) ([a-z]+)", mkarr({"HI", "EARTH"})) == "HI EARTH");
+    // Two adjacent groups, trailing text copied through.
+    assert(rp("rp", "abc123def", "([a-z]+)([0-9]+)", mkarr({"X", "Y"})) == "XYdef");
+    // Gap text between three groups is copied verbatim.
+    assert(rp("rp", "a-b-c", "(a).(b).(c)", mkarr({"X", "Y", "Z"})) == "X-Y-Z");
+    // Nested inner group is NOT selected (starts before the outer group's end).
+    assert(rp("rp", "2026", "(([0-9][0-9])[0-9][0-9])", mkarr({"A", "B"})) == "A");
+    // No match: subject returned unchanged.
+    assert(rp("rp", "nothing here", "([0-9]+)", mkarr({"X"})) == "nothing here");
+    // Pattern with no capture groups: subject returned unchanged.
+    assert(rp("rp", "abc123", "[0-9]+", mkarr({})) == "abc123");
+
+    // pcre_flags: PCRE_I makes the FIRST match the uppercase word, so it
+    // is the one replaced; without the flag the first match is "bar".
+    assert(rp("rp_i", "FOO bar", "([a-z]+)", mkarr({"X"})) == "X bar");
+    assert(rp("rp", "FOO bar", "([a-z]+)", mkarr({"X"})) == "FOO X");
+
+    // Error paths: replacement count mismatch, a non-string replacement
+    // element, and a non-array 3rd argument all throw.
+    for (const char* fn : {"rp_mismatch", "rp_nonstring", "rp_nonarray"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testPcreReplaceSubstitutesSelectedGroups OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26945,6 +27015,7 @@ int main() {
     testPcreVersionReturnsAVersionString();
     testPcreExtractReturnsCaptureGroups();
     testPcreMatchAllReturnsEveryMatch();
+    testPcreReplaceSubstitutesSelectedGroups();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

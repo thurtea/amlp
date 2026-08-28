@@ -9,6 +9,88 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-28 (a further session, same day): `pcre.spec`,
+`pcre_replace(string, string, string *, void | int)`. The remaining
+self-contained `pcre.spec` name after row 2.53's read-side trio. 811
+tests passing (up from 810). New `ROADMAP.md` row 2.54.**
+
+**Why this slice.** Row 2.53 built the three `pcre.spec` names that only
+read match data and named `pcre_replace()` / `pcre_replace_callback()` /
+`pcre_cache()` as still deferred. Of those three, `pcre_replace()` is the
+only self-contained one: `pcre_replace_callback()` re-enters LPC once per
+match (needs an apply trampoline), and `pcre_cache()` reports the
+contents of an internal pattern cache this driver structures differently.
+`pcre_replace()` needs nothing new (PCRE2 is already linked and wrapped;
+`compileRegex()` and the `pcreCompileOptions` / `pcreMatchOptions` flag
+helpers already exist), so it is this slice, continuing the same
+named-deferral pattern the `matrix.spec` slices (rows 2.47-2.49) used.
+
+**Signature** from `temp/fluffos/src/packages/pcre/pcre.spec`:
+`string pcre_replace(string, string, string *, void | int);`.
+
+**Real semantics, confirmed from `pcre.cc`.** From `f_pcre_replace()` +
+the file-static `pcre_get_replace()`:
+
+  - This is NOT an ordinary regex substitution. Match the pattern
+    against the subject ONCE, then rebuild the subject with each
+    SELECTED capture group replaced by the correspondingly-indexed
+    element of the replacements array: group `i` by `replacements[i-1]`.
+  - "Selected" means the group starts at or after the end of the last
+    selected group. A nested or overlapping inner group is therefore
+    skipped (its start is `< prev`), and a non-participating group is
+    skipped too (real reads its `ovector` slot as `-1`, also `< prev`).
+  - Text between selected groups, and the prefix before the first and
+    the suffix after the last, is copied through verbatim.
+  - No match: return the subject unchanged (real `f_pcre_replace()`
+    does `pop_2_elems()` and returns, leaving the subject on the stack).
+  - `rc == 1` (the pattern has no capture groups): return the subject
+    unchanged (real's own `if (run->rc == 1)` early return).
+  - `(rc - 1) != replacements->size`: error "Number of captured
+    substrings and replacements do not match, %d vs %d.".
+  - A non-string element in `replacements`: error "Bad argument 3 to
+    pcre_replace(): replacement array must contain only strings.".
+  - A non-array 3rd argument: error "Bad argument 3 to pcre_replace()".
+  - The optional 4th argument is the same `pcre_flags` bitmask
+    (`PCRE_I` / `M` / `S` / `U` / `X` / `A`) as `pcre_match()` /
+    `pcre_extract()`.
+
+**One narrow named divergence from real.** Real `f_pcre_replace()`
+initializes its running gate from `ovector[2]` (group 1's start)
+directly. A pattern whose very first group is optional and did not
+participate makes real derive the prefix length from `(size_t)(-1)`
+(then clamp it), producing garbage for that one pathological input. This
+driver treats a non-participating group-1 start as 0 for the prefix and
+the gate, so that input produces a sane result instead. Every case where
+group 1 actually participated is byte-identical to real.
+
+**Built.** Registered in `EfunTable.cpp` immediately after
+`pcre_match_all`. It compiles the pattern with
+`compileRegex(pattern, pcreCompileOptions(flags))`, runs one
+`pcre2_match` at offset 0 with `pcreMatchOptions(flags)`, then walks the
+`pcre2_get_ovector_pointer` spans applying the selection rule directly on
+a `std::string` built with `+=` (no pre-sized buffer, so the real size
+pre-pass is unnecessary; `PCRE2_UNSET` is checked explicitly since it is
+`SIZE_MAX` rather than `-1`). No new include or dependency.
+
+**1 new regression test (811 total, up from 810):**
+`testPcreReplaceSubstitutesSelectedGroups` -- `([a-z]+) ([a-z]+)` on
+`"hello world"` with `({ "HI", "EARTH" })` gives `"HI EARTH"`; two
+adjacent groups (`([a-z]+)([0-9]+)` on `"abc123def"`) give `"XYdef"`
+(trailing text copied through); three groups with literal gaps
+(`(a).(b).(c)` on `"a-b-c"`) give `"X-Y-Z"` (gap text copied verbatim); a
+nested inner group (`(([0-9][0-9])[0-9][0-9])` on `"2026"`) is not
+selected, giving `"A"`; no match and a group-less pattern both return the
+subject unchanged; `PCRE_I` as the 4th argument makes the uppercase word
+the first match, so it is the one replaced (`"X bar"`, versus `"FOO X"`
+without the flag); and a replacement-count mismatch, a non-string
+replacement element, and a non-array 3rd argument all throw
+`LpcRuntimeError`. Expected outputs were traced by hand from the
+selection rule, not read back from this driver.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.54
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-28 (a further session, same day): `pcre.spec` read-side efuns,
 `pcre_version()`, `pcre_extract()`, `pcre_match_all()`. The three
 `pcre.spec` names that only read match data, continuing row 2.12's own

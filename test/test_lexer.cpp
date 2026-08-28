@@ -17812,6 +17812,100 @@ static void testIsDaylightSavingsTimeReflectsZoneAndDate() {
     std::cout << "testIsDaylightSavingsTimeReflectsZoneAndDate OK\n";
 }
 
+// Vector math efuns norm(), dotprod(), distance() (packages/math/math.spec
+// + math.cc, genuinely new since the 2.9 reference, which stops at
+// ceil()). Semantics from math.cc's own norm()/vector_op()/f_norm()/
+// f_dotprod()/f_distance(): norm(a) = sqrt(sum a_i^2), dotprod(a,b) =
+// sum a_i*b_i, distance(a,b) = sqrt(sum (b_i-a_i)^2). Elements may be int
+// or float. Expected values below are hand-computed (all reduce to the
+// 3-4-5 right triangle), not read back from this driver.
+static void testVectorNormDotprodDistanceKnownValues() {
+    ObjectVarHarness harness;
+    harness.writeFile("/vec_probe.c",
+        "float n2() { return norm(({ 3.0, 4.0 })); }\n"
+        "float n_ints() { return norm(({ 3, 4 })); }\n"
+        "float n_empty() { return norm(({ })); }\n"
+        "float dp() { return dotprod(({ 1.0, 2.0, 3.0 }), ({ 4.0, 5.0, 6.0 })); }\n"
+        "float dp_perp() { return dotprod(({ 1, 0 }), ({ 0, 1 })); }\n"
+        "float dist() { return distance(({ 0.0, 0.0 }), ({ 3.0, 4.0 })); }\n"
+        "float dist_mixed() { return distance(({ 1, 2 }), ({ 4, 6 })); }\n");
+    auto ob = harness.objects.cloneObject("/vec_probe");
+    assert(ob != nullptr);
+
+    auto call = [&](const char* fn) -> double {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<double>(r.data));
+        return std::get<double>(r.data);
+    };
+
+    assert(call("n2") == 5.0);
+    assert(call("n_ints") == 5.0);
+    assert(call("n_empty") == 0.0);
+    assert(call("dp") == 32.0);          // 4 + 10 + 18
+    assert(call("dp_perp") == 0.0);
+    assert(call("dist") == 5.0);         // sqrt(9 + 16)
+    assert(call("dist_mixed") == 5.0);   // sqrt(9 + 16)
+
+    std::cout << "testVectorNormDotprodDistanceKnownValues OK\n";
+}
+
+// angle() (packages/math/math.cc f_angle()): acos(dotprod(a,b) /
+// (norm(a) * norm(b))), in radians. Also the real error paths, all from
+// math.cc: a size mismatch for dotprod/distance/angle, a non-numeric
+// element, and a call with too few array arguments. Expected angles are
+// the closed forms pi/2, 0 and pi, compared with a tolerance and not read
+// back from this driver.
+static void testVectorAngleAndBadArgsThrow() {
+    ObjectVarHarness harness;
+    harness.writeFile("/vec_probe2.c",
+        "float ang_perp() { return angle(({ 1.0, 0.0 }), ({ 0.0, 1.0 })); }\n"
+        "float ang_same() { return angle(({ 2.0, 0.0, 0.0 }), ({ 5.0, 0.0, 0.0 })); }\n"
+        "float ang_opp() { return angle(({ 1.0, 0.0 }), ({ -1.0, 0.0 })); }\n"
+        "int dp_sizes() {\n"
+        "    mixed a = ({ 1.0 });\n"
+        "    mixed b = ({ 1.0, 2.0 });\n"
+        "    return sizeof(({ dotprod(a, b) }));\n"
+        "}\n"
+        "int dist_sizes() { return sizeof(({ distance(({ 1.0 }), ({ 1.0, 2.0 })) })); }\n"
+        "int ang_sizes() { return sizeof(({ angle(({ 1.0 }), ({ 1.0, 2.0 })) })); }\n"
+        "int dp_badelem() {\n"
+        "    mixed a = ({ 1.0, \"x\" });\n"
+        "    mixed b = ({ 1.0, 2.0 });\n"
+        "    return sizeof(({ dotprod(a, b) }));\n"
+        "}\n"
+        "int norm_badarg() { mixed m = 7; return sizeof(({ norm(m) })); }\n"
+        "int dp_onearg() { return sizeof(({ dotprod(({ 1.0 })) })); }\n");
+    auto ob = harness.objects.cloneObject("/vec_probe2");
+    assert(ob != nullptr);
+
+    auto call = [&](const char* fn) -> double {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<double>(r.data));
+        return std::get<double>(r.data);
+    };
+    auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+
+    // Perpendicular unit vectors: dot 0, so acos(0) == pi/2.
+    assert(near(call("ang_perp"), 1.5707963267948966));
+    // Parallel (same direction, different magnitudes): acos(1) == 0 exactly.
+    assert(call("ang_same") == 0.0);
+    // Antiparallel: acos(-1) == pi.
+    assert(near(call("ang_opp"), 3.141592653589793));
+
+    for (const char* fn : {"dp_sizes", "dist_sizes", "ang_sizes",
+                           "dp_badelem", "norm_badarg", "dp_onearg"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testVectorAngleAndBadArgsThrow OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26631,6 +26725,8 @@ int main() {
     testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs();
     testZonetimeFormatsClockInNamedZone();
     testIsDaylightSavingsTimeReflectsZoneAndDate();
+    testVectorNormDotprodDistanceKnownValues();
+    testVectorAngleAndBadArgsThrow();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

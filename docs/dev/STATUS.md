@@ -9,6 +9,114 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-28 (a further session, same day): `math.spec` vector efuns,
+`norm()`, `dotprod()`, `distance()`, `angle()`. Four pure float-math
+functions from the `math` package, the same shape as the `matrix.spec`
+slices and `log2()`/`round()`: no new subsystem, no dependency, no
+buffer type. 806 tests passing (up from 804). New `ROADMAP.md` row
+2.51.**
+
+**Why this slice.** After `contrib.spec`'s two timezone efuns (row
+2.50), a package-by-package sweep of `temp/fluffos/src/packages/*/*.spec`
+against this driver's registered efuns still shows small, self-contained
+gaps that need nothing new. `math.spec` is the cleanest: it declares
+`norm`, `dotprod`, `distance`, `angle` (alongside the already-done
+`log2`/`round`), none of them registered here yet, all pure `<cmath>`
+arithmetic over float arrays with no new subsystem, no new dependency,
+and independently verifiable by hand-computed values with no live
+instance. Every other open Phase 2 sweep row (2.31-2.45) still needs a
+new subsystem, the buffer type, `zlib`, TLS, `fork`/`exec`, async I/O,
+or a stats-tracking layer.
+
+**Genuinely new since 2.9, confirmed from source.**
+`temp/reference/fluffos-2.9-ds2.08/packages/math_spec.c` ends at
+`ceil()`: there is no `norm` / `dotprod` / `distance` / `angle` (or
+`f_norm` / `f_dotprod` / `f_distance` / `f_angle`) anywhere in that
+tree. The current locally-vendored clone
+`temp/fluffos/src/packages/math/math.spec` adds
+`float norm(int *|float *);`,
+`float dotprod(int *|float *, int *|float *);`,
+`float distance(int *|float *, int *|float *);`,
+`float angle(int *|float *, int *|float *);`, and its `math.cc` header
+comment reads "Added norm, dotprod, distance, angle, log2." This is the
+same category as row 2.46's `sha1()`, the `log2()`/`round()` row, and
+rows 2.16/2.24: real current-FluffOS surface the 2.9 reference never
+carried, not an old always-present gap.
+
+**Real semantics, confirmed from `math.cc`.** From `norm()` /
+`vector_op()` / `f_norm()` / `f_dotprod()` / `f_distance()` /
+`f_angle()` in `temp/fluffos/src/packages/math/math.cc`:
+
+  - Each array element is read as int (`T_NUMBER`) or float (`T_REAL`)
+    and promoted to double; any other element type is an error. Real
+    `f_norm()` raises `"norm: invalid argument 1."`; `vector_op()` (used
+    by the other three) raises `"<efun>: invalid arg N."` with N being 1
+    for the first vector, 2 for the second, and it inspects the *second*
+    operand's element before the first. `f_angle()` runs its `dotprod`
+    pass first, so a non-numeric element there surfaces as
+    `"angle: invalid arg N."` (the norm-failure texts
+    `"angle: invalid argument 1./2."` are unreachable once every element
+    is known numeric).
+  - `norm(a)` = `sqrt(sum a_i^2)`. An empty array gives `sqrt(0.0)` =
+    `0.0`.
+  - `dotprod(a,b)` = `sum a_i*b_i`; `distance(a,b)` =
+    `sqrt(sum (b_i-a_i)^2)`. Both require equal lengths, else
+    `"dotprod: cannot take the dotprod of vectors of different sizes."`
+    / `"distance: cannot take the distance of vectors of different
+    sizes."`
+  - `angle(a,b)` = `acos(dotprod(a,b) / (norm(a) * norm(b)))` in
+    radians; its size mismatch reads `"angle: cannot calculate the
+    angle between vectors of different sizes."`
+  - Real FluffOS operates on the driver stack in place, but none of
+    these four mutate their array arguments (unlike the matrix
+    package, rows 2.47-2.49). This driver reads the
+    `std::shared_ptr<Array>` arguments and returns a fresh float
+    `Value`; there is no aliasing contract to reproduce.
+  - A call with fewer than the required array arguments throws (the
+    efun validates its own arity). Real FluffOS would stack-underflow
+    on `(sp-1)`.
+
+**Corpus call-site frequency.** Grepped every vendored corpus under
+`temp/` (`core-lib`, `dead-souls`, `es2_mudlib`, `lima`, `nightmare3`,
+`reference-lpc-mud-library`, `wiz_tools`, `lil`) plus the bundled
+`mudlib/` for `norm(` / `dotprod(` / `distance(` / `angle(`: zero real
+LPC call sites (the `distance`/`angle` textual hits are all unrelated
+identifiers, not efun calls). Motivation is FluffOS-surface parity, the
+same honestly-named basis as rows 2.16/2.24/2.25/2.46/2.47/2.48/2.49/
+2.50.
+
+**Built.** `norm`, `dotprod`, `distance`, `angle` registered in
+`EfunTable.cpp` directly after `round`, at the end of the math-package
+block. One local lambda `vectorArg(v, errmsg)` reads an `Array` argument
+into a `std::vector<double>`, promoting int elements and throwing
+`errmsg` on a non-array or a non-numeric element. A second lambda
+`vecPair(args, efun, sizemsg)` reads two vectors, applies the per-vector
+`"<efun>: invalid arg N."` messages, and throws `sizemsg` on a length
+mismatch. `norm` sums squares and `sqrt`s; `dotprod` sums products;
+`distance` sums squared differences and `sqrt`s; `angle` accumulates
+dot, `|a|^2`, `|b|^2` in one pass and returns `acos(dot / (sqrt(na) *
+sqrt(nb)))`. No new include (`<cmath>` already pulled in by the math
+package).
+
+**2 new regression tests (806 total, up from 804):**
+`testVectorNormDotprodDistanceKnownValues` -- `norm(({3.0,4.0}))` and
+`norm(({3,4}))` are both `5.0`, `norm(({}))` is `0.0`,
+`dotprod(({1.0,2.0,3.0}),({4.0,5.0,6.0}))` is `32.0`,
+`dotprod(({1,0}),({0,1}))` is `0.0`, and `distance` from origin to
+`(3,4)` is `5.0` for both float and int inputs. Every value is
+hand-computed (all reduce to the 3-4-5 right triangle), not read back
+from this driver. `testVectorAngleAndBadArgsThrow` -- `angle` of
+perpendicular unit vectors is `pi/2`, of parallel vectors (same
+direction, different magnitude) is exactly `0.0`, of antiparallel
+vectors is `pi` (closed forms, compared with a 1e-9 tolerance); and a
+size mismatch for `dotprod`/`distance`/`angle`, a non-numeric element
+passed through a `mixed`, a non-array argument, and a one-argument
+`dotprod` call all throw `LpcRuntimeError`.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.51
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-28 (a further session, same day): `contrib.spec` timezone
 efuns, `zonetime(string, int)` and `is_daylight_savings_time(string,
 int)`. Two pure, self-contained functions from a real 2.9 package,

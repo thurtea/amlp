@@ -8473,6 +8473,128 @@ void registerCoreEfuns() {
     });
 
     // -------------------------------------------------------------------------
+    // Vector math efuns: norm(), dotprod(), distance(), angle()
+    // (packages/math/math.spec + math.cc). Genuinely new-since-2.9:
+    // temp/reference/fluffos-2.9-ds2.08/packages/math_spec.c stops at
+    // ceil() and has no norm/dotprod/distance/angle anywhere in that tree;
+    // the current locally-vendored clone (temp/fluffos/src/packages/math/)
+    // adds them, its own math.cc header comment reading "Added norm,
+    // dotprod, distance, angle, log2." Same category as row 2.46's sha1(),
+    // the log2()/round() row above, and rows 2.16/2.24 -- real current-
+    // FluffOS surface the 2.9 reference never carried, not an old gap.
+    //
+    // Signatures (math.spec, current clone):
+    //   float norm(int *|float *);
+    //   float dotprod(int *|float *, int *|float *);
+    //   float distance(int *|float *, int *|float *);
+    //   float angle(int *|float *, int *|float *);
+    //
+    // Semantics confirmed from math.cc's own norm()/vector_op()/f_norm()/
+    // f_dotprod()/f_distance()/f_angle():
+    //   - Each element is read as int (T_NUMBER) or float (T_REAL) and
+    //     promoted to double; any other element type is an error. Real
+    //     f_norm() says "norm: invalid argument 1."; vector_op (used by the
+    //     other three) reports "<efun>: invalid arg N." with N being 1 for
+    //     the first vector or 2 for the second, and it inspects the second
+    //     operand's element before the first. f_angle() runs the dotprod
+    //     pass first, so a non-numeric element there surfaces as
+    //     "angle: invalid arg N." (the norm-failure texts
+    //     "angle: invalid argument 1./2." are unreachable once every
+    //     element is known numeric).
+    //   - norm(a)      = sqrt(sum a_i^2). An empty array gives sqrt(0.0).
+    //   - dotprod(a,b) = sum a_i*b_i. distance(a,b) = sqrt(sum (b_i-a_i)^2).
+    //     Both require equal lengths, else "<efun>: cannot take the
+    //     <dotprod|distance> of vectors of different sizes."
+    //   - angle(a,b)   = acos(dotprod(a,b) / (norm(a) * norm(b))); its size
+    //     mismatch reads "angle: cannot calculate the angle between vectors
+    //     of different sizes."
+    // Real FluffOS operates on the driver stack in place but none of these
+    // four mutate their array arguments (unlike the matrix package); this
+    // driver reads the std::shared_ptr<Array> arguments and returns a fresh
+    // float Value.
+    //
+    // Corpus call-site frequency, checked before implementing: grepped
+    // every vendored corpus under temp/ (core-lib, dead-souls, es2_mudlib,
+    // lima, nightmare3, reference-lpc-mud-library, wiz_tools, lil) plus the
+    // bundled mudlib/ for norm( / dotprod( / distance( / angle(: zero real
+    // LPC call sites. Motivation is FluffOS-surface parity, the same
+    // honestly-named basis as rows 2.16/2.24/2.46/2.47/2.48/2.49/2.50;
+    // vector norms and dot products are independently verifiable against
+    // hand-computed values with no live-instance dependency.
+    // -------------------------------------------------------------------------
+    auto vectorArg = [](const Value& v, const std::string& errmsg) -> std::vector<double> {
+        if (!std::holds_alternative<std::shared_ptr<Array>>(v.data)) {
+            throw LpcRuntimeError(errmsg);
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(v.data);
+        std::vector<double> out;
+        if (arr) {
+            out.reserve(arr->items.size());
+            for (const auto& el : arr->items) {
+                if (std::holds_alternative<double>(el.data)) {
+                    out.push_back(std::get<double>(el.data));
+                } else if (std::holds_alternative<int64_t>(el.data)) {
+                    out.push_back(static_cast<double>(std::get<int64_t>(el.data)));
+                } else {
+                    throw LpcRuntimeError(errmsg);
+                }
+            }
+        }
+        return out;
+    };
+
+    t.registerEfun("norm", [vectorArg](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("norm: expected an array argument");
+        std::vector<double> a = vectorArg(args[0], "norm: invalid argument 1.");
+        double total = 0.0;
+        for (double x : a) total += x * x;
+        return Value(std::sqrt(total));
+    });
+
+    auto vecPair = [vectorArg](std::vector<Value>& args, const char* efun,
+                               const char* sizemsg)
+            -> std::pair<std::vector<double>, std::vector<double>> {
+        if (args.size() < 2) {
+            throw LpcRuntimeError(std::string(efun) + ": expected two array arguments");
+        }
+        std::vector<double> a = vectorArg(args[0], std::string(efun) + ": invalid arg 1.");
+        std::vector<double> b = vectorArg(args[1], std::string(efun) + ": invalid arg 2.");
+        if (a.size() != b.size()) throw LpcRuntimeError(sizemsg);
+        return {std::move(a), std::move(b)};
+    };
+
+    t.registerEfun("dotprod", [vecPair](VM&, std::vector<Value>& args) -> Value {
+        auto p = vecPair(args, "dotprod",
+            "dotprod: cannot take the dotprod of vectors of different sizes.");
+        double total = 0.0;
+        for (std::size_t i = 0; i < p.first.size(); ++i) total += p.first[i] * p.second[i];
+        return Value(total);
+    });
+
+    t.registerEfun("distance", [vecPair](VM&, std::vector<Value>& args) -> Value {
+        auto p = vecPair(args, "distance",
+            "distance: cannot take the distance of vectors of different sizes.");
+        double total = 0.0;
+        for (std::size_t i = 0; i < p.first.size(); ++i) {
+            double d = p.second[i] - p.first[i];
+            total += d * d;
+        }
+        return Value(std::sqrt(total));
+    });
+
+    t.registerEfun("angle", [vecPair](VM&, std::vector<Value>& args) -> Value {
+        auto p = vecPair(args, "angle",
+            "angle: cannot calculate the angle between vectors of different sizes.");
+        double dot = 0.0, na = 0.0, nb = 0.0;
+        for (std::size_t i = 0; i < p.first.size(); ++i) {
+            dot += p.first[i] * p.second[i];
+            na  += p.first[i] * p.first[i];
+            nb  += p.second[i] * p.second[i];
+        }
+        return Value(std::acos(dot / (std::sqrt(na) * std::sqrt(nb))));
+    });
+
+    // -------------------------------------------------------------------------
     // Matrix package (packages/matrix_spec.c / matrix.c) - first slice only:
     // id_matrix(), translate(), scale(). This is an old, always-present gap,
     // not new-since-2.9: temp/reference/fluffos-2.9-ds2.08/packages/ carries

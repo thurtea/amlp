@@ -9,6 +9,105 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-28 (a further session, same day): `contrib.spec` timezone
+efuns, `zonetime(string, int)` and `is_daylight_savings_time(string,
+int)`. Two pure, self-contained functions from a real 2.9 package,
+picked as the smallest still-real gap now that `matrix.spec` is closed.
+804 tests passing (up from 802). New `ROADMAP.md` row 2.50.**
+
+**Why this slice.** After `matrix.spec` (rows 2.47-2.49), the remaining
+open Phase 2 sweep rows (2.31-2.45) each need something substantial:
+row 2.32 a telnet-protocol-extension family, 2.33 the buffer value type,
+2.34 a runtime-mutable config table, 2.35 per-frame `defer`/`finally`
+plumbing in the VM, 2.36 a driver-internals diagnostic family, 2.38 a
+UID/EUID trust hierarchy, 2.39 per-socket TLS, 2.41 a domain/author
+stats subsystem, 2.42 `zlib` plus the buffer type, 2.43 `fork`/`exec`
+process spawning, 2.44 real async I/O through `Scheduler`, 2.45 an FFI
+family plus `libffi`. `zonetime` / `is_daylight_savings_time` need none
+of that: they are two small, deterministic `<ctime>` conversions, no new
+subsystem, no new dependency (`<cstdlib>` added for `setenv`), and both
+are independently verifiable against hand-computed system-libc output
+with no live instance.
+
+**Which names, and the real source cited.** Signatures are identical in
+both trees: `temp/reference/fluffos-2.9-ds2.08/packages/contrib_spec.c`
+and the current clone `temp/fluffos/src/packages/contrib/contrib.spec`
+both declare `string zonetime(string, int);` and `int
+is_daylight_savings_time(string, int);`. Grep of `EfunTable.cpp`
+confirmed neither was registered. The rest of `contrib.spec` is either
+already implemented or already scoped as a deferred family (rows 2.36
+and similar).
+
+**Real semantics, confirmed from source.** From `packages/contrib.c`'s
+own `f_zonetime()` / `f_is_daylight_savings_time()` plus
+`set_timezone()` / `reset_timezone()` (John Viega's 1996 timezone
+efuns, header comment "efuns for doing time zone conversions. Much
+friendlier than doing all the lookup tables in LPC"), re-checked
+against the identical current-clone `contrib.cc`:
+
+  - Both work by pointing libc at the named zone: set the `TZ`
+    environment variable, call `tzset()`, do the conversion, then
+    restore the previous `TZ` and `tzset()` again. Real `set_timezone()`
+    does this with `putenv()` and a static buffer; this driver uses
+    `setenv()` / `unsetenv()` for the same effect without aliasing a
+    static buffer into the environment.
+  - `zonetime(tz, clock)`: `ctime` of `clock` computed in zone `tz`,
+    with the trailing newline stripped (real: `retv[len-1] = '\0'`).
+    `ctime`'s fixed `"Www Mmm dd hh:mm:ss yyyy"` form, space-padded day,
+    so a single-digit day has two spaces before it:
+    `zonetime("UTC", 1000000000)` is `"Sun Sep  9 01:46:40 2001"`. The
+    2.9 source uses `ctime()`; the current clone uses `ctime_r()` and
+    raises `"bad argument to zonetime."` when it returns null. Both
+    matched (this driver uses `ctime_r` and the same error text).
+  - `is_daylight_savings_time(tz, clock)`: `localtime` of `clock` in
+    zone `tz`, returns `(tm_isdst > 0)` as 0 or 1. The current clone
+    clamps a negative `clock` to 0 and returns -1 on `localtime_r`
+    failure; both matched.
+  - TZ is a process-global. This driver runs efuns synchronously on one
+    thread (the same assumption real FluffOS makes), so the set/restore
+    pair is not racing anything.
+
+**Corpus call-site frequency.** Zero real LPC call sites in any vendored
+corpus under `temp/`. These two were already surveyed in the
+six-corpus efun ranking as 0-weight tail entries (`src/efun/instruct.md`
+names them explicitly in its "look only for anything a fresh read might
+have missed" note); re-confirmed this pass. The only `zonetime` /
+`is_daylight_savings_time` hits anywhere under `temp/` are FluffOS's own
+testsuite. Motivation is FluffOS-surface parity, the same honestly-named
+basis as rows 2.16/2.24/2.25/2.46 and the matrix slices.
+
+**Built.** `zonetime` and `is_daylight_savings_time` registered in
+`EfunTable.cpp` directly after `localtime`, sharing one local lambda
+`withTimezone(tz, body)` that saves the current `TZ`, sets the requested
+zone, runs `body`, then restores `TZ` exactly (re-`setenv` if there was
+a previous value, `unsetenv` if there was not) and `tzset()`s again.
+`zonetime` calls `ctime_r` inside `body` and strips a trailing newline;
+`is_daylight_savings_time` calls `localtime_r` and reads `tm_isdst`.
+Both reject a non-string `tz` or a missing `clock` with
+`LpcRuntimeError`. `#include <cstdlib>` added for `setenv`/`unsetenv`.
+
+**2 new regression tests (804 total, up from 802):**
+`testZonetimeFormatsClockInNamedZone` -- `zonetime("UTC", 1000000000)`
+is exactly `"Sun Sep  9 01:46:40 2001"`, `zonetime("UTC", 0)` is
+`"Thu Jan  1 00:00:00 1970"`, `zonetime("EST5", 1000000000)` is
+`"Sat Sep  8 20:46:40 2001"` (fixed UTC-5, no DST rule), a one-argument
+call and a non-string `tz` (through a `mixed`) both throw, and a later
+call in a different zone is unaffected by an earlier one, proving `TZ`
+is restored. `testIsDaylightSavingsTimeReflectsZoneAndDate` --
+`"UTC"` is 0 at any date; `"EST5EDT,M3.2.0,M11.1.0"` is 1 for a
+September 2001 clock and 0 for a January 2002 clock (same zone, opposite
+answers by date); a negative clock is clamped to epoch rather than
+erroring; a non-string `tz` or a one-argument call throws. Expected
+strings and flags were cross-checked against the system libc
+(`perl -e 'localtime'`) before writing the tests, not read back from
+this driver. The `"UTC"` / `"EST5"` / POSIX-rule zone strings are
+parsed by glibc directly, so the tests do not need the zoneinfo
+database installed.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.50
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-28: `matrix.spec` final slice, `lookat_rotate()` and
 `lookat_rotate2()`. This completes `matrix.spec` -- all 8 declared names
 are now registered (row 2.47 landed 3, row 2.48 landed 3, this slice the

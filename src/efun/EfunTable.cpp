@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
@@ -5921,6 +5922,105 @@ void registerCoreEfuns() {
         result->items.emplace_back(static_cast<int64_t>(tmVal.tm_gmtoff));
         result->items.emplace_back(std::string(tmVal.tm_zone ? tmVal.tm_zone : ""));
         result->items.emplace_back(static_cast<int64_t>(tmVal.tm_isdst));
+        return Value(result);
+    });
+
+    // string zonetime(string tz, int clock) and
+    // int is_daylight_savings_time(string tz, int clock)
+    // -- packages/contrib.c's own f_zonetime() / f_is_daylight_savings_time(),
+    // John Viega's 1996 timezone-conversion efuns ("efuns for doing time
+    // zone conversions. Much friendlier than doing all the lookup tables
+    // in LPC"). Both still present verbatim in current FluffOS
+    // (temp/fluffos/src/packages/contrib/contrib.cc), same declared
+    // signatures in both trees: `string zonetime(string, int);
+    // int is_daylight_savings_time(string, int);`. Neither was registered
+    // here before (grep of EfunTable.cpp); the rest of contrib.spec is
+    // either already done or already scoped as deferred (rows 2.36 etc).
+    //
+    // Both work by pointing libc at the named zone: set the TZ
+    // environment variable, call tzset(), do the conversion, then restore
+    // the previous TZ and tzset() again. Real set_timezone() /
+    // reset_timezone() (contrib.c) do this with putenv() and a static
+    // buffer; this driver uses setenv()/unsetenv() for the same effect
+    // without aliasing a static buffer into the environment. The 2.9
+    // source calls ctime()/localtime(); current FluffOS calls
+    // ctime_r()/localtime_r(), matched here.
+    //
+    //   - zonetime(tz, clock): ctime of clock computed in zone tz, with
+    //     the trailing newline stripped (real: "retv[len-1] = '\0'").
+    //     ctime's fixed "Www Mmm dd hh:mm:ss yyyy" form (two spaces
+    //     before a single-digit day), e.g. zonetime("UTC", 1000000000)
+    //     == "Sun Sep  9 01:46:40 2001". Real f_zonetime() (current
+    //     clone) raises "bad argument to zonetime." when ctime_r returns
+    //     null; matched.
+    //   - is_daylight_savings_time(tz, clock): localtime of clock in zone
+    //     tz, returns (tm_isdst > 0) as 0 or 1. Current FluffOS clamps a
+    //     negative clock to 0 and returns -1 if localtime_r fails; both
+    //     matched.
+    //
+    // Zero real mudlib call sites (grepped every vendored corpus under
+    // temp/: the only hits are FluffOS's own testsuite). FluffOS-surface
+    // parity, the same basis as sha1() and the matrix.spec slices; both
+    // are independently verifiable against hand-computed libc output with
+    // no live-instance dependency. TZ is a process-global, and this
+    // driver runs efuns synchronously on one thread (same assumption real
+    // FluffOS makes), so the set/restore pair is not racing anything.
+    auto withTimezone = [](const std::string& tz, const std::function<void()>& body) {
+        const char* prev = ::getenv("TZ");
+        const bool hadPrev = prev != nullptr;
+        const std::string saved = hadPrev ? std::string(prev) : std::string();
+        ::setenv("TZ", tz.c_str(), 1);
+        ::tzset();
+        body();
+        if (hadPrev) {
+            ::setenv("TZ", saved.c_str(), 1);
+        } else {
+            ::unsetenv("TZ");
+        }
+        ::tzset();
+    };
+
+    t.registerEfun("zonetime", [withTimezone](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("zonetime: expected (string tz, int clock)");
+        }
+        const std::string& tz = std::get<std::string>(args[0].data);
+        std::time_t clock = static_cast<std::time_t>(std::get<int64_t>(args[1].data));
+        std::string out;
+        withTimezone(tz, [&] {
+            char buf[64] = {};
+            char* s = ::ctime_r(&clock, buf);
+            if (s) {
+                out = s;
+                if (!out.empty() && out.back() == '\n') out.pop_back();
+            }
+        });
+        if (out.empty()) {
+            throw LpcRuntimeError("bad argument to zonetime.");
+        }
+        return Value(out);
+    });
+
+    t.registerEfun("is_daylight_savings_time", [withTimezone](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("is_daylight_savings_time: expected (string tz, int clock)");
+        }
+        const std::string& tz = std::get<std::string>(args[0].data);
+        std::time_t clock = static_cast<std::time_t>(std::get<int64_t>(args[1].data));
+        if (clock < 0) clock = 0;
+        int64_t result = 0;
+        withTimezone(tz, [&] {
+            std::tm tmVal{};
+            if (::localtime_r(&clock, &tmVal)) {
+                result = (tmVal.tm_isdst > 0) ? 1 : 0;
+            } else {
+                result = -1;
+            }
+        });
         return Value(result);
     });
 

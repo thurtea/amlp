@@ -17709,6 +17709,109 @@ static void testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs() {
     std::cout << "testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs OK\n";
 }
 
+// contrib.spec timezone efun zonetime(string tz, int clock). Semantics
+// from packages/contrib.c's f_zonetime() (and the identical current
+// clone contrib.cc): point libc at the named zone via TZ, then ctime()
+// the clock and strip the trailing newline, giving the fixed
+// "Www Mmm dd hh:mm:ss yyyy" form. Expected strings below were
+// cross-checked against the system libc (perl -e 'localtime') before
+// writing this test, not read back from the driver. "UTC" needs no
+// tzdata; "EST5" is a POSIX TZ string glibc parses directly, so this
+// test does not depend on the zoneinfo database being installed.
+static void testZonetimeFormatsClockInNamedZone() {
+    ObjectVarHarness harness;
+    harness.writeFile("/zonetime_probe.c",
+        "string zt(string tz, int c) { return zonetime(tz, c); }\n"
+        "string zt_onearg() { return zonetime(\"UTC\"); }\n"
+        "int zt_badtz() {\n"
+        "    mixed m = 7;\n"
+        "    return sizeof(zonetime(m, 100));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/zonetime_probe");
+    assert(ob != nullptr);
+
+    auto zt = [&](const char* tz, long long c) -> std::string {
+        amlp::Value r = harness.vm.callFunction(
+            ob, "zt", {amlp::Value(std::string(tz)), amlp::Value(static_cast<int64_t>(c))});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    // 1000000000 == 2001-09-09T01:46:40Z. ctime space-pads the day field,
+    // so a single-digit day has two spaces before it.
+    assert(zt("UTC", 1000000000LL) == "Sun Sep  9 01:46:40 2001");
+    assert(zt("UTC", 0LL) == "Thu Jan  1 00:00:00 1970");
+    // EST5: fixed UTC-5, no DST rule. 01:46:40Z becomes 20:46:40 the day
+    // before.
+    assert(zt("EST5", 1000000000LL) == "Sat Sep  8 20:46:40 2001");
+
+    // A missing second argument and a non-string tz both throw.
+    for (const char* fn : {"zt_onearg", "zt_badtz"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    // TZ is restored after the call: a later zonetime in a different zone
+    // is not affected by the one before it.
+    assert(zt("UTC", 100LL) == "Thu Jan  1 00:01:40 1970");
+
+    std::cout << "testZonetimeFormatsClockInNamedZone OK\n";
+}
+
+// contrib.spec timezone efun is_daylight_savings_time(string tz, int
+// clock). Semantics from packages/contrib.c's
+// f_is_daylight_savings_time() (and the identical current clone): point
+// libc at zone tz via TZ, localtime() the clock, return (tm_isdst > 0)
+// as 0 or 1. Current FluffOS clamps a negative clock to 0. Expected
+// flags cross-checked against the system libc before writing this test.
+static void testIsDaylightSavingsTimeReflectsZoneAndDate() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dst_probe.c",
+        "int dst(string tz, int c) { return is_daylight_savings_time(tz, c); }\n"
+        "int dst_badtz() {\n"
+        "    mixed m = 3;\n"
+        "    return is_daylight_savings_time(m, 1000000000);\n"
+        "}\n"
+        "int dst_onearg() { return is_daylight_savings_time(\"UTC\"); }\n");
+    auto ob = harness.objects.cloneObject("/dst_probe");
+    assert(ob != nullptr);
+
+    auto dst = [&](const char* tz, long long c) -> int64_t {
+        amlp::Value r = harness.vm.callFunction(
+            ob, "dst", {amlp::Value(std::string(tz)), amlp::Value(static_cast<int64_t>(c))});
+        assert(std::holds_alternative<int64_t>(r.data));
+        return std::get<int64_t>(r.data);
+    };
+
+    // UTC never observes DST, at any date.
+    assert(dst("UTC", 1000000000LL) == 0);
+    assert(dst("UTC", 1010000000LL) == 0);
+    // US Eastern, standard POSIX DST rule: 2001-09-08 is inside DST,
+    // 2002-01-02 (clock 1010000000) is not. This is the discriminating
+    // case: same zone, opposite answers by date.
+    assert(dst("EST5EDT,M3.2.0,M11.1.0", 1000000000LL) == 1);
+    assert(dst("EST5EDT,M3.2.0,M11.1.0", 1010000000LL) == 0);
+    // Negative clock is clamped to 0 (epoch), not an error.
+    assert(dst("UTC", -5LL) == 0);
+
+    for (const char* fn : {"dst_badtz", "dst_onearg"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testIsDaylightSavingsTimeReflectsZoneAndDate OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26526,6 +26629,8 @@ int main() {
     testRotateConvertsDegreesAndRejectsBadMatrices();
     testLookatRotateProducesKnownViewingMatrices();
     testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs();
+    testZonetimeFormatsClockInNamedZone();
+    testIsDaylightSavingsTimeReflectsZoneAndDate();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

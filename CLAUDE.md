@@ -19,27 +19,23 @@ must continue unchanged.
 
 ## Orientation
 
-- `ROADMAP.md` is the master phase/row tracker. Its checkboxes are the
-  authoritative signal for what is actually done.
-- `STATUS.md` is the dated development log, most recent entries first.
-  Older entries are archived in `STATUS-ARCHIVE.md`.
-- `PROMPT-ARCHIVE.md` is the archived former `prompt.md` menu of
-  ready-to-run task prompts for specific rows. It is not active. It
-  has a track record of describing some subsystems incorrectly, so
-  verify anything it says against `temp/reference/fluffos-2.9-ds2.08` (the
-  vendored real FluffOS 2.9 source) before implementing anything it
-  describes.
+- `docs/dev/ROADMAP.md` is the master phase/row tracker. Its checkboxes
+  are the authoritative signal for what is actually done.
+- `docs/dev/STATUS.md` is the complete dated development log, most recent
+  entries first. There is no separate archive file.
 - Every `src/<module>/` has its own `instruct.md` describing that module's
   task backlog. These frame tasks as open regardless of actual completion
-  status, so they are **not** a live status signal. Only `ROADMAP.md`'s
-  checkboxes and `STATUS.md`'s dated entries are.
+  status, so they are **not** a live status signal. Only
+  `docs/dev/ROADMAP.md`'s checkboxes and `docs/dev/STATUS.md`'s dated
+  entries are.
 - `temp/reference/fluffos-2.9-ds2.08/` is the vendored real FluffOS 2.9
   source used for every citation throughout this repo (`efun_defs.c`,
   `func_spec.c`, `object.c`, `simulate.c`, etc.). It is intentionally
   untracked (relocated 2026-08-17 from its previous tracked location at
   `reference/fluffos-2.9-ds2.08/`, alongside the six vendored mudlib
   corpora already under `temp/`, none of which are tracked either -- see
-  `.gitignore`'s own `temp/` line and STATUS.md's 2026-08-24 entry).
+  `.gitignore`'s own `temp/` line and commit 777c9d7, which formalized
+  the relocation to `temp/`).
   Because it is gitignored, it will not appear in a fresh clone or `git
   status` and must be manually present on disk for any verification work
   that cites it -- if it is missing, say so rather than guessing at real

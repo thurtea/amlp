@@ -48,7 +48,7 @@ Current baseline: **440 tests passing**. Every change must keep this green.
 
 ## Master roadmap
 
-See [`ROADMAP.md`](../ROADMAP.md) for the full phased plan with
+See [`ROADMAP.md`](ROADMAP.md) for the full phased plan with
 per-task status checkboxes.
 
 ## Key invariants

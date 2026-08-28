@@ -31,4 +31,4 @@ same language family.
 
 For a detailed, source-cited breakdown of exactly which behaviors amlp
 does and does not currently reproduce, and how its numbers compare, see
-`COMPARISON.md`.
+`docs/COMPARISON.md`.

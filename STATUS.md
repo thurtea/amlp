@@ -9,6 +9,108 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): the systematic package-by-
+package `src/packages/*/*.spec` sweep continued to `sha1.spec`, one of
+the last real package spec files never checked against this driver's own
+registered efuns. Its single real efun, `string sha1(string|buffer);`,
+built this session as `sha1(string)` (no buffer type in this driver).
+796 tests passing (up from 794), live-verified against the real running
+driver via a real `eval` call. New `ROADMAP.md` row 2.46.**
+
+**Which package, and which name was missing.** The multi-session `.spec`
+sweep arc had, across prior sessions, covered `math`/`core`/`trim`/
+`contrib`/`ops`/`sockets`/`pcre`/`db`/`dwlib`/`uids`/`mudlib_stats`/
+`compress`/`external`/`async`/`develop`/`ffi`/`matrix`/`jsbridge` (rows
+2.25-2.45) and `parser` (row 0.13a). Cross-checking the full 21-file
+`temp/fluffos/src/packages/*/*.spec` list against that coverage left
+exactly three never formally swept: `crypto.spec`, `sha1.spec`,
+`parser.spec`. Two resolved with no new work. `crypto.spec` declares
+only `string hash(string, string);` -- already done, row 2.16.
+`parser.spec` declares the same 8 `parse_*` names row 0.13a already
+implemented in full (signatures re-checked line by line against the
+vendored file this session, `parse_my_rules`'s own `mixed
+parse_my_rules(object, string, void | int);` included -- all match).
+`sha1.spec` is the one with a real gap: `string sha1(string|buffer);`,
+one efun, not registered anywhere in `EfunTable.cpp` (confirmed by grep,
+not assumed).
+
+**Confirmed genuinely new-since-2.9, not an old gap deferred for another
+reason.** `temp/reference/fluffos-2.9-ds2.08/` has no `crypto` or `sha1`
+package at all -- its `packages/` directory lists async/compress/contrib/
+db/develop/dwlib/external/math/matrix/mudlib_stats/parser/sockets/uids
+and nothing else, and a full-tree grep for `sha1`/`f_sha1`/`F_SHA1`
+returns zero hits. This is real current-FluffOS surface the 2.9
+reference never had, the same category as `hash()` (row 2.16),
+`time_ns()` (2.23), `secure_random()` (2.24), `log2()`/`round()` (2.25).
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`, this
+project's own bundled `mudlib/`, `wiz_tools`, `lil`) for `sha1`: zero
+LPC call sites anywhere. The only hits at all are two unrelated
+JavaScript files in `dead-souls`'s web directory (`lib/www/lpmuds/
+sha1.js`, `script.js`), not LPC. So this pass's motivation is
+current-FluffOS-surface parity specifically -- named honestly, the same
+basis rows 2.16/2.23/2.24/2.25 used, not dressed up as corpus-driven
+demand -- and `sha1()` clears the independent-verifiability bar those
+rows were held to: canonical SHA-1 test vectors, no live-instance
+dependency.
+
+**Real semantics, confirmed from source.** Real `f_sha1()`
+(`temp/fluffos/src/packages/sha1/sha1.cc`, the locally-vendored current-
+FluffOS clone) hand-rolls the SHA-1 block function inline (public-domain
+code by Niyaz PK, per its own header) and `sprintf`s the five 32-bit
+state words as `"%08x%08x%08x%08x%08x"` -- a plain lowercase-hex SHA-1
+digest. It also accepts a `T_BUFFER` argument; this driver has no buffer
+value type (rows 2.33/2.42), so only the string form is built, and a
+non-string argument throws rather than being silently mishandled
+(matching this codebase's own precedent: `explode_reversible()`'s empty
+delimiter, an unsupported `sscanf`/`sprintf` format, `member_array()`'s
+unsupported 4th argument). Real doc (`temp/fluffos/docs/efun/strings/
+sha1.md`): worked example `sha1("something") =
+"1af17e73721dbe0c40011b82ed4bb1a7dbe3ce29"`, plus the note "The
+`hash(algo, str)` external function can handle SHA-1 and more" --
+`sha1()` is the convenience spelling of `hash("sha1", str)`.
+
+**Built.** `sha1` registered in `EfunTable.cpp` directly after `hash()`,
+computing the digest via OpenSSL's EVP interface (`EVP_sha1()` plus the
+same `EVP_DigestInit_ex`/`EVP_DigestUpdate`/`EVP_DigestFinal_ex` shape
+and the same already-linked `-lcrypto` dependency `hash()` uses), rather
+than porting `sha1.cc`'s hand-rolled block function verbatim. One local
+mechanism choice, named rather than silent: SHA-1's output is fixed by
+FIPS 180, so the hand-rolled and EVP paths are byte-for-byte identical
+for every input by construction -- unlike `secure_random()` (row 2.24),
+where the real entropy-source mechanism was itself observable and had to
+be ported verbatim, there is nothing observable to diverge on here. Zero
+new dependency.
+
+**2 new regression tests (796 total, up from 794):**
+`testSha1ComputesKnownDigestsIncludingTheRealDocWorkedExample` -- the
+real doc's own worked example (`sha1("something")`) plus standard
+vectors for `"abc"` and `""`, all cross-checked against the system
+`sha1sum` before writing the test, not derived from this driver's own
+output. `testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument` --
+`sha1(str) == hash("sha1", str)` on a third input (the classic "quick
+brown fox" vector), plus a non-string argument (passed through a `mixed`
+parameter so the check is a runtime one, not a compile-time literal-type
+rejection) throwing `LpcRuntimeError`.
+
+**Live-verified against the real running driver** (`./build/amlp
+etc/driver.cfg`, a real TCP session, the same real bundled mudlib and
+gatehouse login flow prior sessions used), via a real `eval` call:
+`eval return sha1("something");` returned
+`"1af17e73721dbe0c40011b82ed4bb1a7dbe3ce29"` exactly, matching the real
+doc's own worked example. Driver's own log showed no errors. Test-
+account/character files created during verification
+(`sha1check27`/`Sha1CheckChar`) deleted afterward, matching this
+project's own established cleanup precedent.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.46
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass (its Phase 2 done-count and feature table are a
+separate accounting surface; this entry and row 2.46 are the record for
+this package).
+
 **2026-08-27 (a further session, same day): the LDMud-vs-FluffOS `db_*`
 naming collision the prior session's `.spec` sweep found (row 2.40) is
 resolved. Both real sources read directly this session, not assumed

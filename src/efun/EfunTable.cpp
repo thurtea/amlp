@@ -6295,6 +6295,66 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // string sha1(string str) -- real src/packages/sha1/sha1.spec's own
+    // "string sha1(string|buffer);" plus docs/efun/strings/sha1.md's own
+    // f_sha1(): the SHA-1 digest of str, returned as a lowercase hex
+    // string. Confirmed absent from the vendored 2.9 ds2.08 reference
+    // entirely -- that tree has no crypto or sha1 package at all
+    // (temp/reference/fluffos-2.9-ds2.08/packages/ stops at async/
+    // compress/contrib/db/develop/dwlib/external/math/matrix/
+    // mudlib_stats/parser/sockets/uids) -- so this is genuinely new
+    // current-FluffOS surface, the same category as hash() (row 2.16)
+    // right above. Real f_sha1() (temp/fluffos/src/packages/sha1/sha1.cc)
+    // hand-rolls the SHA-1 block function inline; this driver computes
+    // the identical digest via OpenSSL's EVP interface instead, reusing
+    // the exact EVP_DigestInit/Update/Final shape and the -lcrypto
+    // dependency hash() already established. SHA-1's output is fixed by
+    // FIPS 180, so the hand-rolled and EVP paths are byte-for-byte
+    // identical for every input by construction -- unlike secure_random()
+    // (row 2.24), where the real entropy-source mechanism was itself
+    // observable and had to be ported verbatim; here there is nothing
+    // observable to diverge on. Real doc's own worked example,
+    // sha1("something") == "1af17e73721dbe0c40011b82ed4bb1a7dbe3ce29",
+    // was cross-checked byte-for-byte against the system sha1sum before
+    // this code was written, not derived from this driver's own output.
+    // Real signature is string|buffer; this driver has no buffer value
+    // type (rows 2.33/2.42), so only the string form is implemented, and
+    // a non-string argument throws rather than being silently
+    // mishandled, matching this codebase's own established precedent
+    // (explode_reversible()'s empty delimiter, an unsupported sscanf/
+    // sprintf format, member_array()'s unsupported 4th argument). The
+    // real doc itself notes "The hash(algo, str) external function can
+    // handle SHA-1 and more" -- sha1() is the convenience spelling of
+    // hash("sha1", str), and this driver's two paths agree (regression
+    // test below).
+    t.registerEfun("sha1", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("sha1() requires a string argument");
+        }
+        const std::string& data = std::get<std::string>(args[0].data);
+
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int digestLen = 0;
+        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+        if (!ctx) throw LpcRuntimeError("sha1(): failed to allocate digest context");
+        bool ok = EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr) != 0 &&
+                  EVP_DigestUpdate(ctx, data.data(), data.size()) != 0 &&
+                  EVP_DigestFinal_ex(ctx, digest, &digestLen) != 0;
+        EVP_MD_CTX_free(ctx);
+        if (!ok) {
+            throw LpcRuntimeError("sha1(): digest computation failed");
+        }
+
+        static const char hexChars[] = "0123456789abcdef";
+        std::string result;
+        result.reserve(digestLen * 2);
+        for (unsigned int i = 0; i < digestLen; ++i) {
+            result.push_back(hexChars[digest[i] >> 4]);
+            result.push_back(hexChars[digest[i] & 0xF]);
+        }
+        return Value(result);
+    });
+
     // mixed copy(mixed val) -- deep-copies an array or mapping (breaking
     // aliasing with the original); every other value kind in this
     // driver's Value model (int, float, string, object reference,

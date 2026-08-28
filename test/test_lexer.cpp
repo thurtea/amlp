@@ -17215,6 +17215,70 @@ static void testHashThrowsOnUnknownAlgorithmNameLikeRealFHash() {
     std::cout << "testHashThrowsOnUnknownAlgorithmNameLikeRealFHash OK\n";
 }
 
+// sha1(string) -- current FluffOS's own src/packages/sha1/sha1.spec efun
+// ("string sha1(string|buffer);"), real docs/efun/strings/sha1.md.
+// Absent from the vendored 2.9 ds2.08 reference entirely (that tree has
+// no crypto or sha1 package at all -- packages/ stops at async/compress/
+// contrib/db/develop/dwlib/external/math/matrix/mudlib_stats/parser/
+// sockets/uids). Expected values below are the real doc's own worked
+// example plus standard SHA-1 test vectors, cross-checked against the
+// system sha1sum, not derived from this driver's own output.
+static void testSha1ComputesKnownDigestsIncludingTheRealDocWorkedExample() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sha1_probe.c",
+        "string probe(string s) { return sha1(s); }\n");
+    auto ob = harness.objects.cloneObject("/sha1_probe");
+    assert(ob != nullptr);
+
+    auto probe = [&](const std::string& s) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "probe", {amlp::Value(s)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    // Real doc's own worked example (docs/efun/strings/sha1.md).
+    assert(probe("something") == "1af17e73721dbe0c40011b82ed4bb1a7dbe3ce29");
+    // Standard test vectors, independent of this driver.
+    assert(probe("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    assert(probe("") == "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+
+    std::cout << "testSha1ComputesKnownDigestsIncludingTheRealDocWorkedExample OK\n";
+}
+
+// The real doc notes sha1() is the convenience spelling of
+// hash("sha1", str); this driver's two paths must agree. Also: the real
+// signature is string|buffer, this driver has no buffer type, so a
+// non-string argument throws rather than being silently mishandled
+// (passed through a mixed parameter so the check is a runtime one, not a
+// compile-time literal-type rejection).
+static void testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sha1_probe2.c",
+        "string via_sha1(string s) { return sha1(s); }\n"
+        "string via_hash(string s) { return hash(\"sha1\", s); }\n"
+        "mixed bad(mixed x) { return sha1(x); }\n");
+    auto ob = harness.objects.cloneObject("/sha1_probe2");
+    assert(ob != nullptr);
+
+    const std::string msg = "The quick brown fox jumps over the lazy dog";
+    amlp::Value a = harness.vm.callFunction(ob, "via_sha1", {amlp::Value(msg)});
+    amlp::Value b = harness.vm.callFunction(ob, "via_hash", {amlp::Value(msg)});
+    assert(std::holds_alternative<std::string>(a.data));
+    assert(std::get<std::string>(a.data) == std::get<std::string>(b.data));
+    assert(std::get<std::string>(a.data) ==
+           "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12");
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "bad", {amlp::Value(int64_t{42})});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26024,6 +26088,8 @@ int main() {
     testHashComputesKnownDigestsForSeveralRealFluffosAlgorithmNames();
     testHashMatchesAlgorithmNamesCaseInsensitivelyLikeRealFHash();
     testHashThrowsOnUnknownAlgorithmNameLikeRealFHash();
+    testSha1ComputesKnownDigestsIncludingTheRealDocWorkedExample();
+    testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

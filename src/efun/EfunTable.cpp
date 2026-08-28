@@ -8507,6 +8507,88 @@ void registerCoreEfuns() {
         return Value(m);
     });
 
+    // float *rotate_x(float *matrix, float degrees) / rotate_y / rotate_z --
+    // matrix.spec slice 2. Row 2.47 landed the id_matrix()/translate()/
+    // scale() first slice and named this trio as the next deferred one.
+    // Signatures (packages/matrix_spec.c, both the vendored 2.9 ds2.08
+    // reference and the current clone, identical):
+    //   float *rotate_x(float *, float);
+    //   float *rotate_y(float *, float);
+    //   float *rotate_z(float *, float);
+    //
+    // Semantics from temp/reference/fluffos-2.9-ds2.08/packages/matrix.c's
+    // own f_rotate_x()/f_rotate_y()/f_rotate_z() plus rotate_x_matrix()/
+    // rotate_y_matrix()/rotate_z_matrix() (re-checked against the current
+    // clone temp/fluffos/src/packages/matrix/matrix.cc -- identical math):
+    //
+    //   - The angle is in DEGREES, converted to radians with
+    //     RADIANS_PER_DEGREE. matrix.h's own literal for that constant is
+    //     0.01745329252 (a truncation of pi/180), used verbatim below
+    //     rather than M_PI/180.0 so this driver's output matches the real
+    //     package byte-for-byte, not just to 1e-9.
+    //   - matrix = matrix * R, where R is the standard row-major rotation
+    //     about the named axis:
+    //       Rx = [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]
+    //       Ry = [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]
+    //       Rz = [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]
+    //     with c = cos(rad), s = sin(rad). mult_matrix is the same plain
+    //     row-major product translate()/scale() above already use.
+    //   - The passed array is mutated IN PLACE and that same array is the
+    //     return value, not a copy (docs/efun/general/rotate_x.md:
+    //     "modified IN PLACE ... that same array is left on the stack as
+    //     the return value"). This driver returns the identical
+    //     std::shared_ptr<Array> it was handed.
+    //
+    // Same 16-float-array validation guard the current clone added (the
+    // 2.9 tree read 16 slots unconditionally), reused here via
+    // matrixArg16(). Real f_rotate_x() reads the angle via (sp--)->u.real
+    // with no type check; this driver coerces via asFloat() like the rest
+    // of its math efuns, matching this codebase's own int-to-float
+    // leniency rather than reproducing a union misread.
+    //
+    // Corpus call-site frequency was already checked when row 2.47 landed
+    // (grepped every vendored corpus under temp/ for rotate_x/rotate_y/
+    // rotate_z alongside id_matrix/translate/scale: zero real LPC call
+    // sites). Motivation is FluffOS-surface parity, the same honestly-
+    // named basis as rows 2.16/2.24/2.25/2.46/2.47; rotation matrices are
+    // independently verifiable against hand-computed values (0 and 90
+    // degrees) with no live-instance dependency.
+    auto applyRotation = [asFloat, matrixArg16, multMatrix](
+            std::vector<Value>& args, const char* efun, char axis) -> Value {
+        if (args.size() < 2) {
+            throw LpcRuntimeError(std::string(efun) +
+                                  ": expected (float *matrix, float degrees)");
+        }
+        auto m = matrixArg16(args[0], efun);
+        double a = asFloat(args[1]) * 0.01745329252;  // RADIANS_PER_DEGREE
+        double c = std::cos(a), s = std::sin(a);
+        double cur[16];
+        for (int i = 0; i < 16; ++i) cur[i] = std::get<double>(m->items[i].data);
+        double rot[16] = {1., 0., 0., 0., 0., 1., 0., 0.,
+                          0., 0., 1., 0., 0., 0., 0., 1.};
+        if (axis == 'x') {
+            rot[5] = c;  rot[6] = s;  rot[9] = -s;  rot[10] = c;
+        } else if (axis == 'y') {
+            rot[0] = c;  rot[2] = -s;  rot[8] = s;  rot[10] = c;
+        } else {  // 'z'
+            rot[0] = c;  rot[1] = s;  rot[4] = -s;  rot[5] = c;
+        }
+        double res[16];
+        multMatrix(cur, rot, res);
+        for (int i = 0; i < 16; ++i) m->items[i] = Value(res[i]);
+        return Value(m);
+    };
+
+    t.registerEfun("rotate_x", [applyRotation](VM&, std::vector<Value>& args) -> Value {
+        return applyRotation(args, "rotate_x", 'x');
+    });
+    t.registerEfun("rotate_y", [applyRotation](VM&, std::vector<Value>& args) -> Value {
+        return applyRotation(args, "rotate_y", 'y');
+    });
+    t.registerEfun("rotate_z", [applyRotation](VM&, std::vector<Value>& args) -> Value {
+        return applyRotation(args, "rotate_z", 'z');
+    });
+
     // mixed abs(int | float) -- packages/contrib.c f_abs(): negates negative
     // numbers in-place; preserves the exact input type (int in → int out,
     // float in → float out), not a float-returning function.

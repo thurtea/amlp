@@ -17392,6 +17392,133 @@ static void testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices() {
     std::cout << "testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices OK\n";
 }
 
+// Matrix package slice 2: rotate_x(), rotate_y(), rotate_z()
+// (packages/matrix_spec.c, both the vendored 2.9 ds2.08 reference and the
+// current clone; math from matrix.c's f_rotate_x/y/z plus
+// rotate_x_matrix/rotate_y_matrix/rotate_z_matrix). The angle is in
+// DEGREES; matrix = matrix * R for the standard row-major rotation about
+// that axis. Expected values below are hand-computed for 0 and 90
+// degrees, not read back from this driver.
+static void testRotateXYZProduceKnownRotationMatrices() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matrix_rot.c",
+        "float *rx(float d) { float *m = id_matrix(); return rotate_x(m, d); }\n"
+        "float *ry(float d) { float *m = id_matrix(); return rotate_y(m, d); }\n"
+        "float *rz(float d) { float *m = id_matrix(); return rotate_z(m, d); }\n"
+        "float *rz_twice() {\n"
+        "    float *m = id_matrix();\n"
+        "    rotate_z(m, 90.0);\n"
+        "    rotate_z(m, 90.0);\n"
+        "    return m;\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/matrix_rot");
+    assert(ob != nullptr);
+
+    auto rows16 = [&](const char* fn, double d) -> std::vector<double> {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {amlp::Value(d)});
+        assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(r.data));
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(r.data);
+        assert(arr && arr->items.size() == 16);
+        std::vector<double> out;
+        for (const auto& el : arr->items) {
+            assert(std::holds_alternative<double>(el.data));
+            out.push_back(std::get<double>(el.data));
+        }
+        return out;
+    };
+    auto near = [](double a, double b) { return std::fabs(a - b) < 1e-6; };
+
+    // Rotation by 0 degrees is exactly the identity (cos(0) == 1.0,
+    // sin(0) == 0.0 exactly), so id * R == id, for every axis.
+    const std::vector<double> identity = {1., 0., 0., 0., 0., 1., 0., 0.,
+                                          0., 0., 1., 0., 0., 0., 0., 1.};
+    assert(rows16("rx", 0.0) == identity);
+    assert(rows16("ry", 0.0) == identity);
+    assert(rows16("rz", 0.0) == identity);
+
+    // rotate_x(id, 90): Rx = [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1],
+    // c ~ 0, s ~ 1.
+    auto x90 = rows16("rx", 90.0);
+    assert(near(x90[0], 1.0) && near(x90[5], 0.0) && near(x90[6], 1.0));
+    assert(near(x90[9], -1.0) && near(x90[10], 0.0) && near(x90[15], 1.0));
+
+    // rotate_y(id, 90): Ry = [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1].
+    auto y90 = rows16("ry", 90.0);
+    assert(near(y90[0], 0.0) && near(y90[2], -1.0) && near(y90[5], 1.0));
+    assert(near(y90[8], 1.0) && near(y90[10], 0.0));
+
+    // rotate_z(id, 90): Rz = [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1].
+    auto z90 = rows16("rz", 90.0);
+    assert(near(z90[0], 0.0) && near(z90[1], 1.0) && near(z90[4], -1.0));
+    assert(near(z90[5], 0.0) && near(z90[10], 1.0));
+
+    // Two 90-degree rotate_z calls compose (in place) to a 180 rotation:
+    // m = Rz(90), then m = Rz(90) * Rz(90) = Rz(180).
+    amlp::Value rr = harness.vm.callFunction(ob, "rz_twice", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(rr.data));
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(rr.data);
+    std::vector<double> z180;
+    for (const auto& el : arr->items) z180.push_back(std::get<double>(el.data));
+    assert(near(z180[0], -1.0) && near(z180[1], 0.0));
+    assert(near(z180[4], 0.0) && near(z180[5], -1.0) && near(z180[10], 1.0));
+
+    std::cout << "testRotateXYZProduceKnownRotationMatrices OK\n";
+}
+
+// The angle is degrees, not radians (docs/efun/general/rotate_x.md), the
+// return value is the very array passed in, and the current clone's
+// 16-float-array guard is enforced (checked at runtime via a mixed *
+// argument, matching the slice-1 tests).
+static void testRotateConvertsDegreesAndRejectsBadMatrices() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matrix_rot2.c",
+        "float deg_not_rad() {\n"
+        "    float *m = id_matrix();\n"
+        "    rotate_z(m, 180.0);\n"
+        "    return m[0];\n"
+        "}\n"
+        "float returns_same_array() {\n"
+        "    float *m = id_matrix();\n"
+        "    float *r = rotate_x(m, 90.0);\n"
+        "    return r[6];\n"
+        "}\n"
+        "int bad_short() {\n"
+        "    mixed *b = ({ 1.0, 2.0, 3.0 });\n"
+        "    return sizeof(rotate_y(b, 45.0));\n"
+        "}\n"
+        "int bad_element() {\n"
+        "    mixed *b = ({ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,\n"
+        "                  1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1 });\n"
+        "    return sizeof(rotate_z(b, 45.0));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/matrix_rot2");
+    assert(ob != nullptr);
+    auto near = [](double a, double b) { return std::fabs(a - b) < 1e-6; };
+
+    // cos(180 degrees) ~ -1. If the angle were taken as radians,
+    // cos(180 rad) ~ -0.598, so this pins the degrees interpretation.
+    amlp::Value d = harness.vm.callFunction(ob, "deg_not_rad", {});
+    assert(std::holds_alternative<double>(d.data));
+    assert(near(std::get<double>(d.data), -1.0));
+
+    // r is the same array m: Rx(90) element 6 ~ 1.
+    amlp::Value ip = harness.vm.callFunction(ob, "returns_same_array", {});
+    assert(std::holds_alternative<double>(ip.data));
+    assert(near(std::get<double>(ip.data), 1.0));
+
+    for (const char* fn : {"bad_short", "bad_element"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testRotateConvertsDegreesAndRejectsBadMatrices OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26205,6 +26332,8 @@ int main() {
     testSha1AgreesWithHashSha1AndThrowsOnNonStringArgument();
     testIdMatrixAndTranslateScaleProduceKnownMatrices();
     testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices();
+    testRotateXYZProduceKnownRotationMatrices();
+    testRotateConvertsDegreesAndRejectsBadMatrices();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

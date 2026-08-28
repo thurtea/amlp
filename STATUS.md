@@ -9,6 +9,105 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-27 (a further session, same day): `matrix.spec` slice 2, the
+`rotate_x`/`rotate_y`/`rotate_z` trio row 2.47 named as deferred. All
+three are pure row-major rotation math on the same 16-float array form,
+sharing the `mult_matrix` product and the `matrixArg16` validation
+guard slice 1 already added. 800 tests passing (up from 798). New
+`ROADMAP.md` row 2.48.**
+
+**Why this slice.** Of the three remaining deferred subsystems (rows
+2.43-2.45), `matrix.spec` is still the one with the smallest
+independently-shippable next slice: no dependency, no buffer type, no
+scheduler wiring, no security surface, and independently verifiable
+against hand-computed rotation matrices with zero live-instance
+dependency. `external_start` (2.43) still needs `fork()`/`exec()`/pipe
+plumbing plus a command registry and is a real command-execution
+security surface; `async_*` (2.44) still needs real background I/O
+through `Scheduler`. Within `matrix.spec`, slice 1 (row 2.47) landed
+`id_matrix()`/`translate()`/`scale()`; the `rotate_x/y/z()` trio is the
+natural next unit (adds only the degree-to-radian constant plus trig,
+already-available `<cmath>`), leaving `lookat_rotate()`/
+`lookat_rotate2()` as the final matrix slice.
+
+**Which names, and the real source cited.** Signatures from
+`packages/matrix_spec.c`, byte-identical in the vendored 2.9 ds2.08
+reference and the current clone: `float *rotate_x(float *, float);`
+plus the `y`/`z` twins. Grep of `EfunTable.cpp` confirmed none were
+registered (slice 1 added `id_matrix`/`translate`/`scale` only).
+
+**Real semantics, confirmed from source.** From
+`temp/reference/fluffos-2.9-ds2.08/packages/matrix.c`'s own
+`f_rotate_x()`/`f_rotate_y()`/`f_rotate_z()` plus `rotate_x_matrix()`/
+`rotate_y_matrix()`/`rotate_z_matrix()`, re-checked against
+`temp/fluffos/src/packages/matrix/matrix.cc` (identical math):
+
+  - The angle argument is in DEGREES. It is converted to radians by
+    multiplying by `RADIANS_PER_DEGREE`. That constant's literal in
+    `matrix.h` (both trees) is `0.01745329252`, a truncation of pi/180,
+    not `M_PI/180.0`. This driver uses the same literal verbatim so its
+    output matches the real package byte-for-byte, not merely to 1e-9.
+  - `rotate_a(m, deg)` computes `m = m * R`, where `R` is the standard
+    row-major rotation about axis `a`, with `c = cos(rad)`,
+    `s = sin(rad)`:
+      Rx = [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]
+      Ry = [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]
+      Rz = [c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]
+    `mult_matrix` is the same plain row-major product
+    (`m[4r+c] = sum_k a[4r+k] * b[4k+c]`) slice 1 added.
+  - The passed array is mutated IN PLACE and that same array is the
+    return value, not a copy (`docs/efun/general/rotate_x.md`:
+    "modified IN PLACE ... that same array is left on the stack as the
+    return value"). This driver returns the identical
+    `std::shared_ptr<Array>` it was handed.
+
+**Local conventions carried over from slice 1, not new.** The current
+clone's `"matrix transform requires a 16-element array."` /
+`"...float array."` guard (absent from the 2.9 tree, which read 16
+slots unconditionally) is reused here via the existing `matrixArg16`
+helper: a short or non-float matrix argument throws `LpcRuntimeError`.
+Real `f_rotate_x()` reads the angle via `(sp--)->u.real` with no type
+check; this driver coerces via the same `asFloat()` its math package
+uses, matching this codebase's own int-to-float leniency.
+
+**Corpus call-site frequency.** Already checked when row 2.47 landed:
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`, this
+project's own bundled `mudlib/`, `wiz_tools`, `lil`) grepped for
+`rotate_x`, `rotate_y`, `rotate_z` alongside `id_matrix`/`translate`/
+`scale`: zero real LPC call sites. Motivation is FluffOS-surface
+parity, the same honestly-named basis as rows 2.16/2.24/2.25/2.46/2.47;
+rotation matrices are independently verifiable against hand-computed
+values (0 and 90 degrees) with no live instance needed.
+
+**Built.** `rotate_x`/`rotate_y`/`rotate_z` registered in
+`EfunTable.cpp` directly after `scale`, via one shared local lambda
+`applyRotation(args, name, axis)` that validates the matrix with
+`matrixArg16`, coerces the angle with `asFloat()`, multiplies by
+`RADIANS_PER_DEGREE`, builds the axis rotation matrix as an identity
+with four entries overwritten (matching `rotate_a_matrix`), calls
+`multMatrix`, writes the result back into the same `Array`, and returns
+it. Zero new dependency (`<cmath>` already in use by the math package).
+
+**2 new regression tests (800 total, up from 798):**
+`testRotateXYZProduceKnownRotationMatrices` -- rotation by 0 degrees is
+exactly the identity for every axis (`cos(0) == 1.0`, `sin(0) == 0.0`
+exactly), so `id * R == id`; `rotate_x/y/z(id, 90)` match the
+hand-computed `Rx`/`Ry`/`Rz` at 90 degrees (checked to 1e-6, since the
+truncated `RADIANS_PER_DEGREE` makes `cos(90 deg)` a small nonzero
+value rather than exactly 0); two `rotate_z(m, 90)` calls compose in
+place to a 180 rotation. `testRotateConvertsDegreesAndRejectsBadMatrices`
+-- `rotate_z(id, 180)` gives element 0 near `-1` (degrees; if the angle
+were radians `cos(180 rad)` is near `-0.598`), the return value aliases
+the passed array (reading `r[6]` after `rotate_x` sees the mutation),
+and a 3-element or 15-float-plus-one-int `mixed *` argument throws
+`LpcRuntimeError` (checked at runtime via a `mixed *` local, not a
+compile-time literal-type rejection).
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.48
+(`[x]`, full citation trail in its own cell). Row 2.47's text left
+as-is. `COMPARISON.md` not touched this pass.
+
 **2026-08-27 (a further session, same day): with the `.spec` sweep arc
 finished, the first real slice of one of the three remaining deferred
 subsystems (rows 2.43-2.45) landed. Picked `matrix.spec` (row 2.45's

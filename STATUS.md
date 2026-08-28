@@ -9,6 +9,139 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-28: `matrix.spec` final slice, `lookat_rotate()` and
+`lookat_rotate2()`. This completes `matrix.spec` -- all 8 declared names
+are now registered (row 2.47 landed 3, row 2.48 landed 3, this slice the
+last 2). 802 tests passing (up from 800). New `ROADMAP.md` row 2.49.**
+
+**Compiler prerequisite, checked directly before scoping.** The task
+was explicit that `lookat_rotate2` must not be scoped on an assumption
+about argument-count support. The 2.9 `matrix_spec.c` declares
+`lookat_rotate2(float *, float, float, float, float, float, float)` (7
+args) inside `#if 0`, with the comment: "for this efun to work again,
+the compiler needs support for min_arg > 4 ... type checking was changed
+to be done for all arguments, and a limit of 4 args was imposed." That
+4-argument limit lived in FluffOS's own `.spec`-generated `efun_defs.c`
+argument type-checker. It has no analog in this driver, confirmed by
+reading the actual code paths, not by inference:
+
+  - `src/compiler/Parser.cpp` `parseArgList()` is an unbounded loop with
+    no argument-count cap; `parseParamList()` likewise has no cap and no
+    default-argument (`type name = expr`) syntax at all, so there is no
+    "min_arg" / "max_arg" distinction in a signature here to be limited.
+  - `src/compiler/CodeGen.cpp` `emitCallExpr()` emits `CallEfun` with
+    `argCount = call.args.size()`, uncapped. There is deliberately no
+    compile-time efun signature table at all: its own comment explains
+    the compiler library is not linked against the efun table to avoid a
+    link cycle (`efun` -> `object` -> `compiler`). So efun calls are
+    never type-checked or arity-checked at compile time.
+  - `src/vm/VM.cpp` `CallEfun` pops `argc` values (bounded only by the
+    stack) into a `std::vector<Value>` and hands the whole thing to the
+    efun lambda; `EfunTable::call()` forwards it unchanged. Each efun
+    validates its own arguments.
+  - Existing proof point: `pcre_assoc()` is already a registered
+    5-argument efun that reads `args[4]`.
+
+Conclusion: the compiler already supports more than 4 arguments, so per
+the task's own branch ("If the compiler already supports it, scope and
+build both together") both `lookat_rotate` and `lookat_rotate2` ship in
+this one slice. The 7-argument `lookat_rotate2` call is exercised end to
+end by the new tests (`la2_origin`/`la2_eye` are genuine 7-arg efun
+calls compiled and dispatched).
+
+**Which names, and the real source cited.** Signatures from
+`temp/reference/fluffos-2.9-ds2.08/packages/matrix_spec.c`:
+`lookat_rotate` declared live, `lookat_rotate2` inside `#if 0`. Grep of
+`EfunTable.cpp` confirmed neither was registered (slices 1 and 2 added
+the other six).
+
+**Real semantics, confirmed from source.** From
+`temp/reference/fluffos-2.9-ds2.08/packages/matrix.c`'s own
+`lookat_rotate()` / `lookat_rotate2()` core functions plus the
+file-static `Vector` helpers, re-checked against
+`temp/fluffos/src/packages/matrix/matrix.cc` (identical math). Note both
+core functions compile unconditionally in 2.9; only the
+`f_lookat_rotate2()` stack-glue wrapper was ever `#if 0`, so the math
+for `lookat_rotate2` is fully defined and not guesswork.
+
+  - `points_to_array(v, pa, pb)` sets `v = pa - pb` componentwise.
+  - `cross_product(v, va, vb)` sets `v = va x vb`.
+  - `normalize_array(v)` divides `v` by `|v|`, but only when `|v| != 0`
+    (the real `if (m)` guard). A zero-length vector is returned
+    untouched, so the degenerate "look direction parallel to up" case
+    produces a finite matrix, not NaNs. This driver ports the guard
+    verbatim (`if (mag != 0.0)`).
+  - Both efuns compute `N = normalize(lookPoint - eyePoint)`,
+    `V = normalize(N x up)`, `U = normalize(V x N)`, then write the
+    result rows:
+      `[ U.x V.x N.x 0 ]`
+      `[ U.y V.y N.y 0 ]`
+      `[ U.z V.z N.z 0 ]`
+      `[ U.ep V.ep N.ep 1 ]`
+    where `U.ep` is the dot product of `U` with the eye point, etc.
+    `matrix.c` carries two `#if 0` alternatives for the last row (the
+    raw eye point, and the negated dot product); the live code is the
+    positive dot product used here.
+  - `lookat_rotate(m, x, y, z)`: look point is `(x, y, z)`, eye point is
+    the input matrix's translation row `(m[12], m[13], m[14])`, and
+    `up` is input column 0 `(m[0], m[4], m[8])`. All three are read out
+    of the input matrix before it is overwritten.
+  - `lookat_rotate2(m, ex, ey, ez, lx, ly, lz)`: eye point `(ex, ey,
+    ez)`, look point `(lx, ly, lz)`, `up` fixed at `(0, 1, 0)`. The
+    input matrix contents are not read at all, only overwritten.
+  - The passed array is mutated IN PLACE and that same array is the
+    return value, matching `translate()`/`scale()`/`rotate_x()` (real
+    `f_lookat_rotate` does `sp -= 3`, leaving the matrix array on the
+    stack as the return). This driver returns the identical
+    `std::shared_ptr<Array>` it was handed.
+
+**Local conventions carried over from slices 1-2, not new.** The
+`matrixArg16` guard (the 2.9 tree read 16 slots unconditionally; real
+`f_lookat_rotate` `bad_arg`'s only on args 3 and 4, reading the matrix
+and `x` unchecked) rejects a short or non-float matrix argument with
+`LpcRuntimeError`. Coordinates are coerced with the same `asFloat()`
+helper the rest of this driver's math package uses, matching its
+established int-to-float leniency rather than reproducing a union
+misread.
+
+**Corpus call-site frequency.** Already checked when row 2.47 landed:
+every vendored corpus under `temp/` grepped for `lookat_rotate` (and the
+other seven matrix names): zero real LPC call sites. Motivation is
+FluffOS-surface parity, the same honestly-named basis as rows
+2.16/2.24/2.25/2.46/2.47/2.48; viewing matrices are independently
+verifiable against hand-computed values with no live instance needed.
+
+**Built.** `lookat_rotate` and `lookat_rotate2` registered in
+`EfunTable.cpp` directly after `rotate_z`, via one shared local lambda
+`lookatRotate(args, name, variant2)` that validates the matrix with
+`matrixArg16`, reads the eye/look/up vectors per variant, runs the
+`normalize` / `cross` sequence with the zero-magnitude guard, writes the
+16 result values back into the same `Array`, and returns it. Zero new
+dependency (`<cmath>` `std::sqrt`, already in use by the math package).
+
+**2 new regression tests (802 total, up from 800):**
+`testLookatRotateProducesKnownViewingMatrices` -- `lookat_rotate(id,
+0,0,1)` collapses to the exact identity; `lookat_rotate(id, 0,1,0)`
+matches the hand-computed `[1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1]`; the
+degenerate `lookat_rotate(id, 1,0,0)` (look direction parallel to `up`)
+produces the expected NaN-free `[0,0,1,0, 0,0,0,0, 0,0,0,0, 0,0,0,1]`; a
+`translate(id, 2,0,0)` input carries eye point `(2,0,0)` into the last
+row as dot products (`m[12] == 2`); and `lookat_rotate2` (a genuine
+7-argument call) overwrites a `scale(id, 5,5,5)` input with the pure
+viewing matrix `[0,1,0,0, 1,0,0,0, 0,0,-1,0, 0,0,0,1]` for a zero eye
+point, and the same with `m[13] == 1` for eye point `(1,0,0)`. Every
+expected matrix hand-computed from `matrix.c`'s definitions, not read
+back from this driver. `testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs`
+-- both efuns mutate the passed array in place (reading `m[9]` / `m[10]`
+after the call sees the new value), the return value aliases the passed
+array, a 3-element or 15-float-plus-one-int `mixed *` matrix argument
+throws `LpcRuntimeError` for both efuns, and `lookat_rotate2` called
+with only 4 arguments throws (the efun enforces its own arity of 7).
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.49
+(`[x]`, full citation trail in its own cell). Rows 2.47 and 2.48 left
+as-is. `COMPARISON.md` not touched this pass (same as slices 1 and 2).
+
 **2026-08-27 (a further session, same day): `matrix.spec` slice 2, the
 `rotate_x`/`rotate_y`/`rotate_z` trio row 2.47 named as deferred. All
 three are pure row-major rotation math on the same 16-float array form,

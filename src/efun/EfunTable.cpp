@@ -8589,6 +8589,133 @@ void registerCoreEfuns() {
         return applyRotation(args, "rotate_z", 'z');
     });
 
+    // float *lookat_rotate(float *matrix, float x, float y, float z) and
+    // float *lookat_rotate2(float *matrix, float ex, float ey, float ez,
+    //                       float lx, float ly, float lz)
+    // -- matrix.spec final slice. Row 2.48 landed rotate_x/y/z and named
+    // these two as the last deferred pair.
+    //
+    // Signatures: matrix_spec.c in the vendored 2.9 ds2.08 reference
+    // declares `float *lookat_rotate(float *, float, float, float);` live
+    // and `float *lookat_rotate2(float *, float, float, float, float,
+    // float, float);` inside a `#if 0` block, with the comment "for this
+    // efun to work again, the compiler needs support for min_arg > 4 ... a
+    // limit of 4 args was imposed" on FluffOS's own spec-driven efun
+    // argument type-checker. That limit does NOT exist in this driver:
+    // there is no .spec/efun_defs.c pipeline here, no compile-time efun
+    // signature table at all (CodeGen.cpp deliberately does not link the
+    // efun table, to avoid a link cycle), and CallEfun passes an
+    // arbitrary-length std::vector<Value> straight through to the lambda,
+    // which validates its own arguments -- pcre_assoc() right below is
+    // already a registered 5-argument efun reading args[4]. So both names
+    // ship together here; the 2.9 `#if 0` reason is a FluffOS-compiler
+    // artifact with no analog in this architecture.
+    //
+    // Semantics from temp/reference/fluffos-2.9-ds2.08/packages/matrix.c's
+    // own lookat_rotate()/lookat_rotate2() (the core functions, both
+    // compiled unconditionally; only the f_lookat_rotate2() stack glue was
+    // ever `#if 0`), re-checked against the current clone
+    // temp/fluffos/src/packages/matrix/matrix.cc -- identical math:
+    //
+    //   - Vector helpers (matrix.c file-static): points_to_array(v,pa,pb)
+    //     sets v = pa - pb componentwise; cross_product(v,va,vb) sets
+    //     v = va x vb; normalize_array(v) divides v by |v| but ONLY when
+    //     |v| != 0 (the real `if (m)` guard -- a zero-length vector is
+    //     left untouched, not turned into NaNs).
+    //   - lookat_rotate(T, x,y,z): look point lp = (x,y,z); eye point
+    //     ep = (T[12],T[13],T[14]); the up-reference u0 = (T[0],T[4],T[8]).
+    //     All three are read from the input matrix BEFORE it is
+    //     overwritten.
+    //   - lookat_rotate2(ex,ey,ez, lx,ly,lz): ep = (ex,ey,ez),
+    //     lp = (lx,ly,lz), u0 = (0,1,0) fixed; the input matrix contents
+    //     are not read at all.
+    //   - Then, identically for both: N = normalize(lp - ep);
+    //     V = normalize(N x u0); U = normalize(V x N); and the result
+    //     matrix is
+    //       [ U.x V.x N.x 0
+    //         U.y V.y N.y 0
+    //         U.z V.z N.z 0
+    //         U.ep V.ep N.ep 1 ]
+    //     where U.ep is the dot product U . ep, etc. (matrix.c has two
+    //     `#if 0` alternatives for row 3 -- the raw ep and the negated
+    //     dot -- the live code is the positive dot product used here).
+    //   - The passed array is overwritten in place with those 16 values
+    //     and returned, same aliasing contract as translate()/scale()/
+    //     rotate_x() above (f_lookat_rotate does `sp -= 3`, leaving the
+    //     matrix array on the stack as the return value).
+    //
+    // Local conventions carried over from slices 1 and 2, not new: the
+    // matrixArg16 guard (2.9 read 16 slots unconditionally; f_lookat_rotate
+    // bad_arg's only on args 3 and 4) and asFloat() coercion of the
+    // coordinates (this codebase's established int-to-float leniency
+    // rather than a union misread). Corpus call-site frequency was checked
+    // when row 2.47 landed: zero real LPC call sites for lookat_rotate in
+    // any vendored corpus under temp/. Motivation is FluffOS-surface
+    // parity, the same basis as rows 2.16/2.24/2.25/2.46/2.47/2.48; the
+    // result is independently verifiable against hand-computed viewing
+    // matrices with no live-instance dependency.
+    auto lookatRotate = [matrixArg16, asFloat](
+            std::vector<Value>& args, const char* efun, bool variant2) -> Value {
+        const size_t need = variant2 ? 7 : 4;
+        if (args.size() < need) {
+            throw LpcRuntimeError(std::string(efun) + (variant2
+                ? ": expected (float *matrix, float ex, float ey, float ez, float lx, float ly, float lz)"
+                : ": expected (float *matrix, float x, float y, float z)"));
+        }
+        auto m = matrixArg16(args[0], efun);
+
+        double ep[3], lp[3], u0[3];
+        if (variant2) {
+            ep[0] = asFloat(args[1]); ep[1] = asFloat(args[2]); ep[2] = asFloat(args[3]);
+            lp[0] = asFloat(args[4]); lp[1] = asFloat(args[5]); lp[2] = asFloat(args[6]);
+            u0[0] = 0.0; u0[1] = 1.0; u0[2] = 0.0;
+        } else {
+            lp[0] = asFloat(args[1]); lp[1] = asFloat(args[2]); lp[2] = asFloat(args[3]);
+            double T[16];
+            for (int i = 0; i < 16; ++i) T[i] = std::get<double>(m->items[i].data);
+            ep[0] = T[12]; ep[1] = T[13]; ep[2] = T[14];
+            u0[0] = T[0];  u0[1] = T[4];  u0[2] = T[8];
+        }
+
+        auto normalize = [](double* v) {
+            double mag = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (mag != 0.0) { v[0] /= mag; v[1] /= mag; v[2] /= mag; }
+        };
+        auto cross = [](double* out, const double* a, const double* b) {
+            out[0] = a[1] * b[2] - a[2] * b[1];
+            out[1] = a[2] * b[0] - a[0] * b[2];
+            out[2] = a[0] * b[1] - a[1] * b[0];
+        };
+
+        double N[3] = {lp[0] - ep[0], lp[1] - ep[1], lp[2] - ep[2]};
+        normalize(N);
+        double U[3] = {u0[0], u0[1], u0[2]};
+        double V[3];
+        cross(V, N, U);
+        normalize(V);
+        cross(U, V, N);
+        normalize(U);
+
+        double M[16];
+        M[0] = U[0];  M[1] = V[0];  M[2] = N[0];  M[3] = 0.0;
+        M[4] = U[1];  M[5] = V[1];  M[6] = N[1];  M[7] = 0.0;
+        M[8] = U[2];  M[9] = V[2];  M[10] = N[2]; M[11] = 0.0;
+        M[12] = U[0] * ep[0] + U[1] * ep[1] + U[2] * ep[2];
+        M[13] = V[0] * ep[0] + V[1] * ep[1] + V[2] * ep[2];
+        M[14] = N[0] * ep[0] + N[1] * ep[1] + N[2] * ep[2];
+        M[15] = 1.0;
+
+        for (int i = 0; i < 16; ++i) m->items[i] = Value(M[i]);
+        return Value(m);
+    };
+
+    t.registerEfun("lookat_rotate", [lookatRotate](VM&, std::vector<Value>& args) -> Value {
+        return lookatRotate(args, "lookat_rotate", false);
+    });
+    t.registerEfun("lookat_rotate2", [lookatRotate](VM&, std::vector<Value>& args) -> Value {
+        return lookatRotate(args, "lookat_rotate2", true);
+    });
+
     // mixed abs(int | float) -- packages/contrib.c f_abs(): negates negative
     // numbers in-place; preserves the exact input type (int in → int out,
     // float in → float out), not a float-returning function.

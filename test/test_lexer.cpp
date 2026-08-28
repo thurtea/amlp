@@ -17519,6 +17519,196 @@ static void testRotateConvertsDegreesAndRejectsBadMatrices() {
     std::cout << "testRotateConvertsDegreesAndRejectsBadMatrices OK\n";
 }
 
+// Matrix package final slice: lookat_rotate() and lookat_rotate2()
+// (packages/matrix_spec.c; math from matrix.c's own lookat_rotate() /
+// lookat_rotate2() core functions plus the file-static Vector helpers
+// normalize_array / cross_product / points_to_array). Both build a
+// viewing-transformation matrix from an eye point and a look point:
+//   N = normalize(lookPoint - eyePoint)
+//   V = normalize(N x up)          (up = matrix column 0 for lookat_rotate,
+//   U = normalize(V x N)            fixed (0,1,0) for lookat_rotate2)
+// result rows: [U.x V.x N.x 0 / U.y V.y N.y 0 / U.z V.z N.z 0 /
+//               U.ep V.ep N.ep 1], the last row being dot products with
+// the eye point. All expected matrices below are hand-computed from
+// those definitions, not read back from this driver. normalize() leaves
+// a zero-length vector untouched (matrix.c's own `if (m)` guard), so the
+// degenerate "look direction parallel to up" case produces no NaNs.
+static void testLookatRotateProducesKnownViewingMatrices() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matrix_lookat.c",
+        // lookat_rotate: eye point is the input matrix translation row
+        // (12,13,14), up-reference is input column 0 (elements 0,4,8).
+        "float *la_id_z() { return lookat_rotate(id_matrix(), 0.0, 0.0, 1.0); }\n"
+        "float *la_id_y() { return lookat_rotate(id_matrix(), 0.0, 1.0, 0.0); }\n"
+        "float *la_id_x() { return lookat_rotate(id_matrix(), 1.0, 0.0, 0.0); }\n"
+        "float *la_translated() {\n"
+        "    float *m = translate(id_matrix(), 2.0, 0.0, 0.0);\n"
+        "    return lookat_rotate(m, 2.0, 0.0, 1.0);\n"
+        "}\n"
+        // lookat_rotate2: 7-argument call. Input matrix contents are
+        // ignored (a scaled matrix in, a pure viewing matrix out), which
+        // also exercises the compiler/VM accepting a >4-argument efun
+        // call -- the exact case FluffOS 2.9's spec compiler could not
+        // express and left #if 0.
+        "float *la2_origin() {\n"
+        "    float *m = scale(id_matrix(), 5.0, 5.0, 5.0);\n"
+        "    return lookat_rotate2(m, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0);\n"
+        "}\n"
+        "float *la2_eye() {\n"
+        "    return lookat_rotate2(id_matrix(), 1.0, 0.0, 0.0, 1.0, 0.0, -1.0);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/matrix_lookat");
+    assert(ob != nullptr);
+
+    auto rows16 = [&](const char* fn) -> std::vector<double> {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(r.data));
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(r.data);
+        assert(arr && arr->items.size() == 16);
+        std::vector<double> out;
+        for (const auto& el : arr->items) {
+            assert(std::holds_alternative<double>(el.data));
+            out.push_back(std::get<double>(el.data));
+        }
+        return out;
+    };
+    auto near = [](const std::vector<double>& got, const std::vector<double>& want) {
+        assert(got.size() == 16 && want.size() == 16);
+        for (int i = 0; i < 16; ++i) {
+            if (std::fabs(got[i] - want[i]) >= 1e-9) return false;
+        }
+        return true;
+    };
+
+    // lookat_rotate(id, 0,0,1): eye (0,0,0), up (1,0,0), look dir (0,0,1).
+    // N=(0,0,1); V=N x U=(0,1,0); U=V x N=(1,0,0). Last row dot(*, eye)=0.
+    // The whole thing collapses to the identity.
+    const std::vector<double> identity = {1., 0., 0., 0., 0., 1., 0., 0.,
+                                          0., 0., 1., 0., 0., 0., 0., 1.};
+    assert(near(rows16("la_id_z"), identity));
+
+    // lookat_rotate(id, 0,1,0): look dir (0,1,0), up (1,0,0).
+    // N=(0,1,0); V=N x U=(0,0,-1); U=V x N=(1,0,0).
+    // rows: [U.x V.x N.x 0 / U.y V.y N.y 0 / U.z V.z N.z 0 / 0 0 0 1]
+    //     = [1 0 0 0 / 0 0 1 0 / 0 -1 0 0 / 0 0 0 1].
+    const std::vector<double> lookY = {1., 0., 0., 0., 0., 0., 1., 0.,
+                                       0., -1., 0., 0., 0., 0., 0., 1.};
+    assert(near(rows16("la_id_y"), lookY));
+
+    // Degenerate: look dir (1,0,0) is parallel to up (1,0,0), so
+    // V = N x U = (0,0,0) and normalize leaves it zero; U = V x N = 0 too.
+    // rows: [0 0 N.x 0 / 0 0 N.y 0 / 0 0 N.z 0 / 0 0 0 1] with N=(1,0,0).
+    const std::vector<double> degen = {0., 0., 1., 0., 0., 0., 0., 0.,
+                                       0., 0., 0., 0., 0., 0., 0., 1.};
+    assert(near(rows16("la_id_x"), degen));
+
+    // Translated input: eye = (2,0,0) (translation row), up = column 0 =
+    // (1,0,0), look point (2,0,1) so look dir = (0,0,1). Rotation block is
+    // identity (as la_id_z), and the last row becomes the dot products
+    // with the eye point: U.eye = 1*2 = 2, V.eye = 0, N.eye = 0.
+    std::vector<double> translated = identity;
+    translated[12] = 2.;
+    assert(near(rows16("la_translated"), translated));
+
+    // lookat_rotate2 from the origin, look point (0,0,-1): eye (0,0,0),
+    // up fixed (0,1,0), look dir (0,0,-1).
+    // N=(0,0,-1); V=N x U=(1,0,0); U=V x N=(0,1,0). Last row dot(*,0)=0.
+    // rows: [0 1 0 0 / 1 0 0 0 / 0 0 -1 0 / 0 0 0 1]. The input scale
+    // matrix is completely overwritten.
+    const std::vector<double> la2Origin = {0., 1., 0., 0., 1., 0., 0., 0.,
+                                           0., 0., -1., 0., 0., 0., 0., 1.};
+    assert(near(rows16("la2_origin"), la2Origin));
+
+    // lookat_rotate2 with eye (1,0,0), look point (1,0,-1) so look dir
+    // (0,0,-1): same N,V,U as la2_origin. Last row: U.eye = 0*1 = 0,
+    // V.eye = 1*1 = 1, N.eye = 0*1 = 0.
+    std::vector<double> la2Eye = la2Origin;
+    la2Eye[13] = 1.;
+    assert(near(rows16("la2_eye"), la2Eye));
+
+    std::cout << "testLookatRotateProducesKnownViewingMatrices OK\n";
+}
+
+// The in-place / return-the-same-array contract (matrix.c leaves the
+// passed array on the stack as the return value), the ported
+// 16-float-array validation guard (matrixArg16, checked at runtime via a
+// mixed * argument), and -- for lookat_rotate2 specifically -- that a
+// 7-argument efun call both compiles and dispatches here, and that fewer
+// than 7 arguments is rejected by the efun itself. FluffOS 2.9's spec
+// compiler capped efun argument type-checking at 4 and left
+// lookat_rotate2 #if 0 for that reason; this driver has no such cap (no
+// .spec/efun_defs.c pipeline, no compile-time efun signature table at
+// all), so both names ship.
+static void testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matrix_lookat2.c",
+        "float in_place() {\n"
+        "    float *m = id_matrix();\n"
+        "    lookat_rotate(m, 0.0, 1.0, 0.0);\n"
+        "    return m[9];\n"
+        "}\n"
+        "float returns_same_array() {\n"
+        "    float *m = id_matrix();\n"
+        "    float *r = lookat_rotate(m, 0.0, 1.0, 0.0);\n"
+        "    return r[9];\n"
+        "}\n"
+        "float la2_in_place() {\n"
+        "    float *m = id_matrix();\n"
+        "    lookat_rotate2(m, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0);\n"
+        "    return m[10];\n"
+        "}\n"
+        "int bad_short() {\n"
+        "    mixed *b = ({ 1.0, 2.0, 3.0 });\n"
+        "    return sizeof(lookat_rotate(b, 1.0, 2.0, 3.0));\n"
+        "}\n"
+        "int bad_element() {\n"
+        "    mixed *b = ({ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,\n"
+        "                  1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1 });\n"
+        "    return sizeof(lookat_rotate(b, 45.0, 0.0, 0.0));\n"
+        "}\n"
+        "int la2_bad_short() {\n"
+        "    mixed *b = ({ 1.0, 2.0, 3.0 });\n"
+        "    return sizeof(lookat_rotate2(b, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0));\n"
+        "}\n"
+        "int la2_too_few() {\n"
+        "    float *m = id_matrix();\n"
+        "    return sizeof(lookat_rotate2(m, 1.0, 2.0, 3.0));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/matrix_lookat2");
+    assert(ob != nullptr);
+    auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+
+    // lookat_rotate(id, 0,1,0) writes -1 into element 9 (V.z), and the
+    // mutation is visible on the array that was passed in.
+    amlp::Value ip = harness.vm.callFunction(ob, "in_place", {});
+    assert(std::holds_alternative<double>(ip.data));
+    assert(near(std::get<double>(ip.data), -1.0));
+
+    // The return value IS the passed array: reading element 9 off the
+    // returned reference sees the same -1.
+    amlp::Value same = harness.vm.callFunction(ob, "returns_same_array", {});
+    assert(std::holds_alternative<double>(same.data));
+    assert(near(std::get<double>(same.data), -1.0));
+
+    // lookat_rotate2 overwrites the passed array too: element 10 (N.z)
+    // becomes -1 for look direction (0,0,-1).
+    amlp::Value la2ip = harness.vm.callFunction(ob, "la2_in_place", {});
+    assert(std::holds_alternative<double>(la2ip.data));
+    assert(near(std::get<double>(la2ip.data), -1.0));
+
+    for (const char* fn : {"bad_short", "bad_element", "la2_bad_short", "la2_too_few"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -26334,6 +26524,8 @@ int main() {
     testTranslateMutatesItsMatrixInPlaceAndRejectsBadMatrices();
     testRotateXYZProduceKnownRotationMatrices();
     testRotateConvertsDegreesAndRejectsBadMatrices();
+    testLookatRotateProducesKnownViewingMatrices();
+    testLookatRotateAliasesArrayRejectsBadMatricesAndTakesSevenArgs();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

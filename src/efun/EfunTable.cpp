@@ -8070,6 +8070,74 @@ void registerCoreEfuns() {
         return Value((an ? std::string("an ") : std::string("a ")) + str);
     });
 
+    // string replace_html(string) / string replace_mxp(string) --
+    // dwlib.spec's markup-escaping pair. Present identically in both the
+    // pinned reference (temp/reference/fluffos-2.9-ds2.08/packages/dwlib.c)
+    // and the current clone (temp/fluffos/src/packages/dwlib/dwlib.cc):
+    // dwlib.spec's own "string replace_html(string); string
+    // replace_mxp(string);", both bodied by a single shared
+    // replace_mxp_html(int html, int mxp) helper -- f_replace_html() calls
+    // it (1, 0), f_replace_mxp() calls it (0, 1). Grep of EfunTable.cpp
+    // confirmed neither was registered; roll_MdN/vowel/add_a from the same
+    // spec landed earlier (rows above). Real helper, ported branch for
+    // branch from its own switch: '&' -> "&amp;", '<' -> "&lt;", '>' ->
+    // "&gt;" unconditionally; '\n' -> the MXP secure-line tag
+    // "\e[4z<BR>" (ESC '[' '4' 'z' '<' 'B' 'R' '>', 8 bytes) when mxp,
+    // otherwise copied through as a literal newline (real's `goto def`);
+    // '"' -> "&quot;" when html, otherwise copied through (real falls
+    // straight into `default` -- there is no break on that path); every
+    // other byte copied verbatim. So replace_html escapes & < > and ",
+    // leaving newlines alone; replace_mxp escapes & < > and rewrites each
+    // newline to <BR>, leaving " alone. Matches docs/efun/contrib/
+    // replace_html.md / replace_mxp.md word for word.
+    //
+    // Two named local choices, neither a silent divergence:
+    //   - Real caps the result at the driver's max_string_length (its
+    //     `dst2 - dst < max_string_length` loop guard). This driver has no
+    //     max-string-length config at all (same situation add_a() above is
+    //     in, where the real max-length error path is likewise dropped),
+    //     so the whole input is always processed.
+    //   - Real reads a C string, so an embedded NUL ends the scan
+    //     (`while(*src ...)`). This driver stops at the first NUL to
+    //     match, rather than escaping the bytes past it, the same choice
+    //     string_difference() (row 2.52) made for the same reason.
+    {
+        auto replaceMxpHtml = [](const std::string& src, bool html, bool mxp) -> std::string {
+            std::string out;
+            out.reserve(src.size() + 8);
+            for (char ch : src) {
+                if (ch == '\0') break;
+                switch (ch) {
+                    case '&': out += "&amp;"; break;
+                    case '<': out += "&lt;"; break;
+                    case '>': out += "&gt;"; break;
+                    case '\n':
+                        if (mxp) out += "\x1b[4z<BR>";
+                        else out += '\n';
+                        break;
+                    case '"':
+                        if (html) out += "&quot;";
+                        else out += '"';
+                        break;
+                    default: out += ch; break;
+                }
+            }
+            return out;
+        };
+        t.registerEfun("replace_html", [replaceMxpHtml](VM&, std::vector<Value>& args) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+                throw LpcRuntimeError("replace_html: expected a string argument");
+            }
+            return Value(replaceMxpHtml(std::get<std::string>(args[0].data), true, false));
+        });
+        t.registerEfun("replace_mxp", [replaceMxpHtml](VM&, std::vector<Value>& args) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+                throw LpcRuntimeError("replace_mxp: expected a string argument");
+            }
+            return Value(replaceMxpHtml(std::get<std::string>(args[0].data), false, true));
+        });
+    }
+
     // Shared helper for query_strike_bonus/query_parry_bonus below: real
     // stat/env/property reads on the player object are LPC methods in
     // this mudlib (query_stats, query_level, getenv, query_property all

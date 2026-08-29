@@ -9,6 +9,105 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-29: `dwlib.spec` markup-escaping pair, `replace_html(string)`
+and `replace_mxp(string)`. Both bodied by one shared helper in real,
+both self-contained pure string transforms. 812 tests passing (up from
+811). New `ROADMAP.md` row 2.55.**
+
+**Why this slice.** Same systematic sweep of `dwlib.spec` against this
+driver's registered efuns that rows 2.16/2.23-2.30 and the `roll_MdN` /
+`vowel` / `add_a` batch used. Of the `dwlib.spec` names still
+unregistered, `replace_html` / `replace_mxp` are the only ones that need
+nothing new: pure `string` in, `string` out, no LPC re-entry, no new
+subsystem, no dependency, no buffer type. The rest all re-enter LPC or
+walk container types: `query_multiple_short()` and `reference_allowed()`
+both call back into LPC via `apply()` extensively (short-string
+composition against per-object `*_short` applies; invis/creator/allowed
+checks against the player and master), `replace()` delegates to
+`replace_string()` over a replacement array, and `roulette_wheel()` /
+`replace_objects()` / `replace_dollars()` operate on mappings, objects,
+and arrays. So this slice is the two markup escapers, continuing the
+same one-package-at-a-time named sweep.
+
+**Present identically in both trees.**
+`temp/reference/fluffos-2.9-ds2.08/packages/dwlib.c` and the current
+clone `temp/fluffos/src/packages/dwlib/dwlib.cc` both declare `string
+replace_html(string); string replace_mxp(string);` (in `dwlib_spec.c` /
+`dwlib.spec`), and both body them from a single shared
+`replace_mxp_html(int html, int mxp)` helper: `f_replace_html()` calls
+it `(1, 0)`, `f_replace_mxp()` calls it `(0, 1)`. The 2.9 body and the
+clone body are character-identical apart from the clone hoisting
+`max_string_length` into a local; the escaping switch is the same.
+
+**Real semantics, ported branch for branch from the helper's own
+`switch`:**
+
+  - `&` -> `&amp;`, `<` -> `&lt;`, `>` -> `&gt;`, unconditionally.
+  - `\n` -> the MXP secure-line tag `"\e[4z<BR>"` (ESC `[` `4` `z` `<`
+    `B` `R` `>`, 8 bytes) when `mxp` is set; otherwise copied through as
+    a literal newline (real's `goto def`).
+  - `"` -> `&quot;` when `html` is set; otherwise copied through (real's
+    `case '"'` falls straight into `default` with no `break` on that
+    path).
+  - every other byte copied verbatim.
+
+  So `replace_html` (html=1, mxp=0) escapes `&` `<` `>` and `"` and
+  leaves newlines alone; `replace_mxp` (html=0, mxp=1) escapes `&` `<`
+  `>` and rewrites each newline to `<BR>` and leaves `"` alone. This
+  matches `docs/efun/contrib/replace_html.md` and
+  `docs/efun/contrib/replace_mxp.md` word for word.
+
+**Two named local choices, neither a silent divergence.**
+
+  1. Real caps the result at the driver's `max_string_length` (its loop
+     guard `dst2 - dst < max_string_length`). This driver has no
+     max-string-length config at all, the same situation `add_a()` is
+     in, where the real max-length error path is likewise dropped, so
+     the whole input is always processed.
+  2. Real reads a C string, so an embedded NUL ends the scan
+     (`while(*src ...)`). This driver stops at the first NUL to match,
+     rather than escaping the bytes past it, the same choice
+     `string_difference()` (row 2.52) made for the same reason.
+
+  A non-string argument or a zero-argument call throws
+  `LpcRuntimeError`, this codebase's established precedent for an
+  unsupported argument shape.
+
+**Built.** Registered in `EfunTable.cpp` immediately after `add_a`, both
+sharing one file-local `replaceMxpHtml(src, html, mxp)` lambda that
+mirrors real's shared helper. No new include or dependency.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`,
+`wiz_tools`, `lil`) plus the bundled `mudlib/` for `replace_html(` /
+`replace_mxp(`: zero real LPC call sites. The only hits anywhere under
+`temp/` are FluffOS's own docs and testsuite. Motivation is
+FluffOS-surface parity, the same honestly-named basis as rows
+2.16/2.24/2.46/2.50/2.51/2.52/2.53/2.54; markup escaping is
+independently verifiable against hand-written strings with no
+live-instance dependency, and FluffOS ships its own conformance stubs
+for both (`testsuite/single/tests/efuns/replace_html.lpc`,
+`replace_mxp.lpc`), one of whose vectors is reused below.
+
+**1 new regression test (812 total, up from 811):**
+`testReplaceHtmlAndReplaceMxpEscapeMarkup` -- `replace_html("<b>&</b>")`
+is `"&lt;b&gt;&amp;&lt;/b&gt;"`, `replace_html("say \"hi\"")` is `"say
+&quot;hi&quot;"`, the FluffOS testsuite vector (`"<b>"` no longer
+present in the result of `replace_html("<b>&</b>")`), a newline left
+alone, an all-safe string and the empty string returned verbatim;
+`replace_mxp("<b>&</b>")` escapes the same three entities but
+`replace_mxp("say \"hi\"")` leaves the quotes, `replace_mxp("a\nb")` is
+`"a"` + ESC + `"[4z<BR>b"` and `replace_mxp("\n\n")` is two back-to-back
+tags, `replace_mxp("plain")` is unchanged; and a wrong-type argument
+(through a `mixed`) or a missing argument throws for both efuns.
+Expected strings were traced by hand from the helper's switch, not read
+back from this driver.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.55
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-28 (a further session, same day): `pcre.spec`,
 `pcre_replace(string, string, string *, void | int)`. The remaining
 self-contained `pcre.spec` name after row 2.53's read-side trio. 811

@@ -15810,6 +15810,70 @@ static void testAddAMatchesRealAlgorithmAcrossEveryDocExample() {
     std::cout << "testAddAMatchesRealAlgorithmAcrossEveryDocExample OK\n";
 }
 
+// string replace_html(string) / string replace_mxp(string) (dwlib.spec,
+// both bodied by the shared replace_mxp_html(html, mxp) helper in
+// packages/dwlib/dwlib.cc -- f_replace_html() is (1, 0), f_replace_mxp()
+// is (0, 1)). replace_html escapes & < > and " (newlines pass through);
+// replace_mxp escapes & < > and rewrites each newline to the MXP
+// secure-line tag "\e[4z<BR>" (" passes through). Expected strings below
+// are traced by hand from the helper's own switch, not read back from
+// this driver.
+static void testReplaceHtmlAndReplaceMxpEscapeMarkup() {
+    ObjectVarHarness harness;
+    harness.writeFile("/replace_markup_probe.c",
+        "string h(string s) { return replace_html(s); }\n"
+        "string m(string s) { return replace_mxp(s); }\n"
+        "int h_badarg() { mixed x = 7; return sizeof(replace_html(x)); }\n"
+        "int m_badarg() { mixed x = 7; return sizeof(replace_mxp(x)); }\n"
+        "int h_noarg() { return sizeof(replace_html()); }\n");
+    auto ob = harness.objects.cloneObject("/replace_markup_probe");
+    assert(ob != nullptr);
+
+    auto call = [&](const char* fn, const std::string& s) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {amlp::Value(s)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    const std::string esc = "\x1b";  // ESC, the first byte of the MXP tag.
+
+    // replace_html: the three unconditional entities plus the quote.
+    assert(call("h", "<b>&</b>") == "&lt;b&gt;&amp;&lt;/b&gt;");
+    assert(call("h", "say \"hi\"") == "say &quot;hi&quot;");
+    // FluffOS's own testsuite vector (testsuite/single/tests/efuns/
+    // replace_html.lpc): markup is neutralized, "<b>" no longer present.
+    {
+        std::string r = call("h", "<b>&</b>");
+        assert(r.find("<b>") == std::string::npos);
+    }
+    // A newline is left alone by replace_html.
+    assert(call("h", "a\nb") == "a\nb");
+    // Nothing to escape: returned verbatim. Empty string stays empty.
+    assert(call("h", "plain text 123") == "plain text 123");
+    assert(call("h", "") == "");
+
+    // replace_mxp: same three entities, but " is untouched and each
+    // newline becomes ESC "[4z<BR>".
+    assert(call("m", "<b>&</b>") == "&lt;b&gt;&amp;&lt;/b&gt;");
+    assert(call("m", "say \"hi\"") == "say \"hi\"");
+    assert(call("m", "a\nb") == "a" + esc + "[4z<BR>b");
+    assert(call("m", "\n\n") == esc + "[4z<BR>" + esc + "[4z<BR>");
+    assert(call("m", "plain") == "plain");
+
+    // Wrong argument type and a missing argument both throw.
+    for (const char* fn : {"h_badarg", "m_badarg", "h_noarg"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testReplaceHtmlAndReplaceMxpEscapeMarkup OK\n";
+}
+
 // Shared harness for query_strike_bonus/query_parry_bonus/
 // query_dodge_bonus: these call back into LPC for player stats/env/
 // property reads and into a mock ADDICTION_D daemon, so they need a
@@ -26963,6 +27027,7 @@ int main() {
     testRollMdNStaysWithinFormulaDerivedBoundsAndAddsBonusOnlyWhenDiceArePositive();
     testVowelMatchesAsciiAeiouBothCases();
     testAddAMatchesRealAlgorithmAcrossEveryDocExample();
+    testReplaceHtmlAndReplaceMxpEscapeMarkup();
     testQueryStrikeBonusEfunMatchesLpcAcrossPlayerStates();
     testQueryParryBonusEfunMatchesLpcAcrossPlayerStates();
     testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus();

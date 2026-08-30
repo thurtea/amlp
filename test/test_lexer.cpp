@@ -10429,9 +10429,10 @@ static void testStrlenAndStrstrAliasesWorkByTheirOwnNames() {
 
     assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_len", {}).data) == 5);
     assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_find", {}).data) == 6);
-    // strsrch/strstr's own "start" argument: first match at or after
-    // index 1 -- the 'a' at index 0 must be skipped.
-    assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_find_from", {}).data) == 2);
+    // strsrch/strstr's third argument is a direction flag, not a start
+    // index: a non-zero flag searches right to left, so the LAST 'a'
+    // (index 4) is the match, not the one at index 2.
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_find_from", {}).data) == 4);
     assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_not_found", {}).data) == -1);
 
     std::cout << "testStrlenAndStrstrAliasesWorkByTheirOwnNames OK\n";
@@ -18435,6 +18436,83 @@ static void testReplaceStringOccurrenceRangeForm() {
     }
 
     std::cout << "testReplaceStringOccurrenceRangeForm OK\n";
+}
+
+static void testStrsrchIntNeedleAndBackwardFlag() {
+    ObjectVarHarness harness;
+    harness.writeFile("/strsrch_probe.c",
+        "int fwd(string s, string p) { return strsrch(s, p); }\n"
+        "int bwd(string s, string p) { return strsrch(s, p, -1); }\n"
+        "int flag0(string s, string p) { return strsrch(s, p, 0); }\n"
+        "int ci(string s, int c) { return strsrch(s, c); }\n"
+        "int cib(string s, int c) { return strsrch(s, c, 1); }\n"
+        "int lastslash(string s) { return strsrch(s, '/', -1); }\n"
+        "int viastrstr(string s, string p) { return strstr(s, p, -1); }\n"
+        "int badneedle() { mixed x = 1.5; return strsrch(\"ab\", x); }\n"
+        "int badflag() { mixed x = \"z\"; return strsrch(\"ab\", \"a\", x); }\n"
+        "int toomany() { return strsrch(\"ab\", \"a\", 0, 0); }\n");
+    auto ob = harness.objects.cloneObject("/strsrch_probe");
+    assert(ob != nullptr);
+
+    auto ss = [&](const char* fn, const std::string& s, const std::string& p) -> int64_t {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {amlp::Value(s), amlp::Value(p)});
+        assert(std::holds_alternative<int64_t>(r.data));
+        return std::get<int64_t>(r.data);
+    };
+    auto ssc = [&](const char* fn, const std::string& s, int64_t c) -> int64_t {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {amlp::Value(s), amlp::Value(c)});
+        assert(std::holds_alternative<int64_t>(r.data));
+        return std::get<int64_t>(r.data);
+    };
+
+    // Forward (default flag): first occurrence.
+    assert(ss("fwd", "hello world", "o") == 4);
+    assert(ss("fwd", "hello world", "world") == 6);
+    assert(ss("flag0", "a/b/c/d", "/") == 1);
+    // Backward (non-zero flag): last occurrence. This is the shape the
+    // corpus overwhelmingly uses ("strsrch(path, "/", -1)").
+    assert(ss("bwd", "hello world", "o") == 7);
+    assert(ss("bwd", "a/b/c/d", "/") == 5);
+    assert(ss("bwd", "abXabXab", "ab") == 6);
+    {
+        amlp::Value r = harness.vm.callFunction(ob, "lastslash",
+            {amlp::Value(std::string("/domains/foo/bar.c"))});
+        assert(std::holds_alternative<int64_t>(r.data));
+        assert(std::get<int64_t>(r.data) == 12);
+    }
+
+    // Int single-character needle (real: "buf[0] = (char) sp->u.number").
+    assert(ssc("ci", "hello", 'l') == 2);
+    assert(ssc("cib", "hello", 'l') == 3);
+    assert(ssc("ci", "hello", 'z') == -1);
+    // A NUL byte (int 0, or a multiple of 256) is an empty needle -> -1.
+    assert(ssc("ci", "hello", 0) == -1);
+    assert(ssc("ci", "hello", 256) == -1);
+    // Only the low 8 bits are used: 'A' + 256 still matches 'A'.
+    assert(ssc("ci", "AB", static_cast<int64_t>('A') + 256) == 0);
+
+    // Empty string needle, and a needle longer than the haystack, both
+    // return -1 (real: "if (!llen || blen < llen) pos = NULL").
+    assert(ss("fwd", "hello", "") == -1);
+    assert(ss("fwd", "ab", "abc") == -1);
+    assert(ss("fwd", "hello", "xyz") == -1);
+
+    // strstr is the same efun and takes the same direction flag.
+    assert(ss("viastrstr", "a/b/c", "/") == 3);
+
+    // A non-string/non-int needle, a non-int flag, and a 4-argument call
+    // all throw.
+    for (const char* fn : {"badneedle", "badflag", "toomany"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testStrsrchIntNeedleAndBackwardFlag OK\n";
 }
 
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
@@ -27266,6 +27344,7 @@ int main() {
     testPcreReplaceSubstitutesSelectedGroups();
     testStrToArrAndArrToStrRoundTripUtf8();
     testReplaceStringOccurrenceRangeForm();
+    testStrsrchIntNeedleAndBackwardFlag();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

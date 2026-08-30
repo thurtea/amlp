@@ -9,6 +9,111 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-30 (a further session, same day): `strsrch()` / `strstr()`
+correctness fix. The already-registered `strsrch` efun (and its alias
+`strstr`) was rejecting an int-char needle and misreading its 3rd
+argument as a start index when real treats it as a direction flag. 815
+tests passing (up from 814). New `ROADMAP.md` row 2.58.**
+
+**Why this slice.** A targeted pass, before picking the next spec-sweep
+slice, for other already-registered efuns being called across the
+vendored corpora with an argument count or type the current body does
+not accept, i.e. the same class of bug row 2.57's `replace_string`
+occurrence-range gap was. Grepped all eight corpora (`core-lib`,
+`dead-souls`, `es2_mudlib`, `lima`, `nightmare3`,
+`reference-lpc-mud-library`, `wiz_tools`, `lil`) plus the bundled
+`mudlib/`. Findings, ranked by real call-site frequency:
+
+  1. `strsrch` / `strstr` -- 76 distinct affected call-site lines. The
+     int-char needle form (`strsrch(flags, '1')` and similar, 51 lines)
+     threw; the 3rd-argument form (33 lines, almost all the literal
+     `-1` backward-search idiom) silently returned a wrong index. Fixed
+     this session (below).
+  2. `get_dir(path, flags)` -- ~49 distinct call-site lines, all
+     currently throwing `LpcRuntimeError("get_dir: flags argument not
+     implemented")`. 26 pass `-1` (name/size/time triples), 19 pass
+     `0x10` (directories only), a few `0x07` / `0x17`. Left as a
+     follow-up row: reproducing it means a `stat()` per matched entry
+     and building the real `({ name, size, mtime })` sub-array shape,
+     more surface than this session's fix and a separate slice.
+  3. `implode(arr, function [, seed])` -- the reduce form. Present in
+     the corpora (`implode(pieces, with)` where `with` is a closure,
+     `implode(split(s, pat), repl)`), lower frequency than the two
+     above and needs a closure trampoline. Noted, not scheduled here.
+  4. `base_name(string)`, `strsrch`-unrelated `member_array` 4th
+     argument: no or negligible real corpus call sites (0 literal
+     `base_name("...")`), left alone.
+
+So the highest-frequency one, `strsrch`, is fixed here.
+
+**The bug.** `strsrch` was registered as `int strsrch(string str,
+string needle, void|int start)` with the 3rd argument implemented as a
+MudOS-style start index ("first index of needle in str at or after
+start") and the needle required to be a string.
+
+  - Real `func_spec.c:125`: `int strsrch(string, string | int, int
+    default: 0);` (alias `int strstr strsrch(...)` at :127).
+    `efun_defs.c:251`: arg types `T_STRING, T_STRING|T_NUMBER,
+    T_NUMBER`, exactly 3 args after the default is filled.
+  - Real `efuns_main.c:3059` `f_strsrch()` (Luke Mewburn, 930706): the
+    2nd argument may be an int, `buf[0] = (char) sp->u.number` (low 8
+    bits; a resulting NUL is an empty needle). The 3rd argument is a
+    direction flag: `!((sp+1)->u.number)` searches left to right
+    (`strchr` for a 1-char needle, `strstr` otherwise, first match);
+    any non-zero value searches right to left (`strrchr` / a
+    hand-rolled reverse substring scan, last match). An empty needle or
+    a needle longer than the haystack returns -1 (`if (!llen || blen <
+    llen) pos = NULL`). Result is the byte offset, or -1.
+
+  So `strsrch(path, "/", -1)` -- the standard "offset of the final
+  slash" path-splitting idiom, and the single most common 3-argument
+  shape in the corpora -- was hitting the old `start = -1 < 0` guard
+  and returning -1 every time, and `strsrch(flags, '1')` was throwing.
+
+**Built.** The `strsrchImpl` lambda in `EfunTable.cpp` (shared by both
+`strsrch` and `strstr`) rewritten: accept 2 or 3 arguments; take the
+haystack and, for a string needle, the needle up to their first
+embedded NUL (real's C-string functions stop there, the same named
+choice rows 2.52/2.55 made); for an int needle take `n & 0xFF` as the
+single character, an empty needle if that is NUL; the optional 3rd
+argument must be an int and any non-zero value selects a right-to-left
+search (`std::string::rfind`), zero or absent a left-to-right one
+(`find`); an empty needle or one longer than the haystack returns -1.
+A non-string, non-int needle, a non-int flag, and more than 3
+arguments all throw. No new include or dependency.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+all eight corpora plus `mudlib/`: 51 call-site lines use an int-char
+needle (`strsrch(flags, '1')`, `strsrch(flags, 'l')`, `strsrch(flags,
+'C')`, `strsrch(prop, '/', -1)`, `strsrch(msg, '\n')`, ...), 33 pass a
+3rd argument (almost entirely the literal `-1` backward search:
+`strsrch(path, "/", -1)`, `strsrch(remains, "@", -1)`, `strsrch(prop,
+'/', -1)` four times, `strsrch(lname, "/", -1)`, ...); union 76
+distinct lines, every one previously throwing or returning a wrong
+index.
+
+**1 new regression test (815 total, up from 814):**
+`testStrsrchIntNeedleAndBackwardFlag` -- forward (default flag) returns
+the first match, a non-zero flag the last, for both string and
+int-char needles; the `strsrch(s, '/', -1)` last-slash idiom on a real
+path; a NUL int needle (`0` and `256`) is an empty needle returning -1,
+and only the low 8 bits count (`'A' + 256` still matches `'A'` at 0);
+an empty string needle, a needle longer than the haystack, and a
+genuine miss all return -1; `strstr` takes the same direction flag;
+and a non-string/non-int needle (a float through a `mixed`), a non-int
+flag, and a 4-argument call all throw. Every expected offset was
+traced by hand from `f_strsrch()`, not read back from this driver.
+
+**Pre-existing test corrected.** `testStrlenAndStrstrAliasesWorkByTheir
+OwnNames` had `strstr("aXaXa", "a", 1)` asserting `2` under the old
+start-index reading. Under the real direction-flag semantics a non-zero
+flag searches right to left, so it is now `4` (the rightmost `a`), with
+the test's comment rewritten to describe the flag.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.58
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-30 (a further session, same day): `replace_string()`
 occurrence-range form. The already-registered `replace_string` efun
 extended to accept its real optional 4th `first` / 5th `last`

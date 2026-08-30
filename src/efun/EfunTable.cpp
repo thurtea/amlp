@@ -4026,30 +4026,70 @@ void registerCoreEfuns() {
         return Value(ob->filename());
     });
 
-    // int strsrch(string str, string needle, void|int start) -- first
-    // index of needle in str at or after start, or -1. Real func_spec.c
-    // also allows needle to be an int char code and a "search
-    // backwards" flag; neither is used anywhere on this driver's
-    // current boot/login/account-creation path (confirmed by grep), so
-    // only the string-needle/forward-search form is implemented, and
-    // strstr (a real alias -- func_spec.c: "int strstr strsrch(...);")
-    // is registered the same way.
+    // int strsrch(string str, string | int pat, int flag default: 0) --
+    // efuns_main.c's f_strsrch() (func_spec.c:125 "int strsrch(string,
+    // string | int, int default: 0);", efun_defs.c:251 arg types
+    // T_STRING, T_STRING|T_NUMBER, T_NUMBER). Returns the byte offset of
+    // pat within str, or -1 if not found. Written 930706 by Luke
+    // Mewburn.
+    //   - The 2nd argument may be an int single-character code, not just
+    //     a string. Real does "buf[0] = (char) sp->u.number", i.e. it
+    //     takes the low 8 bits; if that byte is NUL (an int 0, or any
+    //     multiple of 256) the needle length is 0.
+    //   - The 3rd argument is a DIRECTION FLAG, not a start index. 0
+    //     (the default) searches left to right and returns the first
+    //     match; any non-zero value (the corpus overwhelmingly passes
+    //     -1) searches right to left and returns the LAST match. Real:
+    //     strchr/strstr for the forward case, strrchr / a hand-rolled
+    //     reverse substring scan for the backward case. This driver's
+    //     earlier implementation mistook this argument for a MudOS-style
+    //     start index, so "strsrch(path, \"/\", -1)" (get the offset of
+    //     the final slash, an extremely common path-splitting idiom)
+    //     silently returned -1, and "strsrch(flags, '1')" (int-char
+    //     needle) threw. Both shapes are widespread across the vendored
+    //     corpora.
+    //   - An empty needle, or a needle longer than str, returns -1
+    //     ("if (!llen || blen < llen) pos = NULL").
+    // strstr is a real alias (func_spec.c:127 "int strstr strsrch(...);")
+    // and is registered the same way. Real's strchr/strstr/strrchr stop
+    // at an embedded NUL, so str and a string needle are taken up to
+    // their first NUL here, the same named local choice string_difference()
+    // and replace_html() made.
     auto strsrchImpl = [](VM&, std::vector<Value>& args) -> Value {
-        if (args.size() < 2 ||
-            !std::holds_alternative<std::string>(args[0].data) ||
-            !std::holds_alternative<std::string>(args[1].data)) {
-            throw LpcRuntimeError("strsrch: expected (string, string, void|int start) arguments");
+        if (args.size() < 2 || args.size() > 3 ||
+            !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("strsrch: expected (string str, string|int pat, int flag)");
         }
-        const std::string& str = std::get<std::string>(args[0].data);
-        const std::string& needle = std::get<std::string>(args[1].data);
-        int64_t start = 0;
-        if (args.size() > 2 && std::holds_alternative<int64_t>(args[2].data)) {
-            start = std::get<int64_t>(args[2].data);
+        std::string big = std::get<std::string>(args[0].data);
+        size_t bigNul = big.find('\0');
+        if (bigNul != std::string::npos) big.resize(bigNul);
+
+        std::string needle;
+        if (const auto* s = std::get_if<std::string>(&args[1].data)) {
+            needle = *s;
+            size_t nNul = needle.find('\0');
+            if (nNul != std::string::npos) needle.resize(nNul);
+        } else if (const auto* n = std::get_if<int64_t>(&args[1].data)) {
+            char c = static_cast<char>(*n & 0xFF);
+            if (c != '\0') needle.assign(1, c);
+        } else {
+            throw LpcRuntimeError(
+                "strsrch: second argument must be a string or an int char code");
         }
-        if (start < 0 || static_cast<size_t>(start) > str.size()) {
+
+        bool fromRight = false;
+        if (args.size() == 3) {
+            if (!std::holds_alternative<int64_t>(args[2].data)) {
+                throw LpcRuntimeError(
+                    "strsrch: third argument (direction flag) must be an int");
+            }
+            fromRight = std::get<int64_t>(args[2].data) != 0;
+        }
+
+        if (needle.empty() || big.size() < needle.size()) {
             return Value(int64_t{-1});
         }
-        size_t pos = str.find(needle, static_cast<size_t>(start));
+        size_t pos = fromRight ? big.rfind(needle) : big.find(needle);
         return Value(pos == std::string::npos ? int64_t{-1} : static_cast<int64_t>(pos));
     };
     t.registerEfun("strsrch", strsrchImpl);

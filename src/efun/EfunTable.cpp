@@ -2847,12 +2847,30 @@ void registerCoreEfuns() {
     // evenly, the extra character goes on the *leading* side ("i = fs /
     // 2 + fs % 2"), not the trailing one.
     //
-    // Still scoped, not the full real modifier set: "=" (column mode),
-    // "#" (table mode), "@" (array-spread), "'X'" (custom pad string),
-    // " "/"+" (positive-integer pad), "%O" (LPC datatype), "%f" (float),
-    // and capital "%X" are all not implemented; throws rather than
-    // silently mishandling anything else, matching this codebase's
-    // existing convention for other partially-implemented efuns.
+    // "=" (column / word-wrap mode) added for its single-column form:
+    // real sprintf.c's INFO_COLS, add_column(), add_justified(). A "%=Ns"
+    // (or "%=NO") specifier word-wraps its string argument to a column N
+    // wide, honouring an embedded '\n', with each wrapped line joined by
+    // a newline. A precision ("%.=" / "%:=" / "%=*.*") sets the wrap
+    // width, clamped to the field size (real "if (pres > fs) pres = fs;
+    // (pres) ? pres : fs"); a field size is required (real "if (!fs)
+    // ERROR(ERR_CST_REQUIRES_FS)"). "-" left-justifies each wrapped line,
+    // "|" centres it, neither right-justifies (real add_justified()'s
+    // default), and trailing pad on a wrapped line is added only when
+    // more non-newline format text follows the specifier (real's
+    // "trailing" flag). Continuation lines are indented to the output
+    // column where "%=" began, so "%s%-=*s" over "prefix" + body gives a
+    // real hanging indent. The MULTI-column interleaved form (two or more
+    // "%=" string specifiers in one format, the wizard file-listing
+    // table idiom) is still scoped out: it needs the row-at-a-time
+    // rebuild real string_print() does, throws a clear error rather than
+    // mislaying the columns.
+    // Still scoped, not the full real modifier set: "#" (table mode),
+    // "@" (array-spread), "'X'" (custom pad string), " "/"+" (positive-
+    // integer pad), "%f" (float), and capital "%X" are not implemented;
+    // throws rather than silently mishandling anything else, matching
+    // this codebase's existing convention for other partially-
+    // implemented efuns.
     // sprintf()'s own %d/%o/%x/%c: real sprintf.c's type check for every
     // one of these (fluffos-2.9-ds2.08/sprintf.c:1180, "carg->type !=
     // T_NUMBER") tests the real svalue's *type tag*, not a separate "is
@@ -2896,6 +2914,67 @@ void registerCoreEfuns() {
         const std::string& fmt = std::get<std::string>(args[0].data);
         std::string result;
         size_t argIdx = 1;
+
+        // Count "%=" column specifiers that target a string ('s'/'O').
+        // Two or more means the interleaved multi-column table form,
+        // which this driver does not build (see the top comment); one
+        // is the single-column word-wrap handled inline below.
+        auto countColStringSpecs = [](const std::string& f) -> int {
+            int n = 0;
+            for (size_t k = 0; k + 1 < f.size(); ++k) {
+                if (f[k] != '%') continue;
+                if (f[k + 1] == '%') { ++k; continue; }
+                size_t m = k + 1;
+                bool eq = false;
+                while (m < f.size() &&
+                       (f[m] == '-' || f[m] == ':' || f[m] == '|' || f[m] == '=' ||
+                        f[m] == '.' || f[m] == '*' || (f[m] >= '0' && f[m] <= '9'))) {
+                    if (f[m] == '=') eq = true;
+                    ++m;
+                }
+                if (m < f.size() && eq && (f[m] == 's' || f[m] == 'O')) ++n;
+                k = m;
+            }
+            return n;
+        };
+        const int colStringSpecCount = countColStringSpecs(fmt);
+
+        // Greedy word-wrap of `text` into segments at most `width` wide,
+        // matching real sprintf.c's add_column(): scan up to `width`
+        // characters or an embedded '\n'; if that lands in the middle of
+        // a word and a space was seen in the window, back up to the last
+        // space. A forced '\n' is consumed; otherwise the run of spaces
+        // at the break point is skipped.
+        auto wrapForColumn = [](const std::string& text, int width) -> std::vector<std::string> {
+            std::vector<std::string> segs;
+            size_t pos = 0;
+            while (pos < text.size()) {
+                int done = 0;
+                int lastSpace = -1;
+                while (pos + static_cast<size_t>(done) < text.size() &&
+                       text[pos + static_cast<size_t>(done)] != '\n' &&
+                       done < width) {
+                    if (text[pos + static_cast<size_t>(done)] == ' ') lastSpace = done;
+                    ++done;
+                }
+                if (done == width && lastSpace != -1 &&
+                    pos + static_cast<size_t>(done) < text.size() &&
+                    text[pos + static_cast<size_t>(done)] != '\n' &&
+                    text[pos + static_cast<size_t>(done)] != ' ') {
+                    done = lastSpace;
+                }
+                segs.push_back(text.substr(pos, static_cast<size_t>(done)));
+                pos += static_cast<size_t>(done);
+                if (pos < text.size() && text[pos] == '\n') {
+                    ++pos;
+                } else {
+                    while (pos < text.size() && text[pos] == ' ') ++pos;
+                }
+            }
+            if (segs.empty()) segs.emplace_back();
+            return segs;
+        };
+
         for (size_t i = 0; i < fmt.size(); ++i) {
             if (fmt[i] != '%') {
                 result += fmt[i];
@@ -2941,9 +3020,13 @@ void registerCoreEfuns() {
             bool leftJustify = false;
             bool centreJustify = false;
             bool colonMode = false;
-            while (i + 1 < fmt.size() && (fmt[i + 1] == '-' || fmt[i + 1] == ':' || fmt[i + 1] == '|')) {
+            bool colMode = false;
+            while (i + 1 < fmt.size() &&
+                   (fmt[i + 1] == '-' || fmt[i + 1] == ':' || fmt[i + 1] == '|' ||
+                    fmt[i + 1] == '=')) {
                 if (fmt[i + 1] == '-') leftJustify = true;
                 else if (fmt[i + 1] == '|') centreJustify = true;
+                else if (fmt[i + 1] == '=') colMode = true;
                 else colonMode = true;
                 ++i;
             }
@@ -3068,6 +3151,74 @@ void registerCoreEfuns() {
                     std::string("sprintf: unsupported format specifier '%") + spec +
                     "' (only %s, %d, %c, %o, %x, and %O are implemented)");
             }
+
+            // "%=" column / word-wrap mode. Only meaningful for a
+            // string-ish type ('s'/'O'); for a numeric type real
+            // sprintf.c never enters its INFO_COLS branch, so the "="
+            // is a silent no-op there and the normal field-width path
+            // below handles it. Handled inline here for the single
+            // "%=" case; the interleaved multi-column form is scoped
+            // out (see the top comment).
+            if (colMode && (spec == 's' || spec == 'O')) {
+                if (colStringSpecCount > 1) {
+                    throw LpcRuntimeError(
+                        "sprintf: multi-column '%=' layout is not implemented "
+                        "(only a single '%=' word-wrap column per format string)");
+                }
+                if (!haveWidth || fieldWidth <= 0) {
+                    throw LpcRuntimeError(
+                        "sprintf: '%=' column mode requires a positive field width");
+                }
+                // Wrap width: the precision if one was given, clamped to
+                // the field width; otherwise the field width itself
+                // (real: "if (pres > fs) pres = fs; (pres) ? pres : fs").
+                int wrapWidth = fieldWidth;
+                if (havePrecision) {
+                    wrapWidth = precision < fieldWidth ? precision : fieldWidth;
+                    if (wrapWidth <= 0) wrapWidth = fieldWidth;
+                }
+                // Output column where this "%=" begins: characters since
+                // the last newline already in `result`. Continuation
+                // lines are indented to match (real add_pad(0, start -
+                // curpos)).
+                size_t lastNl = result.find_last_of('\n');
+                size_t startCol = (lastNl == std::string::npos)
+                                      ? result.size()
+                                      : result.size() - lastNl - 1;
+                // Real's "trailing" flag for the first wrapped line: set
+                // when more format text (other than a newline) follows
+                // the specifier.
+                bool trailingText = (i + 1 < fmt.size() && fmt[i + 1] != '\n');
+                auto justifyColLine = [&](const std::string& seg, bool trailing) -> std::string {
+                    int extra = fieldWidth - static_cast<int>(seg.size());
+                    if (extra <= 0) return seg;
+                    if (centreJustify) {
+                        int lead = extra / 2 + extra % 2;  // real: leading half gets the odd one
+                        std::string out(static_cast<size_t>(lead), ' ');
+                        out += seg;
+                        if (trailing) out.append(static_cast<size_t>(extra - lead), ' ');
+                        return out;
+                    }
+                    if (leftJustify) {
+                        std::string out = seg;
+                        if (trailing) out.append(static_cast<size_t>(extra), ' ');
+                        return out;
+                    }
+                    return std::string(static_cast<size_t>(extra), ' ') + seg;  // default: right
+                };
+                std::vector<std::string> segs = wrapForColumn(piece, wrapWidth);
+                for (size_t s = 0; s < segs.size(); ++s) {
+                    if (s == 0) {
+                        result += justifyColLine(segs[0], trailingText);
+                    } else {
+                        result += '\n';
+                        result.append(startCol, ' ');
+                        result += justifyColLine(segs[s], false);
+                    }
+                }
+                continue;
+            }
+
             // ":" sets precision == field size, truncating a %s
             // argument longer than the field ("all other types ignore
             // this" -- real sprintf.c; %d/%c are never truncated here).

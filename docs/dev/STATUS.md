@@ -9,6 +9,104 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-30 (a further session, same day): `sprintf` `%=` column /
+word-wrap mode, single-column form. The `sprintf` efun now accepts a
+`%=` modifier and word-wraps a string argument to a column of the
+given field width instead of throwing `sprintf: unsupported format
+specifier '%='`. 818 tests passing (up from 817). New `ROADMAP.md` row
+2.60.**
+
+**Why this slice.** Row 3.9's own STATUS notes explicitly flagged this
+as a "confirmed real need" reachable in ordinary play:
+`cmds/mortal/_emote.c`'s `cmd_emote()` uses `%=` and every `emote`
+command hit `sprintf: unsupported format specifier '%='`. It is also
+one of the most widespread sprintf modifiers across the vendored
+corpora: about 40 files and 30 distinct call-site lines
+(`core-lib`, `dead-souls`, `lima`, `nightmare3`,
+`reference-lpc-mud-library`, `wiz_tools`), overwhelmingly the
+`sprintf("%-=" + WIDTH + "s", str)` "wrap a message to the terminal
+width" idiom, plus the hanging-indent `sprintf("%s%-=*s", prefix, ...,
+body)` form.
+
+**Real semantics, traced from `temp/reference/fluffos-2.9-ds2.08/
+sprintf.c` (`INFO_COLS`, `add_column()`, `add_justified()`).**
+
+  - `%=Ns` (or `%=NO`) word-wraps its string argument to a column N
+    wide. `add_column()` scans up to the wrap width or an embedded
+    `\n`; if the fill would split a word and a space was seen in the
+    window, it backs up to the last space; a forced `\n` is consumed,
+    otherwise the run of spaces at the break is skipped. Wrapped
+    segments are joined by `\n`.
+  - The wrap width is the precision if one was given, clamped to the
+    field size, else the field size itself (`if (pres > fs) pres = fs;
+    (pres) ? pres : fs`). A field size is required (`if (!fs)
+    ERROR(ERR_CST_REQUIRES_FS)`).
+  - `-` left-justifies each wrapped line, `|` centres it (the odd pad
+    character on the leading side, `i = fs/2 + fs%2`), neither
+    right-justifies (`add_justified()`'s default). Trailing pad on a
+    wrapped line is added only when `add_justified()`'s `trailing` flag
+    is set, which `string_print()` computes as "more format text other
+    than `\n` follows the specifier". For the common lone `%=` at the
+    end of a format, `trailing` is 0, so a left-justified wrap gets no
+    trailing pad at all.
+  - Continuation lines are indented to the output column where `%=`
+    began (`add_pad(0, start - curpos)`), so a `%s` or literal prefix
+    before `%=` produces a real hanging indent.
+  - `%=` on a numeric specifier (`%=5d`) is a silent no-op: real's INT
+    branch never enters the `INFO_COLS` path, so it formats exactly
+    like `%5d`.
+
+**Built.** In `sprintfImpl` (`EfunTable.cpp`): `=` is now parsed in the
+same modifier run as `-` / `:` / `|`, setting a `colMode` flag. Two new
+file-local helpers: `countColStringSpecs(fmt)` counts `%=` specifiers
+targeting `s` / `O` (computed once per call), and `wrapForColumn(text,
+width)` does the greedy `add_column()`-style word wrap. When a `s` /
+`O` specifier carries `colMode`, a dedicated block computes the wrap
+width and the output start column, wraps the argument, and emits the
+segments (first inline, each continuation preceded by `\n` plus the
+start-column indent) with an `add_justified()`-equivalent per line,
+then `continue`s past the normal single-line field-width path. A
+numeric specifier ignores `colMode` and falls through unchanged.
+
+**Scoped out, named.** The interleaved MULTI-column form (two or more
+`%=` string specifiers in one format, the wizard file-listing table
+`sprintf("%=9s %=8s %=7s ...", ...)` and `sprintf("%-=25s %-=25s
+%-=25s\n", ...)` idioms, about 8 corpus lines) needs the
+row-at-a-time rebuild real `string_print()` does across a linked list
+of column states. `countColStringSpecs` detects it and throws a clear
+`sprintf: multi-column '%=' layout is not implemented` error rather
+than mislaying the columns. `#` (table mode), `@` (array-spread),
+`'X'` (custom pad string), ` ` / `+` (positive-integer pad), `%f`, and
+`%X` stay unimplemented as before, with the top comment updated to
+match.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` plus the bundled `mudlib/` for a
+`%=` inside a `sprintf` format: about 40 files. Of the distinct
+call-site lines, roughly 22 carry a single `%=` (the word-wrap idiom,
+handled here) and 8 carry three `%=` (the multi-column table, scoped
+out). The single-`%=` lines include the `_emote.c` path that surfaced
+the gap, message-wrapping simul-efuns across several mudlibs, and
+`%=Nd)` menu-numbering (numeric, the no-op path).
+
+**1 new regression test (818 total, up from 817):**
+`testSprintfColumnModeWordWrap` -- `%-=10s` over a 25-character
+sentence wraps to `"the quick\nbrown fox\njumps"`; a trailing `\n` in
+the format is appended as normal; default (no `-`) right-justifies each
+wrapped line (`"%=10s"` over `"ab cd ef"` gives `"  ab cd ef"`); `|`
+centres (`"%=|8s"` over `"hi"` gives `"   hi"`); an embedded `\n`
+forces a break; a `%s` prefix hang-indents the continuation lines
+(`"NOTE: aaa bbb\n      ccc ddd"`); `*` dynamic field width feeds the
+wrap width; `%=5d)` formats as `"   42)"`; a short string that needs no
+wrap comes back verbatim; and two `%=` string specifiers, or a `%=`
+with no field width, both throw. Every expected string was traced by
+hand from `add_column()` / `add_justified()`, not read back from this
+driver. The existing 817 re-run unchanged.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.60
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-30 (a further session, same day): `get_dir(string, int
 flags)` stat-flag argument. The already-registered `get_dir` efun
 extended to accept its optional 2nd argument instead of throwing on

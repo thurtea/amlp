@@ -13288,6 +13288,72 @@ static void testGetDirFlagsFormReturnsStatTriplesOrNames() {
     std::cout << "testGetDirFlagsFormReturnsStatTriplesOrNames OK\n";
 }
 
+// sprintf "%=" column / word-wrap mode (single-column form), real
+// sprintf.c INFO_COLS / add_column() / add_justified(). The dominant
+// corpus idiom is sprintf("%-=" + WIDTH + "s", str) to wrap a message
+// to the terminal width; this driver previously threw
+// "sprintf: unsupported format specifier '%='" on it.
+static void testSprintfColumnModeWordWrap() {
+    ObjectVarHarness harness;
+    harness.writeFile("/scol.c",
+        "string wrap_l()   { return sprintf(\"%-=10s\", \"the quick brown fox jumps\"); }\n"
+        "string wrap_l_nl(){ return sprintf(\"%-=10s\\n\", \"the quick brown fox jumps\"); }\n"
+        "string wrap_r()   { return sprintf(\"%=10s\", \"ab cd ef\"); }\n"
+        "string wrap_c()   { return sprintf(\"%=|8s\", \"hi\"); }\n"
+        "string wrap_embnl(){ return sprintf(\"%-=20s\", \"line one\\nline two\"); }\n"
+        "string hang()     { return sprintf(\"%s%-=10s\", \"NOTE: \", \"aaa bbb ccc ddd\"); }\n"
+        "string dyn()      { return sprintf(\"%-=*s\", 8, \"aaa bbb ccc\"); }\n"
+        "string num_noop() { return sprintf(\"%=5d)\", 42); }\n"
+        "string fits()     { return sprintf(\"%-=20s\", \"short\"); }\n"
+        "int multi_col()   { return sizeof(sprintf(\"%-=10s %-=10s\", \"a\", \"b\")); }\n"
+        "int no_width()    { return sizeof(sprintf(\"%=s\", \"hi\")); }\n");
+    auto ob = harness.objects.cloneObject("/scol");
+    assert(ob != nullptr);
+
+    auto s = [&](const char* fn) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    // Left-justified wrap to width 10: greedy word break, no trailing
+    // pad on any line (a lone "%=" at end of format), lines joined by
+    // "\n".
+    assert(s("wrap_l") == "the quick\nbrown fox\njumps");
+    // A literal "\n" in the format after "%=s" is appended as normal.
+    assert(s("wrap_l_nl") == "the quick\nbrown fox\njumps\n");
+    // Default (no "-") right-justifies each wrapped line within the
+    // field; a single line that fits is still right-padded-before.
+    assert(s("wrap_r") == "  ab cd ef");
+    // "|" centres; the odd pad character goes on the leading side.
+    assert(s("wrap_c") == "   hi");
+    // An embedded newline in the argument forces a line break.
+    assert(s("wrap_embnl") == "line one\nline two");
+    // A string prefix sets the column where "%=" starts, so
+    // continuation lines hang-indent to match it.
+    assert(s("hang") == "NOTE: aaa bbb\n      ccc ddd");
+    // "*" dynamic field width feeds the wrap width.
+    assert(s("dyn") == "aaa bbb\nccc");
+    // "=" on a numeric specifier is a silent no-op: it formats like
+    // "%5d" would.
+    assert(s("num_noop") == "   42)");
+    // A string shorter than the width and needing no wrap: left-just
+    // with no trailing pad is just the string.
+    assert(s("fits") == "short");
+
+    // Two "%=" string specifiers in one format is the interleaved
+    // multi-column table form, which is scoped out and throws; a
+    // missing field width also throws.
+    for (const char* fn : {"multi_col", "no_width"}) {
+        bool threw = false;
+        try { harness.vm.callFunction(ob, fn, {}); }
+        catch (const amlp::LpcRuntimeError&) { threw = true; }
+        assert(threw);
+    }
+
+    std::cout << "testSprintfColumnModeWordWrap OK\n";
+}
+
 // intp(mixed) -- func_spec.c: "int intp(mixed);". Found live needing
 // this the same pass as the id_card.c.c fix above: /domains/Praxis/
 // equipment/id_card.c's own set_value() calls it directly.
@@ -27416,6 +27482,7 @@ int main() {
     testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension();
     testGetDirMatchesGlobPatternInFinalPathComponentOnly();
     testGetDirFlagsFormReturnsStatTriplesOrNames();
+    testSprintfColumnModeWordWrap();
     testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable();
     testFloatpTrueOnlyForFloatNotIntOrString();
     testArrayFunctionMapObjectPointerPredicatesEachTrueOnlyForOwnKind();

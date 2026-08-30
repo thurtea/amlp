@@ -3351,30 +3351,71 @@ void registerCoreEfuns() {
     });
 
     // string replace_string(string str, string pattern, string
-    // replacement) -- efuns_main.c's f_replace_string(): every
-    // non-overlapping occurrence of pattern replaced left to right (the
-    // real efun also takes optional first/last occurrence-index bounds
-    // via a 4th/5th argument; nothing in this mudlib's boot/login path
-    // uses that form, so it is not implemented here -- matching this
-    // codebase's existing convention of throwing rather than silently
-    // mishandling an unsupported shape, see sscanf's %f/%x handling).
-    // An empty pattern is a no-op in the real efun ("if (!plen) ...
-    // just return it").
+    // replacement [, int first [, int last]]) -- efuns_main.c's
+    // f_replace_string() (func_spec.c: "string replace_string(string,
+    // string, string,...);"). With three arguments every non-overlapping
+    // occurrence of pattern is replaced left to right. The optional
+    // 4th/5th arguments select an occurrence range, exactly as real does:
+    //   - 4 args: the 4th is `last`, `first` defaults to 0, so
+    //     occurrences 1..last are replaced ("replace_string("xyxx", "x",
+    //     "z", 2)" -> "zyzx").
+    //   - 5 args: the 4th is `first`, the 5th is `last`, so occurrences
+    //     first..last are replaced ("replace_string("xyxxy", "x", "z",
+    //     2, 3)" -> "xyzzy").
+    // Occurrences are counted whether or not they fall in range; an
+    // out-of-range match is copied through verbatim. Real stops scanning
+    // the instant the `last`-th match is handled ("if (cur == last)
+    // break;") and copies the rest of the string unchanged.
+    // Real edge cases, all reproduced: an empty pattern returns the
+    // string unchanged ("if (!plen) ... just return it"); "last == 0"
+    // means "no upper bound" ("if (!last) last = max_string_length;"),
+    // and since this driver has no max_string_length (same as add_a() /
+    // replace_html()) that simply means unbounded; "first > last"
+    // (evaluated after that default, so an unbounded upper bound never
+    // trips it) returns the string unchanged; a negative bound is left
+    // as-is (it either trips the "first > last" return or makes the
+    // "cur <= last" test never true). Each occurrence bound must be an
+    // int, matching real's CHECK_TYPES(..., T_NUMBER, ...); more than
+    // five arguments is an error ("Too many args to replace_string.").
+    // The real max_string_length overflow path (a T_UNDEFINED 0 return)
+    // has no analogue here, this driver having no such limit.
     t.registerEfun("replace_string", [](VM&, std::vector<Value>& args) -> Value {
-        if (args.size() != 3 ||
+        if (args.size() < 3 || args.size() > 5 ||
             !std::holds_alternative<std::string>(args[0].data) ||
             !std::holds_alternative<std::string>(args[1].data) ||
             !std::holds_alternative<std::string>(args[2].data)) {
-            throw LpcRuntimeError("replace_string: expected (string, string, string) arguments "
-                                   "(occurrence-range form not implemented)");
+            throw LpcRuntimeError("replace_string: expected (string str, string pattern, "
+                                   "string replacement [, int first [, int last]])");
         }
         const std::string& str = std::get<std::string>(args[0].data);
         const std::string& pattern = std::get<std::string>(args[1].data);
         const std::string& replacement = std::get<std::string>(args[2].data);
+
+        long long first = 0;
+        long long last = 0;
+        if (args.size() >= 4) {
+            if (!std::holds_alternative<int64_t>(args[3].data)) {
+                throw LpcRuntimeError("Bad argument 4 to replace_string() (expected int)");
+            }
+            if (args.size() == 4) {
+                last = static_cast<long long>(std::get<int64_t>(args[3].data));
+                first = 0;
+            } else {  // args.size() == 5
+                if (!std::holds_alternative<int64_t>(args[4].data)) {
+                    throw LpcRuntimeError("Bad argument 5 to replace_string() (expected int)");
+                }
+                first = static_cast<long long>(std::get<int64_t>(args[3].data));
+                last = static_cast<long long>(std::get<int64_t>(args[4].data));
+            }
+        }
+
+        const bool boundedAbove = (last != 0);
+        if (boundedAbove && first > last) return Value(str);
         if (pattern.empty()) return Value(str);
 
         std::string result;
         size_t start = 0;
+        long long cur = 0;
         for (;;) {
             size_t pos = str.find(pattern, start);
             if (pos == std::string::npos) {
@@ -3382,8 +3423,17 @@ void registerCoreEfuns() {
                 break;
             }
             result.append(str, start, pos - start);
-            result += replacement;
+            ++cur;
+            if (cur >= first && (!boundedAbove || cur <= last)) {
+                result += replacement;
+            } else {
+                result += pattern;
+            }
             start = pos + pattern.size();
+            if (boundedAbove && cur == last) {
+                result.append(str, start, std::string::npos);
+                break;
+            }
         }
         return Value(result);
     });

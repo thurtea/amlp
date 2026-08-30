@@ -18352,6 +18352,91 @@ static void testStrToArrAndArrToStrRoundTripUtf8() {
     std::cout << "testStrToArrAndArrToStrRoundTripUtf8 OK\n";
 }
 
+static void testReplaceStringOccurrenceRangeForm() {
+    ObjectVarHarness harness;
+    harness.writeFile("/replace_string_range_probe.c",
+        "string r3(string s, string p, string x) { return replace_string(s, p, x); }\n"
+        "string r4(string s, string p, string x, int last) {\n"
+        "    return replace_string(s, p, x, last);\n"
+        "}\n"
+        "string r5(string s, string p, string x, int first, int last) {\n"
+        "    return replace_string(s, p, x, first, last);\n"
+        "}\n"
+        "int badbound() { mixed x = 1.0; return sizeof(replace_string(\"a\", \"a\", \"b\", x)); }\n"
+        "int toomany() {\n"
+        "    return sizeof(replace_string(\"a\", \"a\", \"b\", 1, 2, 3));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/replace_string_range_probe");
+    assert(ob != nullptr);
+
+    auto r3 = [&](const std::string& s, const std::string& p, const std::string& x) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "r3",
+            {amlp::Value(s), amlp::Value(p), amlp::Value(x)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+    auto r4 = [&](const std::string& s, const std::string& p, const std::string& x,
+                  int64_t last) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "r4",
+            {amlp::Value(s), amlp::Value(p), amlp::Value(x), amlp::Value(last)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+    auto r5 = [&](const std::string& s, const std::string& p, const std::string& x,
+                  int64_t first, int64_t last) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "r5",
+            {amlp::Value(s), amlp::Value(p), amlp::Value(x),
+             amlp::Value(first), amlp::Value(last)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    // Three-argument form is unchanged: every occurrence replaced.
+    assert(r3("xyxx", "x", "z") == "zyzz");
+    assert(r3("a.b.c", ".", "/") == "a/b/c");
+
+    // FluffOS's own documented four-argument vector (docs' "replace_string(
+    // "xyxx", "x", "z", 2) would return "zyzx""): occurrences 1..last.
+    assert(r4("xyxx", "x", "z", 2) == "zyzx");
+    // The corpus-common "replace only the first occurrence" shape.
+    assert(r4("Chapter 1, Chapter 2", "Chapter", "chapter", 1) == "chapter 1, Chapter 2");
+    // last past the number of matches replaces them all; last of 0 means
+    // "no upper bound" (real "if (!last) last = max_string_length"), so
+    // every occurrence is replaced.
+    assert(r4("x x x", "x", "y", 9) == "y y y");
+    assert(r4("x x x", "x", "y", 0) == "y y y");
+
+    // FluffOS's own documented five-argument vector (docs' "replace_string(
+    // "xyxxy", "x", "z", 2, 3) returns "xyzzy""): occurrences first..last,
+    // earlier matches copied through verbatim.
+    assert(r5("xyxxy", "x", "z", 2, 3) == "xyzzy");
+    // first with an unbounded last (0): from the Nth occurrence onward.
+    assert(r5("a a a a", "a", "b", 3, 0) == "a a b b");
+    // first > last returns the string unchanged (real "if (first > last)
+    // { just return it }").
+    assert(r5("a a a", "a", "b", 3, 2) == "a a a");
+    // Replacement longer or shorter than the pattern still tracks the
+    // occurrence count, not byte offsets.
+    assert(r5("a-a-a-a", "a", "XX", 2, 3) == "a-XX-XX-a");
+    assert(r5("aaaa", "aa", "b", 1, 1) == "baa");
+
+    // An empty pattern is a no-op even with a range.
+    assert(r4("abc", "", "z", 2) == "abc");
+
+    // A non-int occurrence bound and more than five arguments both throw.
+    for (const char* fn : {"badbound", "toomany"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testReplaceStringOccurrenceRangeForm OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -27180,6 +27265,7 @@ int main() {
     testPcreMatchAllReturnsEveryMatch();
     testPcreReplaceSubstitutesSelectedGroups();
     testStrToArrAndArrToStrRoundTripUtf8();
+    testReplaceStringOccurrenceRangeForm();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

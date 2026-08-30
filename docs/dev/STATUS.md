@@ -9,6 +9,110 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-30 (a further session, same day): `replace_string()`
+occurrence-range form. The already-registered `replace_string` efun
+extended to accept its real optional 4th `first` / 5th `last`
+occurrence-index arguments, instead of throwing on them. 814 tests
+passing (up from 813). New `ROADMAP.md` row 2.57.**
+
+**Why this slice.** Continues the same one-package-at-a-time named
+sweep, but this time closes a gap in an efun this driver already ships
+rather than registering a new name. `replace_string` was registered
+with a 3-argument body only, and its own code comment said the
+"first/last occurrence-index bounds via a 4th/5th argument" form was
+"not implemented here ... nothing in this mudlib's boot/login path uses
+that form". That last clause turned out to understate real demand: the
+4-argument "replace only the first occurrence" shape is one of the most
+common `replace_string` call shapes across the vendored corpora. Every
+one of those call sites previously threw `LpcRuntimeError` against this
+driver. Pure string work, no new subsystem, no dependency, no buffer
+type, no LPC re-entry.
+
+**Real surface.** `temp/reference/fluffos-2.9-ds2.08/func_spec.c:118`
+declares `string replace_string(string, string, string,...);` (varargs);
+`efun_defs.c:195` records min-args 3, max-args -1. The current
+locally-vendored clone `temp/fluffos/src/` carries the identical
+varargs signature. So this is ordinary current-and-2.9 surface, not a
+2.9-only or new-since-2.9 name.
+
+**Real semantics, traced line by line from `efuns_main.c`'s
+`f_replace_string()` (:2326-2560, John Garnett's skip-table rewrite).**
+
+  - More than 5 arguments: `error("Too many args to replace_string.")`.
+  - `first` and `last` both start at 0. With `st_num_arg >= 4` the 4th
+    argument is read (`CHECK_TYPES((arg+3), T_NUMBER, 4, ...)`, so a
+    non-int throws); if exactly 4 arguments, `last = that value; first
+    = 0` (occurrences 1..last replaced); if exactly 5 arguments, the
+    4th is `first`, the 5th is `last` (`CHECK_TYPES(sp, T_NUMBER, 5,
+    ...)`).
+  - `if (!last) last = max_string_length;` -- `last == 0` means "no
+    upper bound". This driver has no `max_string_length` at all (the
+    same situation `add_a()` / `replace_html()` / `str_to_arr()` are
+    in), so an unset upper bound is just unbounded.
+  - `if (first > last)` -- evaluated *after* that default, so an
+    unbounded upper bound never trips it -- returns the string
+    unchanged.
+  - `if (!plen)` (empty pattern) returns the string unchanged.
+  - Every match increments `cur` whether or not it falls in range; an
+    in-range match (`cur >= first && cur <= last`) is replaced, an
+    out-of-range one is copied through verbatim. `if (cur == last)
+    break;` stops the scan the instant the last selected occurrence is
+    handled, and the remainder of the string is copied unchanged.
+  - A negative bound is left as-is: it either trips the `first > last`
+    early return or makes the `cur <= last` test never true. Real does
+    not clamp it either.
+
+**Named local choice, not a silent divergence.** Real's
+`max_string_length` overflow path (each of several `push_svalue(
+&const0u)` sites, returning a T_UNDEFINED-tagged 0) has no analogue
+here, this driver having no such limit, the same kind of named drop
+rows 2.55/2.56 recorded for the same reason. The 3-argument path is
+byte-for-byte unchanged (it already replaced every occurrence, which is
+exactly what `first = 0, last = unbounded` produces).
+
+**Built.** The registered `replace_string` lambda in `EfunTable.cpp`
+now accepts 3 to 5 arguments, parses the optional bounds with the real
+4-vs-5 argument rule, and threads an occurrence counter through the
+existing left-to-right `std::string::find` replacement loop. The
+bad-shape error messages were reworded (the old one announced the
+range form as unimplemented). No new include or dependency.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`,
+`wiz_tools`, `lil`) plus the bundled `mudlib/` for a 4th argument to
+`replace_string(`. Many real 4-argument call sites, almost all the
+"replace only the first occurrence" idiom: `replace_string(line,
+"Chapter", "chapter", 1)`, `replace_string(skill, "in ", "", 1)`,
+`replace_string(key, "Get", "Set", 1)`, `replace_string(stamp, ".",
+"/", 1)`, `replace_string(mess, "<" + chan + ">", colorchan, 1)`, and
+more; plus doc pages carrying the 5-argument form's worked vectors
+(`replace_string("xyxx", "x", "z", 2)` -> `"zyzx"`,
+`replace_string("xyxxy", "x", "z", 2, 3)` -> `"xyzzy"`). Every one of
+those previously threw against this driver. This is the first row in
+the recent sweep with real, widespread corpus demand rather than
+FluffOS-surface parity alone.
+
+**1 new regression test (814 total, up from 813):**
+`testReplaceStringOccurrenceRangeForm` -- the 3-argument form still
+replaces every occurrence; FluffOS's own documented vectors
+`replace_string("xyxx", "x", "z", 2)` -> `"zyzx"` and
+`replace_string("xyxxy", "x", "z", 2, 3)` -> `"xyzzy"`; the
+corpus-common `replace_string("Chapter 1, Chapter 2", "Chapter",
+"chapter", 1)` -> `"chapter 1, Chapter 2"`; a `last` past the match
+count and a `last` of 0 both replace all; a 5-argument `first` with
+`last` 0 replaces from the Nth occurrence onward; `first > last`
+returns the string unchanged; a replacement longer or shorter than the
+pattern still tracks the occurrence count rather than byte offsets; an
+empty pattern is a no-op even with a range; and a non-int bound (a
+float through a `mixed`) and a 6-argument call both throw. Every
+expected output was traced by hand from `f_replace_string()`'s own
+counting rule, not read back from this driver.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.57
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-30: `func_spec.c` `USE_ICONV` conversion pair,
 `str_to_arr(string)` and `arr_to_str(int *)`. A UTF-8 string decoded to
 an array of Unicode code points and back, implemented as a direct codec

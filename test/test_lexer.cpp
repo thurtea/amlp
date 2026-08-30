@@ -46,6 +46,7 @@
 #include <functional>
 #include <cstring>
 #include <set>
+#include <map>
 #include <cmath>
 
 static void testBasicTokenize() {
@@ -13178,6 +13179,113 @@ static void testGetDirMatchesGlobPatternInFinalPathComponentOnly() {
     assert((*dirArr)->items.size() >= 4); // _look.c, _score.c, readme.txt, probe.c
 
     std::cout << "testGetDirMatchesGlobPatternInFinalPathComponentOnly OK\n";
+}
+
+// get_dir(string path, int flags) -- the optional flags argument, real
+// file.c get_dir() + encode_stat(). flags == -1 returns ({ name, size,
+// mtime }) triples (size -2 for a directory, byte size for a file);
+// every other flags value (0, and the 0x10 some newer mudlibs pass)
+// returns plain name strings. This driver previously threw
+// LpcRuntimeError on any non-zero flags argument, which broke the ~49
+// real "get_dir(path, -1)" / "get_dir(path, 0x10)" call sites across
+// the vendored corpora.
+static void testGetDirFlagsFormReturnsStatTriplesOrNames() {
+    ObjectVarHarness harness;
+    harness.writeFile("/alpha.txt", "12345");        // 5 bytes
+    harness.writeFile("/beta.txt", "abc");           // 3 bytes
+    harness.writeFile("/_cmd.c", "int cmd_x() { return 1; }\n");
+    assert(::mkdir((harness.tempDir + "/subdir").c_str(), 0755) == 0);
+    harness.writeFile("/probe.c",
+        "mixed *stat_all()  { return get_dir(\"/\", -1); }\n"
+        "mixed *stat_glob() { return get_dir(\"/*.txt\", -1); }\n"
+        "mixed *stat_one()  { return get_dir(\"/alpha.txt\", -1); }\n"
+        "mixed *names_0x10() { return get_dir(\"/\", 16); }\n"  // 16 == 0x10
+        "mixed *names_plain() { return get_dir(\"/\"); }\n"
+        "mixed  missing()   { return get_dir(\"/nope/x\", -1); }\n"
+        "int    bad_flag()  { mixed f = \"x\"; return sizeof(get_dir(\"/\", f)); }\n");
+    auto ob = harness.objects.cloneObject("/probe");
+    assert(ob != nullptr);
+
+    auto arr = [&](const char* fn) -> std::shared_ptr<amlp::Array> {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        auto* a = std::get_if<std::shared_ptr<amlp::Array>>(&r.data);
+        assert(a && *a);
+        return *a;
+    };
+
+    // flags == -1: every entry is a 3-element ({ name, size, mtime }).
+    auto all = arr("stat_all");
+    std::map<std::string, std::pair<int64_t, int64_t>> byName;
+    for (const auto& e : all->items) {
+        auto* t = std::get_if<std::shared_ptr<amlp::Array>>(&e.data);
+        assert(t && *t && (*t)->items.size() == 3);
+        assert(std::holds_alternative<std::string>((*t)->items[0].data));
+        assert(std::holds_alternative<int64_t>((*t)->items[1].data));
+        assert(std::holds_alternative<int64_t>((*t)->items[2].data));
+        byName[std::get<std::string>((*t)->items[0].data)] = {
+            std::get<int64_t>((*t)->items[1].data),
+            std::get<int64_t>((*t)->items[2].data)};
+    }
+    assert(byName.count("alpha.txt") && byName["alpha.txt"].first == 5);
+    assert(byName.count("beta.txt") && byName["beta.txt"].first == 3);
+    // A directory entry reports size -2 (real encode_stat()).
+    assert(byName.count("subdir") && byName["subdir"].first == -2);
+    // mtime is a plausible recent Unix timestamp (nonzero, this century).
+    assert(byName["alpha.txt"].second > 1000000000);
+
+    // Entries come back sorted by name (real qsort with parrcmp).
+    std::vector<std::string> order;
+    for (const auto& e : all->items) {
+        auto& t = std::get<std::shared_ptr<amlp::Array>>(e.data);
+        order.push_back(std::get<std::string>(t->items[0].data));
+    }
+    assert(std::is_sorted(order.begin(), order.end()));
+
+    // Glob plus flags: only the two .txt files, still as triples.
+    auto g = arr("stat_glob");
+    assert(g->items.size() == 2);
+    for (const auto& e : g->items) {
+        auto* t = std::get_if<std::shared_ptr<amlp::Array>>(&e.data);
+        assert(t && *t && (*t)->items.size() == 3);
+    }
+
+    // A single existing file: a 1-element array holding one triple.
+    auto one = arr("stat_one");
+    assert(one->items.size() == 1);
+    {
+        auto* t = std::get_if<std::shared_ptr<amlp::Array>>(&one->items[0].data);
+        assert(t && *t && (*t)->items.size() == 3);
+        assert(std::get<std::string>((*t)->items[0].data) == "alpha.txt");
+        assert(std::get<int64_t>((*t)->items[1].data) == 5);
+    }
+
+    // Any non-(-1) flag (here 0x10) behaves exactly like 0: plain names.
+    auto n10 = arr("names_0x10");
+    auto nplain = arr("names_plain");
+    for (const auto& e : n10->items) assert(std::holds_alternative<std::string>(e.data));
+    assert(n10->items.size() == nplain->items.size());
+
+    // A non-existent path yields nothing (this driver returns an empty
+    // array here; real get_dir() returns int 0 for a missing parent
+    // directory, a pre-existing minor divergence not in this row's
+    // scope). Either way it must not throw and must not be populated.
+    {
+        amlp::Value r = harness.vm.callFunction(ob, "missing", {});
+        if (auto* a = std::get_if<std::shared_ptr<amlp::Array>>(&r.data)) {
+            assert(!*a || (*a)->items.empty());
+        } else {
+            assert(std::holds_alternative<int64_t>(r.data) &&
+                   std::get<int64_t>(r.data) == 0);
+        }
+    }
+
+    // A non-int flags argument throws.
+    bool threw = false;
+    try { harness.vm.callFunction(ob, "bad_flag", {}); }
+    catch (const amlp::LpcRuntimeError&) { threw = true; }
+    assert(threw);
+
+    std::cout << "testGetDirFlagsFormReturnsStatTriplesOrNames OK\n";
 }
 
 // intp(mixed) -- func_spec.c: "int intp(mixed);". Found live needing
@@ -27307,6 +27415,7 @@ int main() {
     testMapDeleteRemovesKeyInPlaceAndLeavesOthersIntact();
     testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension();
     testGetDirMatchesGlobPatternInFinalPathComponentOnly();
+    testGetDirFlagsFormReturnsStatTriplesOrNames();
     testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable();
     testFloatpTrueOnlyForFloatNotIntOrString();
     testArrayFunctionMapObjectPointerPredicatesEachTrueOnlyForOwnKind();

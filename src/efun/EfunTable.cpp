@@ -8077,36 +8077,44 @@ void registerCoreEfuns() {
         return Value(lines);
     });
 
-    // string *get_dir(string path, void|int flags) -- file.c's real
-    // get_dir(): the directory portion of path is always literal; only
-    // the final path component may carry glob wildcards, matched
-    // against that directory's own entries. Stat-flag bits are not
-    // implemented (this mudlib's own usage is always the bare
-    // no-flags form, confirmed by grep); throws rather than silently
-    // mishandling if ever called with flags, matching this codebase's
-    // existing convention for other partially-implemented efuns.
+    // mixed *get_dir(string path, int flags default: 0) -- file.c's real
+    // get_dir() + encode_stat() (func_spec.c: "mixed *get_dir(string,
+    // int default: 0);", efun_defs.c: 2 args, 2nd is T_NUMBER). The
+    // directory portion of path is always literal; only the final path
+    // component may carry glob wildcards, matched against that
+    // directory's own entries. The optional flags argument:
+    //   - flags == -1: each entry is a 3-element array
+    //     ({ name, size, mtime }), where size is -2 for a directory and
+    //     the byte size for a regular file (real encode_stat():
+    //     "(st->st_mode & S_IFDIR) ? -2 : st->st_size"), and mtime is
+    //     the file's st_mtime.
+    //   - any other flags value (0, and every other bit pattern such as
+    //     the 0x10 some newer mudlibs pass): each entry is just the name
+    //     string. Real encode_stat() only special-cases -1; every other
+    //     value falls to its plain-name branch, so a non-(-1) flag is
+    //     accepted and behaves exactly like 0, not an error.
+    // The result is sorted by name in both forms (real qsort with
+    // pstrcmp / parrcmp). A path resolving to a single existing file
+    // (no glob, not a directory) yields a 1-element array. An invalid
+    // path returns int 0.
     // Found live blocking EVERY typed command, not just one: daemon/
     // command.c's own rehash() (CMD_D's directory-scan cache behind
     // find_cmd()) calls "get_dir(val[i]+\"/_*.c\")" -- a genuine glob,
     // not the bare-directory-or-bare-file shape this efun originally
-    // assumed was the only real usage. Against a literal "*" in the
-    // path, stat() always failed and this efun silently returned an
-    // empty array, so __Cmds was never populated and find_cmd()
-    // returned 0 for every single verb -- cmd_hook()'s own fallback
-    // chain (SOUL_D/CHAT_D, then "if(query_client()) receive(\"<error>\")")
-    // then silently produced nothing at all for a raw socket connection
-    // (query_client() false, no client type negotiated), matching
-    // exactly what live testing found: every typed command, valid or
-    // garbage, got zero bytes back, with no exception and no dropped
-    // connection anywhere in the chain to explain it.
+    // assumed was the only real usage.
     t.registerEfun("get_dir", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("get_dir: expected a string path argument");
         }
-        if (args.size() > 1 && !(std::holds_alternative<int64_t>(args[1].data) &&
-                                   std::get<int64_t>(args[1].data) == 0)) {
-            throw LpcRuntimeError("get_dir: flags argument not implemented");
+        int64_t flags = 0;
+        if (args.size() > 1) {
+            if (!std::holds_alternative<int64_t>(args[1].data)) {
+                throw LpcRuntimeError("get_dir: flags argument must be an int");
+            }
+            flags = std::get<int64_t>(args[1].data);
         }
+        const bool wantStat = (flags == -1);
+
         auto result = std::make_shared<Array>();
         auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), false, "get_dir");
         if (!gated) return Value(result);
@@ -8116,6 +8124,36 @@ void registerCoreEfuns() {
         std::string dirPart = slash == std::string::npos ? "." : path.substr(0, slash);
         std::string lastComponent = slash == std::string::npos ? path : path.substr(slash + 1);
         bool hasWildcard = lastComponent.find_first_of("*?[") != std::string::npos;
+
+        // Build one result entry: a bare name string, or (flags == -1)
+        // the ({ name, size, mtime }) triple. `full` is the path to
+        // stat for the triple form.
+        auto makeEntry = [&](const std::string& name, const std::string& full) -> Value {
+            if (!wantStat) return Value(name);
+            auto triple = std::make_shared<Array>();
+            struct stat est;
+            int64_t size = 0, mtime = 0;
+            if (::stat(full.c_str(), &est) == 0) {
+                size = S_ISDIR(est.st_mode) ? int64_t{-2}
+                                            : static_cast<int64_t>(est.st_size);
+                mtime = static_cast<int64_t>(est.st_mtime);
+            }
+            triple->items.emplace_back(name);
+            triple->items.emplace_back(size);
+            triple->items.emplace_back(mtime);
+            return Value(triple);
+        };
+        auto entryName = [&](const Value& v) -> const std::string& {
+            if (auto* s = std::get_if<std::string>(&v.data)) return *s;
+            const auto& a = std::get<std::shared_ptr<Array>>(v.data);
+            return std::get<std::string>(a->items[0].data);
+        };
+        auto sortByName = [&]() {
+            std::sort(result->items.begin(), result->items.end(),
+                      [&](const Value& a, const Value& b) {
+                          return entryName(a) < entryName(b);
+                      });
+        };
 
         if (!hasWildcard) {
             struct stat st;
@@ -8127,12 +8165,13 @@ void registerCoreEfuns() {
                 while ((entry = ::readdir(dir)) != nullptr) {
                     std::string name = entry->d_name;
                     if (name == "." || name == "..") continue;
-                    result->items.emplace_back(name);
+                    result->items.push_back(makeEntry(name, path + "/" + name));
                 }
                 ::closedir(dir);
             } else {
-                result->items.emplace_back(lastComponent);
+                result->items.push_back(makeEntry(lastComponent, path));
             }
+            sortByName();
             return Value(result);
         }
 
@@ -8145,10 +8184,11 @@ void registerCoreEfuns() {
             std::string name = entry->d_name;
             if (name == "." || name == "..") continue;
             if (::fnmatch(lastComponent.c_str(), name.c_str(), 0) == 0) {
-                result->items.emplace_back(name);
+                result->items.push_back(makeEntry(name, dirPart + "/" + name));
             }
         }
         ::closedir(dir);
+        sortByName();
         return Value(result);
     });
 

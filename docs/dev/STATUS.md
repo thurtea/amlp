@@ -9,6 +9,96 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-30 (a further session, same day): `get_dir(string, int
+flags)` stat-flag argument. The already-registered `get_dir` efun
+extended to accept its optional 2nd argument instead of throwing on
+it: `flags == -1` now returns `({ name, size, mtime })` triples, every
+other value returns the plain name list. 817 tests passing (up from
+816). New `ROADMAP.md` row 2.59.**
+
+**Why this slice.** Row 2.58's own STATUS entry named this as the
+next-highest-frequency case of the same class as rows 2.57/2.58: an
+already-registered efun that rejects an argument shape real accepts and
+the corpora use. `get_dir` threw `LpcRuntimeError("get_dir: flags
+argument not implemented")` on any non-zero 2nd argument, and about 49
+distinct real call-site lines across the vendored corpora pass one (26
+pass `-1`, 19 pass `0x10`, a few `0x07` / `0x17`). Self-contained,
+filesystem plus array building, no new type, no VM work.
+
+**Real surface.** `func_spec.c:124` `mixed *get_dir(string, int
+default: 0);`; `efun_defs.c:94` records 2 args, the 2nd `T_NUMBER`.
+
+**Real semantics, traced from `file.c` `get_dir()` + `encode_stat()`,
+identical in the pinned 2.9 tree and the current clone
+`temp/fluffos/src/packages/core/file.cc`.**
+
+  - `encode_stat()` special-cases only `flags == -1`: it emits a
+    3-element array `({ name, size, mtime })` where `size` is
+    `(st->st_mode & S_IFDIR) ? -2 : st->st_size` (a directory reports
+    `-2`, a regular file its byte size) and `mtime` is `st_mtime`.
+  - Every other `flags` value falls to `encode_stat()`'s plain-name
+    branch. So `0`, and the `0x10` some newer mudlibs pass, all behave
+    identically: each entry is just the name string. A non-`-1` flag is
+    accepted, not an error.
+  - The result is sorted by name in both forms: real
+    `qsort((void *) v->item, count, ..., (flags == -1) ? parrcmp :
+    pstrcmp)`, where `parrcmp` compares `item[0].u.string`.
+  - A path that `stat()`s as a single existing file (not a glob, not a
+    directory) returns a 1-element array via `encode_stat()`.
+  - An invalid path returns int `0`.
+
+**Built.** The registered `get_dir` lambda in `EfunTable.cpp` now reads
+the optional 2nd argument (must be an int, else a clear throw),
+computes `wantStat = (flags == -1)`, and threads a small `makeEntry()`
+helper through both the directory-listing and glob branches that
+returns either a bare name string or, under `-1`, the
+`({ name, size, mtime })` triple (an extra `::stat()` per entry for the
+size and mtime). A `sortByName()` pass over the result, keyed on the
+name element for either shape, was added to match real's `qsort`. The
+glob-in-final-component matching, `.`/`..` exclusion, single-file case,
+and `checkValidPath` gating are unchanged.
+
+**Named local choices, neither a silent divergence.**
+
+  1. This driver's `get_dir` previously returned entries in raw
+     `readdir` order; it now sorts by name for every form, including
+     the no-flag path. Real always sorts, so this is a move toward
+     real, not away from it. The one pre-existing `get_dir` regression
+     test (`testGetDirMatchesGlobPatternInFinalPathComponentOnly`)
+     sorts the names itself before asserting, so it is unaffected.
+  2. A non-existent path: this driver returns an empty array where real
+     `get_dir()` returns int `0` for a missing parent directory. A
+     pre-existing minor divergence in this driver's `get_dir`, not
+     introduced or fixed here, left out of this row's scope.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`,
+`wiz_tools`, `lil`) plus the bundled `mudlib/` for a 2-argument
+`get_dir(`: about 49 distinct call-site lines, 26 passing `-1`
+(name/size/time triples, e.g. `get_dir(dir + tmp[x-1], -1)`,
+`get_dir("/", -1)`, `get_dir(sprintf("%s/", directory), -1)`), 19
+passing `0x10` (e.g. `get_dir("/lib/modules/*", 0x10)`,
+`get_dir(PlayerCommands, 0x10)`), plus a few `0x07` / `0x17`. Every one
+previously threw against this driver.
+
+**1 new regression test (817 total, up from 816):**
+`testGetDirFlagsFormReturnsStatTriplesOrNames` -- `get_dir("/", -1)`
+returns `({ name, size, mtime })` triples with a 5-byte file reporting
+`5`, a 3-byte file `3`, and a subdirectory `-2`, an `mtime` that is a
+plausible recent Unix timestamp, and the entries sorted by name;
+`get_dir("/*.txt", -1)` is the glob plus the triple shape;
+`get_dir("/alpha.txt", -1)` is a 1-element array holding one triple;
+`get_dir("/", 16)` (i.e. `0x10`) returns the same plain name strings as
+`get_dir("/")`; a missing path yields nothing without throwing; and a
+non-int flags argument throws. Every expected size is the literal byte
+length of the test file, not read back from this driver. The existing
+816 re-run unchanged.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.59
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-30 (a further session, same day): buffer value type, first
 slice. A new `Buffer` alternative in the `Value` variant plus the
 buffer efuns that need only the type and no external dependency:

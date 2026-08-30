@@ -1319,6 +1319,180 @@ void registerCoreEfuns() {
     // awareness in real FluffOS's own implementation despite the name).
     t.registerEfun("strwidth", sizeofImpl);
 
+    // int *str_to_arr(string) / string arr_to_str(int *) -- func_spec.c's
+    // USE_ICONV conversion pair
+    // (temp/reference/fluffos-2.9-ds2.08/func_spec.c:398-399), bodied in
+    // fliconv.c: f_str_to_arr() at :159, f_arr_to_str() at :178. The
+    // current locally-vendored clone (temp/fluffos/src/) dropped both
+    // when FluffOS moved to always-on Unicode -- ChangeLog.fluffos-2.x
+    // ("added str_to_arr, and arr_to_str efuns to convert between strings
+    // and UTF-32 arrays") is the last mention -- so the 2.9 ds2.08 tree
+    // is the sole reference, the same single-tree basis
+    // string_difference() (row 2.52) noted for itself. strwidth() just
+    // above is the third name in the same USE_ICONV block; it is left as
+    // its already-registered non-USE_ICONV `sizeof` alias, a pre-existing
+    // choice with its own row, not revisited here.
+    //
+    // Real semantics, traced from fliconv.c:
+    //   - str_to_arr(s): iconv-converts s from UTF-8 to UTF-32 over
+    //     SVALUE_STRLEN(sp)+1 bytes -- i.e. INCLUDING the terminating NUL
+    //     -- then returns an int array of the resulting 32-bit units
+    //     (len /= 4). Because the NUL is part of the converted input, the
+    //     returned array always carries a trailing 0 element:
+    //     str_to_arr("AB") -> ({ 65, 66, 0 }), str_to_arr("") -> ({ 0 }).
+    //     An embedded NUL byte likewise becomes a 0 element in place.
+    //   - arr_to_str(a): treats each array element as a UTF-32 code
+    //     point, appends a 0, iconv-converts UTF-32 -> UTF-8, and returns
+    //     the result via copy_and_push_string(), which stops at the first
+    //     NUL. So arr_to_str(({ 65, 66 })) -> "AB", an embedded 0
+    //     truncates: arr_to_str(({ 65, 0, 66 })) -> "A", and
+    //     arr_to_str(({})) -> "".
+    //   The two are inverses for valid text: arr_to_str(str_to_arr(s))
+    //   == s, since the trailing 0 str_to_arr appends is exactly the NUL
+    //   arr_to_str stops on.
+    //
+    // Named local choices, none a silent divergence:
+    //   - Implemented as a direct UTF-8 <-> code-point codec rather than
+    //     through a live iconv dependency. iconv "UTF-8" <-> "UTF-32" is
+    //     exactly a code-point transcode; real's translator name is
+    //     "UTF-32//TRANSLIT//IGNORE" on Linux and str_to_arr's one-time
+    //     warm-up call (translate_easy(newt->outgoing, " ")) exists only
+    //     to consume iconv's leading UTF-32 BOM, so the observable
+    //     LPC-level values are BOM-free code points -- what this codec
+    //     produces.
+    //   - Malformed input is ignored, matching real's "//IGNORE": a byte
+    //     that is not valid UTF-8 (bad lead byte, truncated or bad
+    //     continuation, overlong, surrogate, or > U+10FFFF) is skipped by
+    //     str_to_arr; an out-of-range, surrogate, or negative code point
+    //     is skipped by arr_to_str. A float array element is truncated to
+    //     an integer code point; any other non-integer element throws.
+    //   - max_string_length is not enforced (this driver has none, the
+    //     same situation add_a()/replace_html() are in).
+    //   A non-string argument to str_to_arr, or a non-array argument to
+    //   arr_to_str, throws LpcRuntimeError, this codebase's established
+    //   bad-shape precedent.
+    //
+    // Corpus call-site frequency, checked before implementing: grepped
+    // every vendored corpus under temp/ (core-lib, dead-souls,
+    // es2_mudlib, lima, nightmare3, reference-lpc-mud-library, wiz_tools,
+    // lil) plus the bundled mudlib/ for str_to_arr( / arr_to_str(: zero
+    // real LPC call sites. Motivation is FluffOS-surface parity, the same
+    // honestly-named basis as rows 2.46/2.50/2.51/2.52/2.53/2.54/2.55;
+    // UTF-8 round-tripping is independently verifiable by hand against
+    // known code points with no live-instance dependency.
+    {
+        auto decodeUtf8ToCodePoints = [](const std::string& s) -> std::vector<int64_t> {
+            std::vector<int64_t> out;
+            const size_t n = s.size();
+            size_t i = 0;
+            while (i < n) {
+                unsigned char c = static_cast<unsigned char>(s[i]);
+                int64_t cp;
+                int extra;
+                if (c < 0x80) {
+                    cp = c;
+                    extra = 0;
+                } else if ((c & 0xE0) == 0xC0) {
+                    cp = c & 0x1F;
+                    extra = 1;
+                } else if ((c & 0xF0) == 0xE0) {
+                    cp = c & 0x0F;
+                    extra = 2;
+                } else if ((c & 0xF8) == 0xF0) {
+                    cp = c & 0x07;
+                    extra = 3;
+                } else {
+                    ++i;  // stray continuation byte or 5/6-byte lead: skip
+                    continue;
+                }
+                if (i + static_cast<size_t>(extra) >= n) {
+                    ++i;  // truncated multibyte sequence at end of string
+                    continue;
+                }
+                bool ok = true;
+                for (int k = 1; k <= extra; ++k) {
+                    unsigned char cc = static_cast<unsigned char>(s[i + k]);
+                    if ((cc & 0xC0) != 0x80) {
+                        ok = false;
+                        break;
+                    }
+                    cp = (cp << 6) | (cc & 0x3F);
+                }
+                if (!ok) {
+                    ++i;
+                    continue;
+                }
+                // Reject overlong encodings, UTF-16 surrogates, and
+                // anything past the Unicode ceiling.
+                bool overlong = (extra == 1 && cp < 0x80) ||
+                                (extra == 2 && cp < 0x800) ||
+                                (extra == 3 && cp < 0x10000);
+                if (overlong || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                    i += static_cast<size_t>(extra) + 1;
+                    continue;
+                }
+                out.push_back(cp);
+                i += static_cast<size_t>(extra) + 1;
+            }
+            return out;
+        };
+        auto encodeCodePointUtf8 = [](std::string& out, int64_t cp) {
+            if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                return;  // real's //IGNORE
+            }
+            if (cp < 0x80) {
+                out += static_cast<char>(cp);
+            } else if (cp < 0x800) {
+                out += static_cast<char>(0xC0 | (cp >> 6));
+                out += static_cast<char>(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                out += static_cast<char>(0xE0 | (cp >> 12));
+                out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                out += static_cast<char>(0x80 | (cp & 0x3F));
+            } else {
+                out += static_cast<char>(0xF0 | (cp >> 18));
+                out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                out += static_cast<char>(0x80 | (cp & 0x3F));
+            }
+        };
+        t.registerEfun("str_to_arr", [decodeUtf8ToCodePoints](VM&, std::vector<Value>& args) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+                throw LpcRuntimeError("str_to_arr: expected a string argument");
+            }
+            auto out = std::make_shared<Array>();
+            for (int64_t cp : decodeUtf8ToCodePoints(std::get<std::string>(args[0].data))) {
+                out->items.push_back(Value(cp));
+            }
+            // Real converts SVALUE_STRLEN(sp)+1 bytes, so the terminating
+            // NUL always lands as a trailing 0 element.
+            out->items.push_back(Value(int64_t{0}));
+            return Value(out);
+        });
+        t.registerEfun("arr_to_str", [encodeCodePointUtf8](VM&, std::vector<Value>& args) -> Value {
+            if (args.empty() || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+                throw LpcRuntimeError("arr_to_str: expected an int array argument");
+            }
+            const auto& arr = std::get<std::shared_ptr<Array>>(args[0].data);
+            std::string out;
+            if (arr) {
+                for (const Value& el : arr->items) {
+                    int64_t cp;
+                    if (auto* n = std::get_if<int64_t>(&el.data)) {
+                        cp = *n;
+                    } else if (auto* d = std::get_if<double>(&el.data)) {
+                        cp = static_cast<int64_t>(*d);
+                    } else {
+                        throw LpcRuntimeError("arr_to_str: array element is not an integer");
+                    }
+                    if (cp == 0) break;  // copy_and_push_string stops at the NUL
+                    encodeCodePointUtf8(out, cp);
+                }
+            }
+            return Value(out);
+        });
+    }
+
     // mixed *map_array map(mixed *arr, string | function func, ...) --
     // real func_spec.cpp signature ("map_array map(...)": map_array is
     // the alias name, map is the real one -- same alias-before-real

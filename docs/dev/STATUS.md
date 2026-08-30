@@ -9,6 +9,114 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-30: `func_spec.c` `USE_ICONV` conversion pair,
+`str_to_arr(string)` and `arr_to_str(int *)`. A UTF-8 string decoded to
+an array of Unicode code points and back, implemented as a direct codec
+rather than through a live iconv dependency. Both self-contained, no LPC
+re-entry. 813 tests passing (up from 812). New `ROADMAP.md` row 2.56.**
+
+**Why this slice.** Continues the same one-package-at-a-time named sweep
+that rows 2.50-2.55 followed: pick the smallest still-real gap that
+needs no new subsystem, no buffer type, and no new dependency. Diffing
+`temp/reference/fluffos-2.9-ds2.08/func_spec.c` against this driver's
+registered efuns surfaced three unregistered names in the `#ifdef
+USE_ICONV` block: `set_encoding`, `to_utf8`, `utf8_to` (all need a live
+iconv translator and, for `set_encoding`, an interactive object) and the
+pair `str_to_arr` / `arr_to_str`, which are pure string/array transforms.
+A fourth name in that block, `strwidth`, is already registered here as
+its documented non-`USE_ICONV` `sizeof` alias and was left alone. So
+this slice is the two pure ones.
+
+**2.9-only surface.** `func_spec.c:398-399` declares `int
+*str_to_arr(string); string arr_to_str(int *);` inside `#ifdef
+USE_ICONV`, bodied in `fliconv.c` (`f_str_to_arr()` at line 159,
+`f_arr_to_str()` at line 178). The current locally-vendored clone
+`temp/fluffos/src/` has neither: whole-tree grep for `str_to_arr` /
+`arr_to_str` under `temp/fluffos/` hits only `docs/archive/
+ChangeLog.fluffos-2.x` ("added str_to_arr, and arr_to_str efuns to
+convert between strings and UTF-32 arrays") and one testsuite crasher.
+FluffOS moved to always-on Unicode and dropped both. So the pinned 2.9
+ds2.08 tree is the only reference, the same single-tree basis
+`string_difference()` (row 2.52) noted for itself.
+
+**Real semantics, traced from `fliconv.c`.**
+
+  - `str_to_arr(s)`: `translate(newt->outgoing, sp->u.string,
+    SVALUE_STRLEN(sp)+1, &len)` converts `s` from UTF-8 to UTF-32 over
+    its length *including* the terminating NUL, then `len /= 4` and the
+    resulting 32-bit units become the int array. Because the NUL is part
+    of the converted input, the returned array always carries a trailing
+    `0` element: `str_to_arr("AB")` is `({ 65, 66, 0 })`,
+    `str_to_arr("")` is `({ 0 })`. An embedded NUL byte likewise becomes
+    a `0` element in place.
+  - `arr_to_str(a)`: builds `int in[size+1]`, copies each element,
+    `in[size] = 0`, `translate(newt->incoming, (char *)in,
+    (size+1)*4, &len)` converts UTF-32 -> UTF-8, and
+    `copy_and_push_string(trans)` returns it as a C string, stopping at
+    the first NUL. So `arr_to_str(({ 65, 66 }))` is `"AB"`, an embedded
+    `0` truncates (`arr_to_str(({ 65, 0, 66 }))` is `"A"`),
+    `arr_to_str(({}))` is `""`.
+  - The two are inverses for valid text: `arr_to_str(str_to_arr(s)) ==
+    s`, the trailing `0` `str_to_arr` appends being exactly the NUL
+    `arr_to_str` stops on.
+
+**Named local choices, none a silent divergence.**
+
+  1. Implemented as a direct UTF-8 <-> code-point codec, not through a
+     live iconv dependency. iconv `"UTF-8"` <-> `"UTF-32"` is exactly a
+     code-point transcode; real's translator name is
+     `"UTF-32//TRANSLIT//IGNORE"` on Linux, and `str_to_arr`'s one-time
+     warm-up call (`translate_easy(newt->outgoing, " ")`) exists only to
+     consume iconv's leading UTF-32 BOM, so the observable LPC-level
+     values are BOM-free code points, which is what this codec produces.
+     Same kind of named engine substitution rows 2.12/2.53 made wrapping
+     PCRE2 and row 2.16's `hash()` made using OpenSSL EVP.
+  2. Malformed input is ignored, matching real's `//IGNORE`: an invalid
+     UTF-8 sequence (bad lead byte, truncated or bad continuation,
+     overlong, surrogate, or `> U+10FFFF`) is skipped by `str_to_arr`;
+     an out-of-range, surrogate, or negative code point is skipped by
+     `arr_to_str`. A float array element is truncated to an integer code
+     point; any other non-integer element throws.
+  3. `max_string_length` is not enforced (this driver has none, the same
+     situation `add_a()` / `replace_html()` are in).
+
+  A non-string argument to `str_to_arr`, or a non-array argument to
+  `arr_to_str`, throws `LpcRuntimeError`, this codebase's established
+  bad-shape precedent.
+
+**Built.** Registered in `EfunTable.cpp` immediately after `strwidth`,
+sharing two file-local lambdas: `decodeUtf8ToCodePoints(src)` and
+`encodeCodePointUtf8(out, cp)`. No new include or dependency.
+
+**Corpus call-site frequency, checked before implementing.** Grepped
+every vendored corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `nightmare3`, `reference-lpc-mud-library`,
+`wiz_tools`, `lil`) plus the bundled `mudlib/` for `str_to_arr(` /
+`arr_to_str(`: zero real LPC call sites. Motivation is FluffOS-surface
+parity, the same honestly-named basis as rows
+2.46/2.50/2.51/2.52/2.53/2.54/2.55; UTF-8 round-tripping is
+independently verifiable by hand against known code points with no
+live-instance dependency.
+
+**1 new regression test (813 total, up from 812):**
+`testStrToArrAndArrToStrRoundTripUtf8` -- `str_to_arr` on ASCII, the
+empty string, a 2-byte (`U+00E9`), a 3-byte (`U+20AC`) and a 4-byte
+(`U+1F600`) character each decode to one code point plus the trailing
+`0`; an embedded NUL byte yields a `0` element in place; a lone `0xFF`,
+a truncated 2-byte lead (`0xC3`), and a surrogate sequence (`0xED 0xA0
+0x80`) all drop out leaving just the terminator; `arr_to_str` performs
+the inverse encodings, truncates at an embedded `0`, and skips an
+out-of-range (`0x110000`) or surrogate (`0xD800`) code point;
+`arr_to_str(str_to_arr(s)) == s` for three mixed ASCII/multibyte
+strings; and a non-string to `str_to_arr`, a non-array to `arr_to_str`,
+and a non-integer array element reached before any `0` all throw. Every
+expected value is a hand-computed UTF-8 encoding of a known code point,
+not read back from this driver.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.56
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` not
+touched this pass.
+
 **2026-08-29: `dwlib.spec` markup-escaping pair, `replace_html(string)`
 and `replace_mxp(string)`. Both bodied by one shared helper in real,
 both self-contained pure string transforms. 812 tests passing (up from

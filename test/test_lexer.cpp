@@ -18254,6 +18254,104 @@ static void testPcreReplaceSubstitutesSelectedGroups() {
     std::cout << "testPcreReplaceSubstitutesSelectedGroups OK\n";
 }
 
+// str_to_arr(string) / arr_to_str(int *) -- func_spec.c's USE_ICONV
+// conversion pair (temp/reference/fluffos-2.9-ds2.08/func_spec.c:398-399,
+// bodied in fliconv.c f_str_to_arr()/f_arr_to_str()). str_to_arr decodes
+// a UTF-8 string to an array of code points, always with the terminating
+// NUL as a trailing 0 element (real converts SVALUE_STRLEN(sp)+1 bytes);
+// arr_to_str encodes an array of UTF-32 code points back to UTF-8,
+// stopping at the first 0 (real's copy_and_push_string). Every expected
+// value below is a hand-computed UTF-8 encoding of a known code point,
+// with no live-instance dependency -- see EfunTable.cpp's own
+// registration comment for the full citation trail.
+static void testStrToArrAndArrToStrRoundTripUtf8() {
+    ObjectVarHarness harness;
+    harness.writeFile("/utf32conv_probe.c",
+        "mixed sta(string s) { return str_to_arr(s); }\n"
+        "string ats(int *a) { return arr_to_str(a); }\n"
+        "int sta_badarg() { mixed x = 7; return sizeof(str_to_arr(x)); }\n"
+        "int ats_badarg() { mixed x = \"s\"; return sizeof(arr_to_str(x)); }\n"
+        "int ats_badelem() { mixed *a = ({ 65, \"x\" }); return sizeof(arr_to_str(a)); }\n");
+    auto ob = harness.objects.cloneObject("/utf32conv_probe");
+    assert(ob != nullptr);
+
+    auto staValue = [&](const std::string& s) -> amlp::Value {
+        return harness.vm.callFunction(ob, "sta", {amlp::Value(s)});
+    };
+    auto sta = [&](const std::string& s) -> std::vector<int64_t> {
+        amlp::Value r = staValue(s);
+        auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&r.data);
+        assert(arr && *arr);
+        std::vector<int64_t> out;
+        for (const amlp::Value& v : (*arr)->items) {
+            assert(std::holds_alternative<int64_t>(v.data));
+            out.push_back(std::get<int64_t>(v.data));
+        }
+        return out;
+    };
+    auto mkints = [](std::initializer_list<int64_t> ns) {
+        auto a = std::make_shared<amlp::Array>();
+        for (int64_t n : ns) a->items.push_back(amlp::Value(n));
+        return amlp::Value(a);
+    };
+    auto ats = [&](amlp::Value arr) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, "ats", {std::move(arr)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    // str_to_arr: ASCII plus the always-present trailing 0.
+    assert(sta("AB") == (std::vector<int64_t>{65, 66, 0}));
+    // The empty string still carries its terminator.
+    assert(sta("") == (std::vector<int64_t>{0}));
+    // 2-byte U+00E9 (0xC3 0xA9), 3-byte U+20AC (0xE2 0x82 0xAC),
+    // 4-byte U+1F600 (0xF0 0x9F 0x98 0x80): decoded to one code point each.
+    assert(sta("\xC3\xA9") == (std::vector<int64_t>{0xE9, 0}));
+    assert(sta("\xE2\x82\xAC") == (std::vector<int64_t>{0x20AC, 0}));
+    assert(sta("\xF0\x9F\x98\x80") == (std::vector<int64_t>{0x1F600, 0}));
+    // An embedded NUL byte becomes a 0 element in place, then the
+    // terminator adds another.
+    assert(sta(std::string("A\0B", 3)) == (std::vector<int64_t>{65, 0, 66, 0}));
+    // Malformed input is ignored (real's //IGNORE): a lone 0xFF, a
+    // truncated 2-byte lead, and a surrogate code point all drop out,
+    // leaving just the terminator.
+    assert(sta("\xFF") == (std::vector<int64_t>{0}));
+    assert(sta("\xC3") == (std::vector<int64_t>{0}));
+    assert(sta("\xED\xA0\x80") == (std::vector<int64_t>{0}));
+
+    // arr_to_str: inverse encodings.
+    assert(ats(mkints({65, 66})) == "AB");
+    assert(ats(mkints({})) == "");
+    assert(ats(mkints({0xE9})) == "\xC3\xA9");
+    assert(ats(mkints({0x20AC})) == "\xE2\x82\xAC");
+    assert(ats(mkints({0x1F600})) == "\xF0\x9F\x98\x80");
+    // An embedded 0 truncates, like copy_and_push_string stopping at NUL.
+    assert(ats(mkints({65, 0, 66})) == "A");
+    // Out-of-range and surrogate code points are skipped.
+    assert(ats(mkints({65, 0x110000, 66})) == "AB");
+    assert(ats(mkints({65, 0xD800, 66})) == "AB");
+
+    // Round trip: arr_to_str(str_to_arr(s)) == s, the trailing 0 being
+    // exactly what arr_to_str stops on.
+    for (const char* s : {"plain ascii", "caf\xC3\xA9 \xE2\x82\xAC 5", "\xF0\x9F\x98\x80!"}) {
+        assert(ats(staValue(s)) == std::string(s));
+    }
+
+    // A non-string to str_to_arr, a non-array to arr_to_str, and a
+    // non-integer array element reached before any 0 all throw.
+    for (const char* fn : {"sta_badarg", "ats_badarg", "ats_badelem"}) {
+        bool threw = false;
+        try {
+            harness.vm.callFunction(ob, fn, {});
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testStrToArrAndArrToStrRoundTripUtf8 OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -27081,6 +27179,7 @@ int main() {
     testPcreExtractReturnsCaptureGroups();
     testPcreMatchAllReturnsEveryMatch();
     testPcreReplaceSubstitutesSelectedGroups();
+    testStrToArrAndArrToStrRoundTripUtf8();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

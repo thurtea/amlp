@@ -246,6 +246,12 @@ std::string valueToDebugString(const Value& v, int indent) {
         out += " :)";
         return out;
     }
+    // Real svalue_to_string() (sprintf.c) renders a T_BUFFER as the
+    // literal "<buffer>" -- no byte contents, no length. This is what
+    // %O, printf("%O"), and identify() show for one.
+    if (std::holds_alternative<std::shared_ptr<Buffer>>(v.data)) {
+        return "<buffer>";
+    }
     return "!ERROR: GARBAGE SVALUE!";
 }
 
@@ -305,6 +311,14 @@ void serializeValue(std::ostream& out, const Value& v) {
                 serializeValue(out, entry.second);
             }
         }
+    } else if (std::holds_alternative<std::shared_ptr<Buffer>>(v.data)) {
+        // Real object.c save_svalue()'s switch has no T_BUFFER case at
+        // all (confirmed directly: it falls straight through and writes
+        // nothing), so real FluffOS cannot save a buffer in an object
+        // variable either. This driver writes void in its place, the
+        // same as it does for an object reference or closure just below,
+        // so the save file stays well formed and round-trips as 0.
+        out << 'N';
     } else {
         // Object references and closures cannot survive a save/restore
         // round trip (a saved object reference has nothing to point to
@@ -546,7 +560,13 @@ void writeRealSaveValue(std::string& out, const Value& v) {
         }
         out += "])";
     } else {
-        throw LpcRuntimeError("save_variable: cannot save an object or function-pointer value");
+        // Real object.c save_svalue()'s switch has no case for an
+        // object reference, a function pointer, or a buffer (it falls
+        // through and writes nothing, producing truncated unparsable
+        // output). This driver raises a clear error for all three
+        // instead, matching the established choice for the first two.
+        throw LpcRuntimeError(
+            "save_variable: cannot save an object, function-pointer, or buffer value");
     }
 }
 
@@ -1306,6 +1326,12 @@ void registerCoreEfuns() {
             }
             if (auto* str = std::get_if<std::string>(&args[0].data)) {
                 return Value(static_cast<int64_t>(str->size()));
+            }
+            // sizeof(buffer) is the buffer's byte length in real
+            // FluffOS (row 2.33a). The corpus-common "read_buffer(b,
+            // sizeof(b))" idiom depends on this.
+            if (auto* buf = std::get_if<std::shared_ptr<Buffer>>(&args[0].data)) {
+                return Value(static_cast<int64_t>(*buf ? (*buf)->bytes.size() : 0));
             }
         }
         return Value(int64_t{0});
@@ -3780,6 +3806,242 @@ void registerCoreEfuns() {
     t.registerEfun("classp", [](VM&, std::vector<Value>&) -> Value {
         return Value(static_cast<int64_t>(0));
     });
+
+    // ---------------------------------------------------------------------
+    // ROADMAP.md row 2.33a: the buffer value type plus the buffer efuns
+    // that need only the type and no new dependency. Semantics traced
+    // from fluffos-2.9-ds2.08/buffer.c and efuns_main.c (f_allocate_buffer
+    // / f_bufferp / f_read_buffer / f_write_buffer), plus the current
+    // clone's f__to_buffer() / svalue_to_buffer_bytes() for to_buffer
+    // (2.9 has no such efun). The iconv-dependent charset efuns
+    // (string_encode/string_decode/buffer_transcode/set_encoding/
+    // query_encoding), zlib compression, binary socket mode, and the VM
+    // operators on buffers (b[i], b[i..j], buffer + x) are all
+    // deliberately out of this slice, staying on row 2.33 and their own
+    // follow-ups.
+    // ---------------------------------------------------------------------
+
+    // int bufferp(mixed) -- real f_bufferp(): 1 for a T_BUFFER value,
+    // 0 for anything else. Same plain type-tag shape as intp/stringp.
+    t.registerEfun("bufferp", [](VM&, std::vector<Value>& args) -> Value {
+        bool isBuf = !args.empty() &&
+                     std::holds_alternative<std::shared_ptr<Buffer>>(args[0].data);
+        return Value(static_cast<int64_t>(isBuf ? 1 : 0));
+    });
+
+    // buffer allocate_buffer(int size) -- real buffer.c allocate_buffer():
+    // "size < 0 || size > max_buffer_size" errors "Illegal buffer size.",
+    // size 0 returns a shared zero-length buffer, otherwise a calloc-
+    // zeroed buffer of `size` bytes. This driver has no max_buffer_size
+    // config (the same situation add_a()/replace_html() are in for
+    // max_string_length), so a generous fixed cap stands in for it; a
+    // non-int argument throws, this codebase's bad-shape precedent.
+    t.registerEfun("allocate_buffer", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("allocate_buffer: expected an int size argument");
+        }
+        int64_t size = std::get<int64_t>(args[0].data);
+        // Local stand-in for real's max_buffer_size, purely a sanity
+        // ceiling so a bogus size cannot request a multi-gigabyte
+        // allocation; real's own default cap is configuration-defined.
+        constexpr int64_t kMaxBufferSize = 256 * 1024 * 1024;
+        if (size < 0 || size > kMaxBufferSize) {
+            throw LpcRuntimeError("Illegal buffer size.");
+        }
+        auto buf = std::make_shared<Buffer>();
+        buf->bytes.assign(static_cast<size_t>(size), 0);
+        return Value(buf);
+    });
+
+    // mixed read_buffer(string | buffer src, void | int start,
+    //                   void | int len)
+    // -- real f_read_buffer() + buffer.c read_buffer(). Two forms:
+    //   - src is a buffer: returns a STRING of the bytes in
+    //     [start, start+len), len 0 meaning "to the end of the buffer",
+    //     a negative start counting back from the end. Real stops at the
+    //     first NUL byte inside that range ("for (...; *str && size <
+    //     len; ...)"). len < 0, start still negative after adjustment,
+    //     or start >= size all return int 0.
+    //   - src is a string: reads that FILE's bytes over the same
+    //     start/len window and returns them as a NEW buffer; a missing
+    //     file or an empty read returns int 0.
+    t.registerEfun("read_buffer", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty()) {
+            throw LpcRuntimeError("read_buffer: expected (string | buffer, void | int, void | int)");
+        }
+        int64_t start = 0, len = 0;
+        if (args.size() > 1) {
+            if (!std::holds_alternative<int64_t>(args[1].data)) {
+                throw LpcRuntimeError("read_buffer: start argument must be an int");
+            }
+            start = std::get<int64_t>(args[1].data);
+        }
+        if (args.size() > 2) {
+            if (!std::holds_alternative<int64_t>(args[2].data)) {
+                throw LpcRuntimeError("read_buffer: len argument must be an int");
+            }
+            len = std::get<int64_t>(args[2].data);
+        }
+
+        if (auto* bp = std::get_if<std::shared_ptr<Buffer>>(&args[0].data)) {
+            const std::vector<unsigned char>& b = (*bp)->bytes;
+            int64_t size = static_cast<int64_t>(b.size());
+            if (len < 0) return Value(int64_t{0});
+            if (start < 0) {
+                start = size + start;
+                if (start < 0) return Value(int64_t{0});
+            }
+            if (len == 0) len = size;
+            if (start >= size) return Value(int64_t{0});
+            if (start + len > size) len = size - start;
+            std::string out;
+            for (int64_t i = 0; i < len; ++i) {
+                unsigned char c = b[static_cast<size_t>(start + i)];
+                if (c == 0) break;  // real reader stops at the first NUL
+                out.push_back(static_cast<char>(c));
+            }
+            return Value(out);
+        }
+
+        if (auto* sp = std::get_if<std::string>(&args[0].data)) {
+            // File form: read the file's bytes and hand them back as a
+            // buffer. Same path gating and offset rules read_bytes uses.
+            auto gated = checkValidPath(vm, *sp, false, "read_buffer");
+            if (!gated) return Value(int64_t{0});
+            std::string path = vm.resolveMudlibPath(*gated);
+            if (len < 0) return Value(int64_t{0});
+            std::ifstream f(path, std::ios::binary | std::ios::ate);
+            if (!f) return Value(int64_t{0});
+            int64_t fsize = static_cast<int64_t>(f.tellg());
+            if (start < 0) start = fsize + start;
+            if (start < 0 || start >= fsize) return Value(int64_t{0});
+            if (len == 0) len = fsize;
+            if (start + len > fsize) len = fsize - start;
+            f.seekg(start);
+            auto buf = std::make_shared<Buffer>();
+            buf->bytes.resize(static_cast<size_t>(len));
+            f.read(reinterpret_cast<char*>(buf->bytes.data()), len);
+            auto got = f.gcount();
+            if (got <= 0) return Value(int64_t{0});
+            buf->bytes.resize(static_cast<size_t>(got));
+            return Value(buf);
+        }
+
+        throw LpcRuntimeError("read_buffer: first argument must be a string or a buffer");
+    });
+
+    // int write_buffer(string | buffer dest, int start,
+    //                  string | buffer | int data)
+    // -- real f_write_buffer() + buffer.c write_buffer(). dest a string
+    // delegates to the file writer (write_bytes), which takes a string
+    // data argument only. dest a buffer writes `data` into it in place:
+    // an int is written as its 4 bytes in network byte order (htonl), a
+    // string or buffer as its raw bytes. A negative start counts back
+    // from the end; a write that would run past the end of the (fixed
+    // size) buffer is refused and returns 0, a successful write returns
+    // 1. The buffer is mutated in place, not reallocated.
+    t.registerEfun("write_buffer", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 || !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("write_buffer: expected (string | buffer, int, string | buffer | int)");
+        }
+        int64_t start = std::get<int64_t>(args[1].data);
+
+        if (auto* dp = std::get_if<std::string>(&args[0].data)) {
+            if (!std::holds_alternative<std::string>(args[2].data)) {
+                throw LpcRuntimeError("write_buffer: writing to a file requires a string data argument");
+            }
+            const std::string& data = std::get<std::string>(args[2].data);
+            auto gated = checkValidPath(vm, *dp, true, "write_buffer");
+            if (!gated) return Value(int64_t{0});
+            std::string path = vm.resolveMudlibPath(*gated);
+            std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+            if (!f) {
+                std::ofstream create(path, std::ios::binary);
+                if (!create) return Value(int64_t{0});
+                create.close();
+                f.open(path, std::ios::binary | std::ios::in | std::ios::out);
+                if (!f) return Value(int64_t{0});
+            }
+            f.seekg(0, std::ios::end);
+            int64_t fsize = static_cast<int64_t>(f.tellg());
+            if (start < 0) start = fsize + start;
+            if (start < 0 || start > fsize) return Value(int64_t{0});
+            f.seekp(start);
+            f.write(data.data(), static_cast<std::streamsize>(data.size()));
+            return Value(static_cast<int64_t>(f.good() ? 1 : 0));
+        }
+
+        auto* dbp = std::get_if<std::shared_ptr<Buffer>>(&args[0].data);
+        if (!dbp || !*dbp) {
+            throw LpcRuntimeError("write_buffer: first argument must be a string or a buffer");
+        }
+        std::vector<unsigned char>& dst = (*dbp)->bytes;
+
+        // Assemble the bytes to write from the third argument.
+        std::vector<unsigned char> payload;
+        if (auto* iv = std::get_if<int64_t>(&args[2].data)) {
+            uint32_t net = htonl(static_cast<uint32_t>(*iv & 0xFFFFFFFFu));
+            payload.resize(sizeof(uint32_t));
+            std::memcpy(payload.data(), &net, sizeof(uint32_t));
+        } else if (auto* svp = std::get_if<std::string>(&args[2].data)) {
+            payload.assign(svp->begin(), svp->end());
+        } else if (auto* bvp = std::get_if<std::shared_ptr<Buffer>>(&args[2].data)) {
+            if (*bvp) payload = (*bvp)->bytes;
+        } else {
+            throw LpcRuntimeError("write_buffer: data argument must be a string, a buffer, or an int");
+        }
+
+        int64_t size = static_cast<int64_t>(dst.size());
+        if (start < 0) {
+            start = size + start;
+            if (start < 0) return Value(int64_t{0});
+        }
+        if (start + static_cast<int64_t>(payload.size()) > size) {
+            return Value(int64_t{0});  // real refuses to write past the end
+        }
+        std::memcpy(dst.data() + start, payload.data(), payload.size());
+        return Value(int64_t{1});
+    });
+
+    // buffer to_buffer(string | buffer | mixed *) and its internal name
+    // _to_buffer -- real current-clone f__to_buffer() /
+    // svalue_to_buffer_bytes(): a buffer passes through unchanged; a
+    // string becomes a buffer of its raw bytes; an array must contain
+    // only ints 0..255 and becomes one byte per element, otherwise
+    // "Illegal array item in buffer conversion: must be ints 0..255.".
+    // Any other argument type errors.
+    auto toBufferImpl = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) {
+            throw LpcRuntimeError("to_buffer: expected (string | buffer | int *)");
+        }
+        if (std::holds_alternative<std::shared_ptr<Buffer>>(args[0].data)) {
+            return args[0];
+        }
+        if (auto* sp = std::get_if<std::string>(&args[0].data)) {
+            auto buf = std::make_shared<Buffer>();
+            buf->bytes.assign(sp->begin(), sp->end());
+            return Value(buf);
+        }
+        if (auto* ap = std::get_if<std::shared_ptr<Array>>(&args[0].data)) {
+            auto buf = std::make_shared<Buffer>();
+            if (*ap) {
+                buf->bytes.reserve((*ap)->items.size());
+                for (const Value& item : (*ap)->items) {
+                    auto* n = std::get_if<int64_t>(&item.data);
+                    if (!n || *n < 0 || *n > 255) {
+                        throw LpcRuntimeError(
+                            "Illegal array item in buffer conversion: must be ints 0..255.");
+                    }
+                    buf->bytes.push_back(static_cast<unsigned char>(*n));
+                }
+            }
+            return Value(buf);
+        }
+        throw LpcRuntimeError(
+            "Cannot convert value to buffer: expected string or array of ints 0..255.");
+    };
+    t.registerEfun("to_buffer", toBufferImpl);
+    t.registerEfun("_to_buffer", toBufferImpl);
 
     // int clonep(mixed default: this_object()) -- real efuns_main.c's
     // f_clonep(): true unless the argument is the master/blueprint
@@ -6810,6 +7072,14 @@ void registerCoreEfuns() {
             }
             return Value(result);
         }
+        // Real copy() of a buffer allocates a fresh buffer with the same
+        // bytes (a distinct value, unequal by identity to the original),
+        // not a shared reference (row 2.33a).
+        if (auto* buf = std::get_if<std::shared_ptr<Buffer>>(&args[0].data)) {
+            auto result = std::make_shared<Buffer>();
+            if (*buf) result->bytes = (*buf)->bytes;
+            return Value(result);
+        }
         return args[0];
     });
 
@@ -8554,6 +8824,10 @@ void registerCoreEfuns() {
             return Value(std::string("mapping"));
         if (std::holds_alternative<std::shared_ptr<Closure>>(v.data))
             return Value(std::string("function"));
+        // T_BUFFER -> "buffer" in real interpret.c's type_names[] (row
+        // 2.33a).
+        if (std::holds_alternative<std::shared_ptr<Buffer>>(v.data))
+            return Value(std::string("buffer"));
         // monostate (void/undefined)
         return Value(std::string("int"));
     });
@@ -10397,18 +10671,35 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(-1));
     });
 
-    // int crc32(string) -- real crc32.c's own compute_crc32(): standard
-    // reflected CRC-32 (polynomial 0xedb88320, confirmed directly against
-    // crctab.h's own generated table), seeded to 0xFFFFFFFF, but with NO
-    // final complement step -- confirmed directly by reading
-    // compute_crc32() itself ("return crc;", no "^ 0xFFFFFFFF" anywhere),
-    // a real, deliberate divergence from the textbook/zlib CRC-32 this
-    // implementation would otherwise match exactly. crc32("") therefore
-    // legitimately equals the raw seed, 0xFFFFFFFF (4294967295), not 0 --
-    // confirmed as a regression test rather than assumed.
+    // int crc32(string | buffer) -- real crc32.c's own compute_crc32():
+    // standard reflected CRC-32 (polynomial 0xedb88320, confirmed
+    // directly against crctab.h's own generated table), seeded to
+    // 0xFFFFFFFF, but with NO final complement step -- confirmed directly
+    // by reading compute_crc32() itself ("return crc;", no "^ 0xFFFFFFFF"
+    // anywhere), a real, deliberate divergence from the textbook/zlib
+    // CRC-32 this implementation would otherwise match exactly.
+    // crc32("") therefore legitimately equals the raw seed, 0xFFFFFFFF
+    // (4294967295), not 0 -- confirmed as a regression test rather than
+    // assumed. Real f_crc32() (efuns_main.c) also accepts a buffer
+    // ("func_spec.c: int crc32(string OR_BUFFER)"), running the identical
+    // CRC over the buffer's raw bytes -- wired here as part of row 2.33a.
     t.registerEfun("crc32", [](VM&, std::vector<Value>& args) -> Value {
-        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
-            throw LpcRuntimeError("crc32: expected a string argument");
+        const unsigned char* data = nullptr;
+        size_t len = 0;
+        std::string strHolder;
+        if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
+            strHolder = std::get<std::string>(args[0].data);
+            data = reinterpret_cast<const unsigned char*>(strHolder.data());
+            len = strHolder.size();
+        } else if (!args.empty()) {
+            if (auto* buf = std::get_if<std::shared_ptr<Buffer>>(&args[0].data); buf && *buf) {
+                data = (*buf)->bytes.data();
+                len = (*buf)->bytes.size();
+            } else {
+                throw LpcRuntimeError("crc32: expected a string or buffer argument");
+            }
+        } else {
+            throw LpcRuntimeError("crc32: expected a string or buffer argument");
         }
         static uint32_t table[256];
         static bool initialized = false;
@@ -10423,8 +10714,8 @@ void registerCoreEfuns() {
             initialized = true;
         }
         uint32_t crc = 0xFFFFFFFFu;
-        for (unsigned char ch : std::get<std::string>(args[0].data)) {
-            crc = table[(crc ^ ch) & 0xffu] ^ (crc >> 8);
+        for (size_t i = 0; i < len; ++i) {
+            crc = table[(crc ^ data[i]) & 0xffu] ^ (crc >> 8);
         }
         return Value(static_cast<int64_t>(crc));
     });

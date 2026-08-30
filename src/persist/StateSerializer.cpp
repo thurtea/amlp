@@ -121,6 +121,12 @@ void serializeWorldValue(std::ostream& out, const Value& v, const IdOfObject& id
         }
         serializeClosure(out, **cv, idOfObject);
     } else {
+        // Nil, Symbol, and (as of row 2.33a) a buffer: none is object-
+        // reference or closure shaped, and real FluffOS cannot save a
+        // buffer at all (save_svalue() has no T_BUFFER case). Written as
+        // void here; a future slice could add a real B<len>:<bytes> tag
+        // so a buffer survives a hotboot, since this whole-world format
+        // is this driver's own and not bound by real save_svalue().
         out << 'N';
     }
 }

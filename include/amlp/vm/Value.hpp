@@ -12,6 +12,7 @@ class LpcObject;
 struct Array;
 struct Mapping;
 struct Closure;
+struct Buffer;
 
 // DGD's real "nil" literal (ROADMAP.md row 1.2/1.3's greenlit slice,
 // row 1.10's own minimal real piece). A stateless marker, no payload --
@@ -50,6 +51,13 @@ struct Symbol {
     std::string name;
 };
 
+// The buffer alternative is deliberately kept LAST in this variant.
+// src/vm/Value.cpp's valuesEqual() is the only place that reads
+// data.index() for logic (an "a.index() != b.index()" fast path), so
+// appending here keeps every existing alternative at its current index
+// and gives Buffer the new highest one. Nothing in the tree does a
+// numeric std::get<N>, std::visit, or exhaustive switch over this
+// variant (checked directly), so a new trailing member is additive.
 using ValueVariant = std::variant<
     std::monostate,
     Nil,
@@ -60,7 +68,8 @@ using ValueVariant = std::variant<
     std::shared_ptr<LpcObject>,
     std::shared_ptr<Array>,
     std::shared_ptr<Mapping>,
-    std::shared_ptr<Closure>
+    std::shared_ptr<Closure>,
+    std::shared_ptr<Buffer>
 >;
 
 struct Value {
@@ -113,6 +122,21 @@ private:
 
 struct Array {
     std::vector<Value> items;
+};
+
+// Real LPC "buffer" value (MudOS/FluffOS buffer_t, buffer.h: an
+// "unsigned short ref; unsigned int size; unsigned char item[size]").
+// A fixed-size, zero-initialised, mutable-in-place byte array: the size
+// is set once at allocate_buffer() time and never changes (real
+// write_buffer() explicitly refuses to write past the end because it
+// "can't reallocate the buffer here"). Holds only bytes, never a
+// Value, so it can never take part in a reference cycle. Shared by
+// std::shared_ptr the same way Array/Mapping/Closure are; real buffers
+// are refcounted (buffer_t.ref) and "==" between two buffers is
+// pointer identity (eoperators.c f_eq's T_BUFFER case), which
+// shared_ptr equality gives directly.
+struct Buffer {
+    std::vector<unsigned char> bytes;
 };
 
 struct Mapping {

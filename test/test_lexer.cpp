@@ -18515,6 +18515,133 @@ static void testStrsrchIntNeedleAndBackwardFlag() {
     std::cout << "testStrsrchIntNeedleAndBackwardFlag OK\n";
 }
 
+static void testBufferTypeAndCoreEfuns() {
+    ObjectVarHarness harness;
+    harness.writeFile("/buffer_probe.c",
+        // bufferp
+        "int bp_buf()  { return bufferp(allocate_buffer(4)); }\n"
+        "int bp_str()  { return bufferp(\"x\"); }\n"
+        "int bp_int()  { return bufferp(7); }\n"
+        "int bp_arr()  { return bufferp(({1, 2})); }\n"
+        // allocate_buffer size rules
+        "int sz(int n) { return sizeof(allocate_buffer(n)); }\n"
+        "int slen()    { return strlen(allocate_buffer(6)); }\n"
+        "int alloc_neg() { mixed b = allocate_buffer(-1); return sizeof(b); }\n"
+        "string tn()   { return typeof(allocate_buffer(1)); }\n"
+        // write/read round trip
+        "string rt() { mixed b = allocate_buffer(5); write_buffer(b, 0, \"AB\");\n"
+        "              return read_buffer(b, 0, 2); }\n"
+        "string rt_to_end() { mixed b = allocate_buffer(5); write_buffer(b, 0, \"AB\");\n"
+        "              return read_buffer(b); }\n"
+        "int rt_pastend() { mixed b = allocate_buffer(3); return write_buffer(b, 2, \"XY\"); }\n"
+        "int rt_fits()    { mixed b = allocate_buffer(3); return write_buffer(b, 1, \"XY\"); }\n"
+        "string rt_negstart() { mixed b = allocate_buffer(4); write_buffer(b, 0, \"abcd\");\n"
+        "              return read_buffer(b, -2, 2); }\n"
+        // int written in network byte order: 1094861636 is 0x41424344,
+        // whose big-endian bytes are 'A' 'B' 'C' 'D'.
+        "string rt_int() { mixed b = allocate_buffer(4); write_buffer(b, 0, 1094861636);\n"
+        "              return read_buffer(b, 0, 4); }\n"
+        // to_buffer
+        "int tb_str_sz()  { return sizeof(to_buffer(\"hi\")); }\n"
+        "string tb_str()  { return read_buffer(to_buffer(\"hi\"), 0, 2); }\n"
+        "string tb_arr()  { return read_buffer(to_buffer(({65, 66, 67})), 0, 3); }\n"
+        "int tb_bad_hi()  { return sizeof(to_buffer(({65, 256}))); }\n"
+        "int tb_bad_ty()  { return sizeof(to_buffer(({65, \"x\"}))); }\n"
+        "int tb_ident()   { mixed b = allocate_buffer(2); return b == to_buffer(b); }\n"
+        // identity vs aliasing
+        "int eq_distinct() { return allocate_buffer(2) == allocate_buffer(2); }\n"
+        "int eq_alias()    { mixed b = allocate_buffer(2); mixed c = b; return b == c; }\n"
+        "int eq_copy()     { mixed b = allocate_buffer(2); mixed c = copy(b); return b == c; }\n"
+        "int copy_sz()     { mixed b = allocate_buffer(3); return sizeof(copy(b)); }\n"
+        // file-path forms
+        "mixed rb_file()  { return read_buffer(\"/bin.dat\"); }\n"
+        "int rb_file_sz() { return sizeof(read_buffer(\"/bin.dat\")); }\n"
+        "int wb_file()    { return write_buffer(\"/out.dat\", 0, \"hello\"); }\n");
+    harness.writeFile("/bin.dat", "\x01\x02\x03\x04\x05");
+    auto ob = harness.objects.cloneObject("/buffer_probe");
+    assert(ob != nullptr);
+
+    auto callI = [&](const char* fn) -> int64_t {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<int64_t>(r.data));
+        return std::get<int64_t>(r.data);
+    };
+    auto callS = [&](const char* fn) -> std::string {
+        amlp::Value r = harness.vm.callFunction(ob, fn, {});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+    auto throws = [&](const char* fn) -> bool {
+        try { harness.vm.callFunction(ob, fn, {}); return false; }
+        catch (const amlp::LpcRuntimeError&) { return true; }
+    };
+
+    // bufferp: true only for a buffer.
+    assert(callI("bp_buf") == 1);
+    assert(callI("bp_str") == 0);
+    assert(callI("bp_int") == 0);
+    assert(callI("bp_arr") == 0);
+
+    // allocate_buffer: a buffer of N zero bytes; sizeof/strlen give N;
+    // size 0 is legal; a negative size throws "Illegal buffer size.".
+    {
+        amlp::Value r = harness.vm.callFunction(ob, "sz", {amlp::Value(int64_t{0})});
+        assert(std::holds_alternative<int64_t>(r.data) && std::get<int64_t>(r.data) == 0);
+        r = harness.vm.callFunction(ob, "sz", {amlp::Value(int64_t{5})});
+        assert(std::holds_alternative<int64_t>(r.data) && std::get<int64_t>(r.data) == 5);
+    }
+    assert(callI("slen") == 6);
+    assert(throws("alloc_neg"));
+    assert(callS("tn") == "buffer");
+
+    // write_buffer then read_buffer round trips; read stops at the first
+    // NUL; a write past the fixed end is refused (0), one that fits is 1;
+    // a negative start counts from the end.
+    assert(callS("rt") == "AB");
+    assert(callS("rt_to_end") == "AB");   // bytes 2..4 are 0, so read stops
+    assert(callI("rt_pastend") == 0);
+    assert(callI("rt_fits") == 1);
+    assert(callS("rt_negstart") == "cd");
+    // An int is written as its 4 bytes in network (big-endian) order.
+    assert(callS("rt_int") == "ABCD");
+
+    // to_buffer: string -> its bytes, int array -> one byte per element,
+    // a bad element (out of 0..255, or not an int) throws, a buffer
+    // passes through by identity.
+    assert(callI("tb_str_sz") == 2);
+    assert(callS("tb_str") == "hi");
+    assert(callS("tb_arr") == "ABC");
+    assert(throws("tb_bad_hi"));
+    assert(throws("tb_bad_ty"));
+    assert(callI("tb_ident") == 1);
+
+    // Equality is pointer identity: two allocations are unequal, an
+    // alias is equal, and copy() makes a distinct (unequal) buffer.
+    assert(callI("eq_distinct") == 0);
+    assert(callI("eq_alias") == 1);
+    assert(callI("eq_copy") == 0);
+    assert(callI("copy_sz") == 3);
+
+    // File-path forms: read_buffer(filename) returns a buffer of the
+    // file's bytes; write_buffer(filename, ...) writes to the file.
+    {
+        amlp::Value r = harness.vm.callFunction(ob, "rb_file", {});
+        auto* bp = std::get_if<std::shared_ptr<amlp::Buffer>>(&r.data);
+        assert(bp && *bp);
+        assert((*bp)->bytes == (std::vector<unsigned char>{1, 2, 3, 4, 5}));
+    }
+    assert(callI("rb_file_sz") == 5);
+    assert(callI("wb_file") == 1);
+    {
+        std::ifstream out(harness.tempDir + "/out.dat", std::ios::binary);
+        std::string body((std::istreambuf_iterator<char>(out)),
+                         std::istreambuf_iterator<char>());
+        assert(body == "hello");
+    }
+
+    std::cout << "testBufferTypeAndCoreEfuns OK\n";
+}
+
 static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
     ObjectVarHarness harness;
     harness.writeFile("/nb_probe.c",
@@ -27345,6 +27472,7 @@ int main() {
     testStrToArrAndArrToStrRoundTripUtf8();
     testReplaceStringOccurrenceRangeForm();
     testStrsrchIntNeedleAndBackwardFlag();
+    testBufferTypeAndCoreEfuns();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();

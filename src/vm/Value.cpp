@@ -22,6 +22,11 @@ bool isTruthy(const Value& v) {
     if (auto* arr = std::get_if<std::shared_ptr<Array>>(&v.data)) return static_cast<bool>(*arr);
     if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&v.data)) return static_cast<bool>(*map);
     if (auto* fn = std::get_if<std::shared_ptr<Closure>>(&v.data)) return static_cast<bool>(*fn);
+    // A buffer svalue is always truthy in real FluffOS (T_BUFFER's tag
+    // is above T_NUMBER, so VAL_TRUE-style checks pass), independent of
+    // its byte length -- a zero-length buffer is still truthy. A Buffer
+    // Value always holds a non-null shared_ptr, so this is just "true".
+    if (auto* buf = std::get_if<std::shared_ptr<Buffer>>(&v.data)) return static_cast<bool>(*buf);
     return false;
 }
 
@@ -50,6 +55,12 @@ bool valuesEqual(const Value& a, const Value& b) {
     if (auto* asym = std::get_if<Symbol>(&a.data)) return asym->name == std::get<Symbol>(b.data).name;
     if (auto* ao = std::get_if<std::shared_ptr<LpcObject>>(&a.data)) return *ao == std::get<std::shared_ptr<LpcObject>>(b.data);
     if (auto* af = std::get_if<std::shared_ptr<Closure>>(&a.data)) return *af == std::get<std::shared_ptr<Closure>>(b.data);
+    // Real "==" between two buffers is pointer identity (eoperators.c
+    // f_eq's T_BUFFER case: "(sp-1)->u.buf == sp->u.buf"), the same rule
+    // object and closure comparison above already use. Two distinct
+    // allocate_buffer() results with identical bytes are NOT equal; a
+    // second variable aliasing the same buffer IS.
+    if (auto* ab = std::get_if<std::shared_ptr<Buffer>>(&a.data)) return *ab == std::get<std::shared_ptr<Buffer>>(b.data);
     if (std::holds_alternative<std::monostate>(a.data)) return true;
     return false;
 }

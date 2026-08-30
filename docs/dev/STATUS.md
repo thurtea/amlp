@@ -9,6 +9,167 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-30 (a further session, same day): buffer value type, first
+slice. A new `Buffer` alternative in the `Value` variant plus the
+buffer efuns that need only the type and no external dependency:
+`bufferp`, `allocate_buffer`, `read_buffer`, `write_buffer`,
+`to_buffer`/`_to_buffer`, and a `crc32` buffer-argument arm. 816 tests
+passing (up from 815). New `ROADMAP.md` row 2.33a; row 2.33 split so it
+now covers only the iconv-dependent charset efuns.**
+
+**Why this slice.** The prior turn's own assessment named the buffer
+type as the single highest-leverage next move: one `Value`-level
+addition unblocks roughly 15 efuns across core/compress/sockets. A
+scoping pass (also recorded that turn) confirmed a clean carve-off: the
+type plus `bufferp`/`allocate_buffer`/`read_buffer`/`write_buffer`/
+`to_buffer` need nothing but the new kind, while `string_encode`/
+`string_decode`/`buffer_transcode`/`set_encoding`/`query_encoding` need
+a charset-conversion dependency, `compress`/`uncompress` need zlib, and
+binary socket mode needs the socket layer. This slice is exactly the
+dependency-free set. Real corpus demand is strong: about 77 real
+`.c`/`.lpc` call sites across `dead-souls`, `es2_mudlib`, `lima`,
+`nightmare3`, `reference-lpc-mud-library`, and `lil` (`read_buffer`
+~32, `bufferp` ~13, `allocate_buffer` ~13, `write_buffer` ~11,
+`to_buffer` ~8), every one of which previously threw.
+
+**The type.** `struct Buffer { std::vector<unsigned char> bytes; }` in
+`include/amlp/vm/Value.hpp`; `std::shared_ptr<Buffer>` appended LAST in
+`ValueVariant`. Appending is deliberate: `src/vm/Value.cpp`'s
+`valuesEqual()` has the only `data.index()` read in the tree (an
+`a.index() != b.index()` fast path), and there is no `std::visit`,
+numeric `std::get<N>`, `variant_size`, or exhaustive variant switch
+anywhere in `src/`, `include/`, or `test/` (grepped directly before
+touching the variant), so a new trailing member is purely additive. A
+buffer is fixed-size at `allocate_buffer()` time and never grows (real
+`buffer.c` `write_buffer()` refuses to write past the end for exactly
+that reason); it holds only bytes, never a `Value`, so it can never
+take part in a reference cycle, which makes it strictly simpler than
+`Array`/`Mapping` for the eventual row 3.3 GC. Lifetime is the same
+`shared_ptr` model as the other heap kinds, no weak_ptr, no finaliser.
+
+**Type-system arms** (all traced to real source):
+
+  - `valuesEqual` (`Value.cpp`): pointer identity, matching
+    `eoperators.c` `f_eq`'s `T_BUFFER` case `(sp-1)->u.buf ==
+    sp->u.buf`. Two distinct `allocate_buffer()` results with identical
+    bytes are NOT equal; a second variable aliasing one IS.
+  - `isTruthy` (`Value.cpp`): a buffer is always truthy in real FluffOS
+    (its type tag is above `T_NUMBER`), independent of byte length.
+  - `valueToDebugString` / `%O` (`EfunTable.cpp`): renders `"<buffer>"`,
+    matching real `sprintf.c` `svalue_to_string()` (no contents, no
+    length). Without this arm a buffer would have hit the function's
+    `"!ERROR: GARBAGE SVALUE!"` fallthrough.
+  - `typeof` (`EfunTable.cpp`): returns `"buffer"`, real `interpret.c`
+    `type_names[]`. Was falling through to `"int"`.
+  - `sizeof` / `strlen` / `strwidth` (`EfunTable.cpp`): the buffer's
+    byte length. Was falling through to `0`, which would break the
+    corpus-common `read_buffer(b, sizeof(b))`.
+  - `copy` (`EfunTable.cpp`): deep-copies to a fresh, identity-distinct
+    buffer, matching real `copy()`. Was falling through to a shared
+    reference.
+
+**Serialisation: unchanged by design, and it matches real.** Real
+`object.c` `save_svalue()`'s switch has no `T_BUFFER` case at all (it
+falls straight through and writes nothing, confirmed by reading it), so
+real FluffOS cannot save a buffer in an object variable either.
+`serializeValue()` (save_object) and `serializeWorldValue()`
+(dump_state) here write void (`'N'`) for a buffer, so the file stays
+well formed and the slot round-trips as `0`; `writeRealSaveValue()`
+(save_variable) raises a clear error. All three match the choices
+already established for object references and function pointers.
+Comments added at each site. 58 existing save/restore tests unaffected
+(none enumerate `Value` kinds; behavior for a buffer is the same "as
+void" the catch-alls already produced).
+
+**Efuns, semantics from `temp/reference/fluffos-2.9-ds2.08/buffer.c` +
+`efuns_main.c`, and the current clone for `to_buffer`:**
+
+  - `bufferp(mixed)`: 1 for a buffer, else 0 (`f_bufferp()`).
+  - `allocate_buffer(int size)`: `size < 0` errors `"Illegal buffer
+    size."` (real `buffer.c` `allocate_buffer()`); size 0 is legal (a
+    zero-length buffer); otherwise `size` zero bytes. A fixed 256 MB
+    local ceiling stands in for real's config-defined `max_buffer_size`
+    (this driver has no such config, the same situation `add_a()` /
+    `replace_html()` are in for `max_string_length`). A non-int
+    argument throws.
+  - `read_buffer(string | buffer, void | int start, void | int len)`
+    (`f_read_buffer()` + `buffer.c` `read_buffer()`): buffer form
+    returns a STRING of the bytes in `[start, start+len)`, `len` 0
+    meaning "to the end", negative `start` counting from the end,
+    stopping at the first NUL inside the range; `len < 0`, a still-
+    negative `start` after adjustment, or `start >= size` all return
+    int `0`. String form reads that FILE's bytes over the same window
+    and returns a NEW buffer; a missing file or empty read returns int
+    `0`. Path-gated exactly like `read_bytes`.
+  - `write_buffer(string | buffer dest, int start, string | buffer |
+    int data)` (`f_write_buffer()` + `buffer.c` `write_buffer()`):
+    buffer-dest form writes `data` into the buffer in place: an int as
+    its 4 bytes in network byte order (`htonl`), a string or buffer as
+    its raw bytes. A write that would run past the fixed end is refused
+    and returns `0`; a successful write returns `1`; negative `start`
+    counts from the end. String-dest form writes `data` (string only)
+    to the file at that offset, creating it if absent, returning `1` /
+    `0`.
+  - `to_buffer` / `_to_buffer` (current clone `f__to_buffer()` /
+    `svalue_to_buffer_bytes()`; 2.9 has no such efun): a buffer passes
+    through by identity; a string becomes a buffer of its raw bytes; an
+    int array becomes one byte per element, erroring `"Illegal array
+    item in buffer conversion: must be ints 0..255."` on any element
+    out of range or not an int; any other argument type errors.
+  - `crc32` gains a buffer-argument arm (`func_spec.c`: `int
+    crc32(string OR_BUFFER)`), the identical CRC over the buffer's
+    bytes. The string path and its no-final-complement quirk are
+    unchanged.
+
+**Explicitly deferred, unchanged from the scoping:**
+
+  - `string_encode` / `string_decode` / `buffer_transcode` /
+    `set_encoding` / `query_encoding`: stay on row 2.33, need a
+    charset-conversion dependency (iconv or equivalent).
+  - `compress` / `uncompress` / `compress_file` / `uncompress_file`:
+    row 2.42, need zlib. Zero corpus call sites regardless.
+  - Binary socket mode (`socket_write` / `socket_read` of a buffer):
+    `src/net` socket-layer work.
+  - VM operators on buffers: `b[i]` (byte read), `b[i..j]` (sub-
+    buffer), `b[i] = x`, range assignment, `buffer + buffer` / `buffer
+    + string`. Until their own follow-up row a buffer operand throws an
+    honest "cannot index" / kind-mismatch, no silent-wrong hazard.
+  - `buffer` as an LPC type keyword: the lexer has no such token, so a
+    declared `buffer b` does not parse; runtime buffer values work
+    through `mixed`, the same as `class` values do. A small parser
+    follow-up.
+  - `to_int(buffer)` / `to_float(buffer)`: real reads a buffer as a
+    4-byte network-order int / an 8-byte double. Not in this slice's
+    scoped efun list; a follow-up.
+
+**Built.** `include/amlp/vm/Value.hpp` (struct + variant member),
+`src/vm/Value.cpp` (`isTruthy`, `valuesEqual` arms),
+`src/efun/EfunTable.cpp` (`valueToDebugString`, `serializeValue`,
+`writeRealSaveValue`, `typeof`, `sizeof`, `copy` arms; the six efun
+registrations after `classp`; the `crc32` rework),
+`src/persist/StateSerializer.cpp` (one comment at the catch-all). No
+new include or dependency. Full build clean.
+
+**1 new regression test (816 total, up from 815):**
+`testBufferTypeAndCoreEfuns` -- `bufferp` true only on a buffer;
+`allocate_buffer` size 0 and 5 and the negative-size throw; `sizeof` /
+`strlen` / `typeof` on a buffer; a `write_buffer` then `read_buffer`
+round trip including the read stopping at the first NUL, the past-the-
+end write refused with `0`, a fitting write returning `1`, a negative
+`start`, and the network-byte-order int case (`1094861636` writing
+`'A' 'B' 'C' 'D'`); `to_buffer` from a string and from an int array,
+the out-of-range and wrong-type element throws, and buffer pass-through
+by identity; equality as pointer identity (two allocations unequal, an
+alias equal, `copy()` distinct); and the file-path forms of
+`read_buffer` / `write_buffer` against a scratch file. Expected bytes
+hand-computed from `buffer.c`, not read back from this driver. The
+existing 815 re-run unchanged.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.33a
+(`[x]`, full citation trail in its own cell); row 2.33's own cell
+amended to record the split and that it now covers only the iconv
+charset efuns. `COMPARISON.md` not touched this pass.
+
 **2026-08-30 (a further session, same day): `strsrch()` / `strstr()`
 correctness fix. The already-registered `strsrch` efun (and its alias
 `strstr`) was rejecting an int-char needle and misreading its 3rd

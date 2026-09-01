@@ -10,6 +10,130 @@ fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
 **2026-09-01 (a further session, same day): uid / euid object trust
+model, slice 2 (ROADMAP rows 3.1 / 3.2). The two items slice 1 named as
+explicitly deferred: the `clone_object()` "must call `seteuid()` first"
+guard, and `valid_read` / `valid_write` taking the caller's real
+`euid()` as their uid argument instead of the `privs()` stand-in. 825
+tests passing (up from 823). Rows 3.1 and 3.2 cells both updated; row 3.1
+stays `[x] (partial)`, row 3.2 stays `[ ]` (its item (3) is still open).**
+
+**Why this, and why now.** Slice 1 built the `uid` / `euid` data model
+and the four uid efuns but deliberately stopped short of the two places
+that data actually gates behavior. Both are small, both are direct
+ports, and both were named on rows 3.1 and 3.2 as the next slice. No new
+subsystem, no new file, no new library.
+
+**Cited real source, read directly from disk this session.**
+
+  - **`clone_object()` guard:**
+    `temp/reference/fluffos-2.9-ds2.08/simulate.c:541-549` --
+    `clone_object(const char *str1, int num_arg)` opens with
+    `#ifdef PACKAGE_UIDS / if (current_object && current_object->euid ==
+    0) { error("Object must call seteuid() prior to calling
+    clone_object().\n"); } / #endif`, before `save_command_giver()`,
+    `find_object()`, or any compile. `current_object->euid == 0` is real
+    `euid == NULL` (`object.h:107-108`, `userid_t *euid`).
+  - **`valid_read` / `valid_write` uid argument:**
+    `temp/ldmud/src/simulate.c:3752-3851` `check_valid_path(string_t
+    *path, svalue_t caller, string_t *call_fun, Bool writeflg)`. Lines
+    `3778-3790` switch on `caller.type` and set `eff_user =
+    caller.u.ob->eff_user`; lines `3792-3795` are `if (eff_user != NULL
+    && eff_user->name != NULL) push_ref_string(inter_sp,
+    eff_user->name); else push_number(inter_sp, 0);`, then
+    `3797-3802` push `call_fun` and `caller` and
+    `apply_master(STR_VALID_WRITE / STR_VALID_READ, 4)`. `eff_user` is
+    LDMud's euid: `temp/ldmud/src/efuns.c:4985-4986` `f_geteuid()`
+    returns `ob->eff_user->name`; `main.c:751,766` sets
+    `master_ob->eff_user`. Real FluffOS's own `check_valid_path()`
+    (`temp/reference/fluffos-2.9-ds2.08/file.c:705-750`) pushes only
+    `(path, call_object, call_fun)` -- no uid argument at all, so the
+    fluffos-dialect 3-arg branch does not change.
+  - **The one real LDMud consumer, re-checked:** `temp/core-lib`'s
+    `secure/master/security.c:153-215` defines `valid_write(string path,
+    string uid, string method, object caller)` and the matching
+    `valid_read`; both ignore the `uid` parameter and key entirely off
+    `caller` (`isPriviledgedObject(caller)`, `userHasWriteAccess(path)`).
+    `secure/master.c:20` `get_master_uid()` returns integer `1`, not a
+    string, so `captureBootUids()` leaves the model inactive for
+    core-lib and its `valid_*` still receive the `privs()` fallback,
+    unchanged.
+
+**Built.**
+
+  - **`ObjectManager::cloneObject()`** (`src/object/ObjectManager.cpp`):
+    a guard at the very top, ahead of `normalizeFilename()` / `compile()`,
+    `if (uidModel_.active() && vm_) { auto callerOb = vm_->currentObject();
+    if (callerOb && !callerOb->euid().has_value()) throw LpcRuntimeError(
+    "Object must call seteuid() prior to calling clone_object().\n"); }`.
+    Gated on `uidModel_.active()`, this driver's `PACKAGE_UIDS`
+    stand-in, the same gate `assignObjectUid()` / `captureBootUids()`
+    already use. Message text is byte-for-byte real, trailing newline
+    included, since a mudlib may `catch()` and string-match it. A direct
+    C++ `cloneObject()` with no `current_object` (every existing test's
+    call shape) does not trip it; neither does a caller that has
+    `seteuid()`d itself.
+  - **`checkValidPath()`** (`src/efun/EfunTable.cpp`, the shared gate
+    behind all ~20 file efuns): the LDMud branch's uid argument was
+    `(caller && caller->privs()) ? Value(*caller->privs()) : Value{}`;
+    it is now `caller->euid()` when
+    `vm.objectManager().uidModel().active()`, and `caller->privs()` only
+    while the model is inactive. `std::nullopt` still maps to the
+    existing empty `Value` (this slice did not also change that to a
+    literal integer `0`; real pushes `push_number(0)`, noted as a
+    pre-existing, unrelated nuance and left alone to keep the
+    inactive-model path byte-identical). The big comment block above the
+    function and the FluffOS 3-arg branch are otherwise unchanged.
+
+**2 new regression tests (825 total, up from 823),** both in
+`test/test_lexer.cpp` next to slice 1's three:
+
+  - `testCloneObjectRequiresCallerEuidUnderActiveUidModel`: with
+    `kUidAwareMaster` loaded (model active), a `/wiz_cloner` object
+    (owner `"wiz"`, euid `0`) calling `clone_object("/clone_leaf")` from
+    an LPC function throws, and the message contains `"seteuid() prior
+    to calling clone_object"`. After the object runs `seteuid(getuid())`
+    (euid becomes `"wiz"`) the identical call returns a real object. A
+    direct `harness.objects.cloneObject("/wiz_cloner")` (no
+    `current_object`) is shown to load fine despite the active model. A
+    second harness whose master defines no `get_root_uid()` (model
+    inactive) clones from a no-euid caller with no error.
+  - `testValidWriteUidArgumentIsEuidUnderActiveUidModel`: LDMud dialect,
+    a master that both turns the uid model on and defines a
+    `valid_write(path, uid, func, ob)` that records `uid`. A `/wiz_writer`
+    clone (euid `0`, and `set_privs("DifferentPriv")` applied) calls
+    `write_file()`: while its euid is still `0` the recorded uid is not a
+    string; after `seteuid(getuid())` the recorded uid is exactly
+    `"wiz"` (the euid), never `"DifferentPriv"` (the privs). A second,
+    model-inactive harness confirms the `privs()` fallback still passes
+    `"FallbackPriv"` through unchanged.
+
+  `testValidWriteReceivesRealArgumentShapePerDialect` (slice's untouched
+  sibling from row 1.16) keeps passing as-is: its LDMud case loads a
+  master with no `get_root_uid()`, so it exercises the inactive-model
+  `privs()` path; its in-code comment was updated to say so and to point
+  at the new test for the active-model euid path. The other 822
+  pre-existing tests re-run unchanged. Live re-boot of the bundled
+  `mudlib/` (`etc/driver.cfg`, one iteration): `master get_root_uid() =
+  "Root"`, no failed loads, no undefined-function errors. Full clean
+  rebuild from `cmake --build . --target clean`: no warnings, no errors.
+
+**Not built this slice (still on rows 3.1 / 3.2).** Row 3.1 items (c)
+real uid/gid group membership and domain-trust traversal, and (d) the
+per-domain filesystem jail / `call_other` capability grants (row 3.2).
+Row 3.2's own item (3), a real per-domain writable-path check in front
+of `write_file` / `rename` / `mkdir` / `rm` that consults the master
+beyond `checkValidPath()`, is likewise still open; its items (1) and (2)
+are what this slice closed.
+
+**Documentation.** ROADMAP rows 3.1 and 3.2 cells updated (3.1 gains a
+"Slice 2" paragraph with the full citation trail and the new test
+descriptions; 3.2's slice list marks (1) and (2) done, pointing back at
+3.1's slice 2). `COMPARISON.md` not touched, per the task's "ROADMAP and
+STATUS only" instruction; its 2026-09-01 sweep note's Phase 3 fraction
+and suite count now trail the live numbers (row 3.1 still one partial
+row, suite 825) and will catch up at that file's next full sweep.
+
+**2026-09-01 (a further session, same day): uid / euid object trust
 model, slice 1 (ROADMAP row 3.1). The real FluffOS `uid` / `euid` data
 model plus the four uid efuns (`getuid`, `geteuid`, `seteuid`,
 `export_uid`), backed by real per-object state assigned at boot and per

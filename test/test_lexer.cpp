@@ -4243,8 +4243,11 @@ static void testValidWriteReceivesRealArgumentShapePerDialect() {
     // doc/master/valid_write's own real SYNOPSIS and core-lib's own real
     // valid_write(string path, string uid, string method, object caller)
     // definition, same names, same order. "uid" here is the calling
-    // object's own privs() (this driver's closest real analog to a real
-    // uid/euid hierarchy, see checkValidPath()'s own comment).
+    // object's own privs(): this master defines no get_root_uid(), so the
+    // uid model is inactive and checkValidPath() uses its pre-row-3.1
+    // privs() fallback. The active-model case, where the argument is the
+    // caller's real euid() (real eff_user->name), is covered by
+    // testValidWriteUidArgumentIsEuidUnderActiveUidModel.
     {
         ObjectVarHarness harness("dialect: ldmud\n");
         harness.writeFile("/unused.c",
@@ -14351,6 +14354,152 @@ static void testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel() {
     assert(std::get<std::string>(plain.vm.callFunction(pu, "euid", {}).data) == "someone");
 
     std::cout << "testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel OK\n";
+}
+
+// ROADMAP row 3.1/3.2 slice 2, item (a): real simulate.c:545-549, the
+// very first thing clone_object() does under PACKAGE_UIDS is refuse a
+// caller whose euid is 0 (NULL) with "Object must call seteuid() prior
+// to calling clone_object().\n". Gated here on uidModel().active().
+static void testCloneObjectRequiresCallerEuidUnderActiveUidModel() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", kUidAwareMaster);
+    assert(harness.objects.loadMasterObject());
+    assert(harness.objects.uidModel().active());
+
+    harness.writeFile("/clone_leaf.c", "int nop() { return 1; }\n");
+    // creator_file() keys on p[1]=='w', so a /wiz_* loader gets owner
+    // "wiz" != loader uid "root" -> euid 0 (AUTO_SETEUID is undef).
+    harness.writeFile("/wiz_cloner.c",
+        "void su() { seteuid(getuid()); }\n"
+        "object make() { return clone_object(\"/clone_leaf\"); }\n");
+
+    // Direct C++ clone: no current_object at this call site, so the guard
+    // (real "current_object && current_object->euid == 0") does not fire
+    // even with the model active -- the object still loads.
+    auto cloner = harness.objects.cloneObject("/wiz_cloner");
+    assert(cloner != nullptr);
+    assert(*cloner->uid() == "wiz" && !cloner->euid().has_value());
+
+    // clone_object() from inside wiz_cloner, whose euid is still 0: real
+    // errors before anything else runs.
+    bool threw = false;
+    try {
+        harness.vm.callFunction(cloner, "make", {});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("seteuid() prior to calling clone_object") != std::string::npos);
+    }
+    assert(threw);
+
+    // After "void create() { seteuid(getuid()); }"-style self-su, euid is
+    // "wiz" and the same clone_object() call now succeeds.
+    harness.vm.callFunction(cloner, "su", {});
+    assert(cloner->euid().has_value() && *cloner->euid() == "wiz");
+    amlp::Value made = harness.vm.callFunction(cloner, "make", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(made.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(made.data) != nullptr);
+
+    // Model inactive (master defines no get_root_uid()): real's #ifdef
+    // PACKAGE_UIDS is not compiled in, so a caller with no euid clones
+    // freely.
+    ObjectVarHarness plain;
+    plain.writeFile("/unused.c", "void create() {}\n");
+    assert(plain.objects.loadMasterObject());
+    assert(!plain.objects.uidModel().active());
+    plain.writeFile("/plain_leaf.c", "int nop() { return 1; }\n");
+    plain.writeFile("/plain_cloner.c",
+        "object make() { return clone_object(\"/plain_leaf\"); }\n");
+    auto plainCloner = plain.objects.cloneObject("/plain_cloner");
+    assert(plainCloner != nullptr && !plainCloner->euid().has_value());
+    amlp::Value plainMade = plain.vm.callFunction(plainCloner, "make", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(plainMade.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(plainMade.data) != nullptr);
+
+    std::cout << "testCloneObjectRequiresCallerEuidUnderActiveUidModel OK\n";
+}
+
+// ROADMAP row 3.1/3.2 slice 2, item (b): real LDMud check_valid_path()
+// (temp/ldmud/src/simulate.c:3778-3795) pushes the calling object's
+// effective user name (eff_user->name, i.e. euid) as the second argument
+// to valid_read/valid_write, or 0 when there is none. This driver now
+// passes caller->euid() there once the uid model is active, falling back
+// to the pre-row-3.1 privs() stand-in only while it is inactive.
+static void testValidWriteUidArgumentIsEuidUnderActiveUidModel() {
+    // Active model, LDMud dialect: the uid argument is the caller's euid,
+    // not its privs().
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "string get_root_uid() { return \"root\"; }\n"
+            "string get_bb_uid() { return \"backbone\"; }\n"
+            "string creator_file(string p) { return (p[1] == 'w') ? \"wiz\" : \"root\"; }\n"
+            "int valid_seteuid(object ob, string s) { return 1; }\n"
+            "mixed capturedUid;\n"
+            "string valid_write(string path, mixed uid, string func, mixed ob) {\n"
+            "    capturedUid = uid;\n"
+            "    return 1;\n"
+            "}\n"
+            "mixed query_captured_uid() { return capturedUid; }\n");
+        assert(harness.objects.loadMasterObject());
+        assert(harness.objects.uidModel().active());
+
+        harness.writeFile("/wiz_writer.c",
+            "void su() { seteuid(getuid()); }\n"
+            "int probe() { return write_file(\"/ww_out.txt\", \"x\"); }\n");
+        auto writer = harness.objects.cloneObject("/wiz_writer");
+        assert(writer != nullptr && *writer->uid() == "wiz" && !writer->euid().has_value());
+        // A distinct privs() value that must NOT show up as the uid arg.
+        writer->setPrivs(std::string("DifferentPriv"));
+        auto master = harness.objects.masterObject();
+
+        // euid still 0: real pushes push_number(0), so the master sees no
+        // string here.
+        harness.vm.callFunction(writer, "probe", {});
+        amlp::Value uid0 = harness.vm.callFunction(master, "query_captured_uid", {});
+        assert(!std::holds_alternative<std::string>(uid0.data));
+
+        // After self-su euid is "wiz"; that, not "DifferentPriv", is the
+        // uid argument.
+        harness.vm.callFunction(writer, "su", {});
+        assert(writer->euid().has_value() && *writer->euid() == "wiz");
+        harness.vm.callFunction(writer, "probe", {});
+        amlp::Value uidWiz = harness.vm.callFunction(master, "query_captured_uid", {});
+        assert(std::holds_alternative<std::string>(uidWiz.data));
+        assert(std::get<std::string>(uidWiz.data) == "wiz");
+    }
+
+    // Inactive model: the privs() fallback is unchanged from before this
+    // slice (mirrors testValidWriteReceivesRealArgumentShapePerDialect's
+    // own LDMud case, kept working verbatim).
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "mixed capturedUid;\n"
+            "string valid_write(string path, mixed uid, string func, mixed ob) {\n"
+            "    capturedUid = uid;\n"
+            "    return 1;\n"
+            "}\n"
+            "mixed query_captured_uid() { return capturedUid; }\n");
+        assert(harness.objects.loadMasterObject());
+        assert(!harness.objects.uidModel().active());
+
+        harness.writeFile("/vw_inactive.c",
+            "int probe() { return write_file(\"/vwi_out.txt\", \"y\"); }\n");
+        auto caller = harness.objects.cloneObject("/vw_inactive");
+        assert(caller != nullptr);
+        caller->setPrivs(std::string("FallbackPriv"));
+        harness.vm.callFunction(caller, "probe", {});
+
+        auto master = harness.objects.masterObject();
+        amlp::Value uid = harness.vm.callFunction(master, "query_captured_uid", {});
+        assert(std::holds_alternative<std::string>(uid.data));
+        assert(std::get<std::string>(uid.data) == "FallbackPriv");
+    }
+
+    std::cout << "testValidWriteUidArgumentIsEuidUnderActiveUidModel OK\n";
 }
 
 // ---------------------------------------------------------------------
@@ -27796,6 +27945,8 @@ int main() {
     testUidModelBootCaptureAndPerObjectAssignment();
     testSeteuidGeteuidExportUidSemantics();
     testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel();
+    testCloneObjectRequiresCallerEuidUnderActiveUidModel();
+    testValidWriteUidArgumentIsEuidUnderActiveUidModel();
     testObjectVarInitializerRunsBeforeCreate();
     testObjectVarInitializerRunsOnFileWithNoCreateAtAll();
     testObjectVarInitializerParentRunsBeforeChild();

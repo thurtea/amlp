@@ -920,6 +920,32 @@ void ObjectManager::runObjectVarInitializers(const std::shared_ptr<LpcObject>& o
 }
 
 std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFilename) {
+    // real simulate.c:545-549, the very first thing clone_object() does:
+    //
+    //   #ifdef PACKAGE_UIDS
+    //       if (current_object && current_object->euid == 0) {
+    //           error("Object must call seteuid() prior to calling clone_object().\n");
+    //       }
+    //   #endif
+    //
+    // A caller whose effective uid is NULL is refused before find_object()
+    // or any compile runs: give_uid_to_object() on the new clone would
+    // otherwise have no euid to copy from the loader. Gated on
+    // uidModel_.active(), this driver's stand-in for the PACKAGE_UIDS
+    // compile flag (the same gate assignObjectUid()/captureBootUids() use).
+    // The condition matches real exactly: only when there IS a current
+    // object and its euid() is std::nullopt (real euid == 0 == NULL); a
+    // direct clone with no current object, or a caller that has seteuid()d
+    // itself, is unaffected. Message text is verbatim from real, including
+    // the trailing newline, since a mudlib may catch() and match on it.
+    if (uidModel_.active() && vm_) {
+        auto callerOb = vm_->currentObject();
+        if (callerOb && !callerOb->euid().has_value()) {
+            throw LpcRuntimeError(
+                "Object must call seteuid() prior to calling clone_object().\n");
+        }
+    }
+
     std::string filename = normalizeFilename(rawFilename);
     auto program = compile(filename);
     if (!program) return nullptr;

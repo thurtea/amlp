@@ -1079,13 +1079,24 @@ int reclaimSweepValue(Value& v, int depth) {
 //   gated here, not a single unified shape, the same discipline already
 //   established for `shadow()`/`snoop()`/`replace_program()`.
 //
-// "uid" under the LDMud shape: this driver has no real uid/euid
-// hierarchy at all (only a single `privs_` field, already on record --
-// see LpcObject::privs()'s own comment) -- the closest real analog is
-// the calling object's own `privs()`, passed through exactly the same
-// "unset reads as 0" contract `query_privs()` itself already uses, not a
-// faked-up uid string. A real, honestly-scoped approximation, not a
-// silently-pretended full uid/euid model.
+// "uid" under the LDMud shape: real LDMud's own `check_valid_path()`
+// (`temp/ldmud/src/simulate.c:3778-3795`) pushes the calling object's
+// *effective* user name as this second argument -- literally `eff_user =
+// caller.u.ob->eff_user;` then `if (eff_user != NULL && eff_user->name
+// != NULL) push_ref_string(inter_sp, eff_user->name); else
+// push_number(inter_sp, 0);`. `eff_user` is LDMud's euid (`efuns.c:4985`
+// `geteuid()` returns `ob->eff_user->name`), so the faithful argument is
+// `caller->euid()` (ROADMAP row 3.1's per-object euid, `std::nullopt`
+// pushed as `0` exactly as real pushes `push_number(0)` for a NULL
+// `eff_user`), not a uid string faked from `privs()`. Used only when the
+// uid model is active (row 3.1's `get_root_uid`/`get_master_uid` boot
+// apply fired). When it is inactive -- an LDMud mudlib that never
+// defined that apply, so no object ever gets an euid -- this falls back
+// to the original `privs()` approximation this row shipped with, so such
+// a mudlib's `valid_read`/`valid_write` see exactly what they saw
+// before. Real FluffOS's own `check_valid_path()` (`file.c:705-750`)
+// pushes no uid argument at all, so the fluffos branch below is
+// unaffected either way.
 //
 // Real semantics for the *result*, matching `check_valid_path()`
 // exactly: the master not defining `valid_read`/`valid_write` at all
@@ -1127,7 +1138,16 @@ std::optional<std::string> checkValidPath(VM& vm, const std::string& rawPath, bo
     auto caller = vm.currentObject();
     std::vector<Value> args;
     if (vm.config().dialect() == "ldmud") {
-        Value uidArg = (caller && caller->privs()) ? Value(*caller->privs()) : Value{};
+        // real LDMud check_valid_path(): the effective user name, or 0
+        // when there is none. euid() once the uid model is active
+        // (simulate.c:3792-3795); the pre-row-3.1 privs() stand-in only
+        // while it is inactive.
+        std::optional<std::string> uidName;
+        if (caller) {
+            uidName = vm.objectManager().uidModel().active() ? caller->euid()
+                                                             : caller->privs();
+        }
+        Value uidArg = uidName.has_value() ? Value(*uidName) : Value{};
         args = {Value(rawPath), uidArg, Value(funcName), Value(caller)};
     } else {
         args = {Value(rawPath), Value(caller), Value(funcName)};

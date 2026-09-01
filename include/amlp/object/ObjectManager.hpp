@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include "amlp/object/LpcObject.hpp"
+#include "amlp/security/UidModel.hpp"
 
 namespace amlp {
 
@@ -20,6 +21,15 @@ public:
 
     bool loadMasterObject();
     std::shared_ptr<LpcObject> masterObject() const { return master_; }
+
+    // The FluffOS uid/euid model (ROADMAP row 3.1). Populated by
+    // captureBootUids() the moment loadMasterObject() succeeds:
+    // rootUid/backboneUid from master->get_root_uid()/get_bb_uid(), and
+    // uidModel().active() is true iff get_root_uid() returned a string
+    // (this driver's stand-in for real's PACKAGE_UIDS compile flag).
+    // Read by main.cpp for its boot banner and by the seteuid()/
+    // getuid() efuns' fallback behavior.
+    const UidModel& uidModel() const { return uidModel_; }
 
     // Non-fatal by design (see .cpp): a missing/misconfigured simul_efun
     // file should not prevent the rest of the driver from booting while
@@ -216,8 +226,29 @@ private:
     // evidence of any mudlib overriding it via the configure() efun.
     void armResetAndCleanup(const std::shared_ptr<LpcObject>& obj);
 
+    // Real master.c:107-138 set_master(): right after the master object
+    // loads, apply get_root_uid() / get_bb_uid() on it, stash the two
+    // strings in uidModel_, and set master->uid = master->euid =
+    // rootUid. A master with no get_root_uid() leaves uidModel_ inactive
+    // (real: mudlib built without PACKAGE_UIDS). Called once, from
+    // loadMasterObject(), after master_ is assigned.
+    void captureBootUids();
+
+    // Real simulate.c:132-206 give_uid_to_object(), run from
+    // init_object() for every freshly compiled or cloned object before
+    // its create(): ask master->creator_file("/path"), then
+    // resolveObjectUids() (security/UidModel.hpp) decides the (uid,
+    // euid) pair from the creator name and the loader's own uid/euid.
+    // No-op unless uidModel_.active(). Named divergence from real: real
+    // destructs the object and errors when creator_file() is missing or
+    // returns a non-string; this driver instead assigns uid = rootUid
+    // (root-owned) and keeps the object, so a partially-uid-aware mudlib
+    // still boots.
+    void assignObjectUid(const std::shared_ptr<LpcObject>& obj, const std::string& filename);
+
     Config& config_;
     VM* vm_ = nullptr;
+    UidModel uidModel_;
     std::shared_ptr<LpcObject> master_;
     std::shared_ptr<LpcObject> simulEfunObject_;
     std::unordered_map<std::string, std::shared_ptr<CompiledProgram>> programCache_;

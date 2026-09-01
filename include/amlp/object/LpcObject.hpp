@@ -176,6 +176,24 @@ public:
     const std::optional<std::string>& privs() const { return privs_; }
     void setPrivs(std::optional<std::string> privs) { privs_ = std::move(privs); }
 
+    // real object_t::uid / object_t::euid (packages/uids.c, object.h:107-
+    // 108). ROADMAP row 3.1. uid_ is the object's "owner" (getuid());
+    // euid_ its "effective owner" (geteuid()), the identity a load or
+    // clone from this object inherits and the one file-access checks
+    // consult. std::nullopt on euid_ is real's "euid == NULL": geteuid()
+    // returns 0 for it, and (next slice, row 3.2) clone_object() refuses
+    // until the object seteuid()s itself. uid_ is unset only for an
+    // object created before the uid model went active, or under a mudlib
+    // that never defined get_root_uid() (real: built without
+    // PACKAGE_UIDS). Interned-string sharing (real add_uid()'s AVL tree)
+    // is not reproduced: every efun reads only the name, so a plain
+    // owned string is observationally identical. See
+    // include/amlp/security/UidModel.hpp for the full model.
+    const std::optional<std::string>& uid() const { return uid_; }
+    void setUid(std::optional<std::string> uid) { uid_ = std::move(uid); }
+    const std::optional<std::string>& euid() const { return euid_; }
+    void setEuid(std::optional<std::string> euid) { euid_ = std::move(euid); }
+
     // real sentence_t list (add_action.c) -- one entry per add_action()
     // registration currently active on this object as a command_giver.
     // front() is the most recently added entry: real add_action()
@@ -412,6 +430,8 @@ private:
     bool isWizard_ = false;
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
+    std::optional<std::string> uid_;
+    std::optional<std::string> euid_;
     std::string livingName_;
     std::weak_ptr<LpcObject> shadowedBy_;
     std::weak_ptr<LpcObject> shadowing_;

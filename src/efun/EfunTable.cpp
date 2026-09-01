@@ -6582,6 +6582,121 @@ void registerCoreEfuns() {
         return Value{};
     });
 
+    // The FluffOS uid / euid trust efuns (ROADMAP row 3.1). Real source:
+    // temp/reference/fluffos-2.9-ds2.08/packages/uids.c (the four f_*
+    // bodies) and packages/uids_spec.c (the signatures). The per-object
+    // uid_/euid_ state they read and write is assigned at boot
+    // (master->uid = get_root_uid()) and per load/clone
+    // (give_uid_to_object()) by ObjectManager, see
+    // include/amlp/security/UidModel.hpp. Heavily used: about 529
+    // seteuid(), 441 getuid(), 354 geteuid(), 49 export_uid() call-site
+    // lines across the vendored corpora, overwhelmingly the "void
+    // create() { seteuid(getuid()); }" idiom that today throws
+    // "undefined function or efun: seteuid".
+
+    // string getuid(object default: F__THIS_OBJECT) -- real f_getuid():
+    // returns ob->uid->name. Real's uid is never NULL for a loaded
+    // object; this driver returns 0 when the uid model is inactive (no
+    // get_root_uid() in the master) or the object predates it.
+    t.registerEfun("getuid", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && !std::holds_alternative<std::monostate>(args[0].data)) {
+            if (!std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+                throw LpcRuntimeError("getuid: argument must be an object");
+            }
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        if (ob && ob->uid().has_value()) return Value(*ob->uid());
+        return Value(int64_t{0});
+    });
+
+    // string geteuid(function | object default: F__THIS_OBJECT) -- real
+    // f_geteuid(): an object -> ob->euid->name or int 0 if euid is NULL;
+    // a function pointer -> its owner's euid->name, or 0 if the owner is
+    // gone or has no euid.
+    t.registerEfun("geteuid", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && !std::holds_alternative<std::monostate>(args[0].data)) {
+            if (auto* fp = std::get_if<std::shared_ptr<Closure>>(&args[0].data)) {
+                ob = (*fp) ? (*fp)->owner.lock() : nullptr;
+            } else if (std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+                ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+            } else {
+                throw LpcRuntimeError("geteuid: argument must be an object or a function");
+            }
+        } else {
+            ob = vm.currentObject();
+        }
+        if (ob && ob->euid().has_value()) return Value(*ob->euid());
+        return Value(int64_t{0});
+    });
+
+    // int seteuid(string | int) -- real f_seteuid(). A nonzero int is
+    // real's "bad_arg(1, F_SETEUID)". int 0 sets current_object->euid =
+    // NULL and returns 1. A string asks master->valid_seteuid(
+    // this_object(), str): real MASTER_APPROVED() (master.h:7) treats an
+    // *undefined* apply (apply_master_ob returns -1) as approved and only
+    // an explicit integer 0 as denial, so a master with no
+    // valid_seteuid() lets every seteuid() through. On approval
+    // current_object->euid = str and return 1; on denial return 0 and
+    // leave euid unchanged.
+    t.registerEfun("seteuid", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("seteuid: expected 1 argument");
+        auto caller = vm.currentObject();
+        if (!caller) throw LpcRuntimeError("seteuid: no current object");
+        if (auto* n = std::get_if<int64_t>(&args[0].data)) {
+            if (*n != 0) {
+                throw LpcRuntimeError("seteuid: bad argument 1 (a nonzero int)");
+            }
+            caller->setEuid(std::nullopt);
+            return Value(int64_t{1});
+        }
+        auto* s = std::get_if<std::string>(&args[0].data);
+        if (!s) throw LpcRuntimeError("seteuid: argument must be a string or 0");
+
+        bool approved = true;
+        auto master = vm.masterObject();
+        if (master && vm.functionExists(master, "valid_seteuid")) {
+            Value ret = vm.applyMaster("valid_seteuid", {Value(caller), Value(*s)});
+            if (auto* rn = std::get_if<int64_t>(&ret.data)) {
+                approved = (*rn != 0);
+            } else if (std::holds_alternative<std::monostate>(ret.data)) {
+                // real: a void LPC return is T_NUMBER 0, i.e. denial.
+                approved = false;
+            } else {
+                // real MASTER_APPROVED: a non-number, non-null return is
+                // approved.
+                approved = true;
+            }
+        }
+        if (!approved) return Value(int64_t{0});
+        caller->setEuid(*s);
+        return Value(int64_t{1});
+    });
+
+    // int export_uid(object) -- real f_export_uid(): errors "Illegal to
+    // export uid 0" if the caller's euid is NULL; returns 0 if the
+    // target already has an euid; otherwise sets target->uid =
+    // current_object->euid and returns 1. Grants the target the caller's
+    // effective identity as its permanent owner (login.c's own "so that
+    // login.c can export uid to us" pattern).
+    t.registerEfun("export_uid", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("export_uid: expected an object first argument");
+        }
+        auto target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!target) return Value(int64_t{0});
+        auto caller = vm.currentObject();
+        if (!caller || !caller->euid().has_value()) {
+            throw LpcRuntimeError("export_uid: Illegal to export uid 0");
+        }
+        if (target->euid().has_value()) return Value(int64_t{0});
+        target->setUid(*caller->euid());
+        return Value(int64_t{1});
+    });
+
     // void set_living_name(string) -- real add_action.c's own
     // f_set_living_name(), which calls the internal set_living_name(ob,
     // str) that assigns object_t::living_name and registers ob in the

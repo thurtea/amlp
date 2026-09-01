@@ -9,6 +9,143 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-01 (a further session, same day): uid / euid object trust
+model, slice 1 (ROADMAP row 3.1). The real FluffOS `uid` / `euid` data
+model plus the four uid efuns (`getuid`, `geteuid`, `seteuid`,
+`export_uid`), backed by real per-object state assigned at boot and per
+load/clone. `src/security` is no longer an empty directory. 823 tests
+passing (up from 820). ROADMAP row 3.1 -> `[x] (partial)`, row 3.2
+scoped.**
+
+**Why this, and why now.** The small efun/sprintf modifier sweep (rows
+2.57 through 2.62) had reached diminishing returns. The uid/security
+model (rows 3.1 + 3.2) is Phase 3's largest single open cluster and a
+real gate on running third-party FluffOS mudlibs: `void create() {
+seteuid(getuid()); }` is in essentially every mudlib object, and every
+one of those calls threw `undefined function or efun: seteuid` before
+this slice. `src/security/` had been an empty directory (`.gitkeep` +
+`instruct.md`) since the repo's start.
+
+**Scoped first (same turn).**
+
+  - **Real FluffOS model, read directly from
+    `temp/reference/fluffos-2.9-ds2.08/`:** `object.h:107-108` gives
+    `object_t` three separate security fields, `userid_t *uid` (owner),
+    `userid_t *euid` (effective owner), and `char *privs` (`:111`, the
+    string this driver already had). `packages/uids.c` has the
+    `userid_t {char *name;}` struct, `add_uid()` interning via an AVL
+    tree of shared strings, and the four `f_*` bodies.
+    `packages/uids_spec.c` has the signatures. `master.c:107-138`
+    `set_master()`: at first load `master_ob->uid =
+    set_root_uid(get_root_uid())`, `master_ob->euid = master_ob->uid`,
+    then `set_backbone_uid(get_bb_uid())` (apply names `get_root_uid` /
+    `get_bb_uid`, `applies_table.c:14,12`). `simulate.c:132-206`
+    `give_uid_to_object()`, run from `init_object()` before `create()`:
+    ask `master->creator_file(add_slash(obname))`, then if
+    `creator_name == current_object->uid->name` the new object gets
+    `uid = current_object->uid` and `euid = current_object->euid`
+    ("same uid as the loader"), else `uid = add_uid(creator_name)` and
+    `euid = NULL` (`AUTO_SETEUID` is `#undef` in the vendored
+    `local_options`; so is `AUTO_TRUST_BACKBONE`, so that middle branch
+    is not taken). `f_seteuid`: a nonzero int is `bad_arg`; int `0`
+    sets `euid = NULL` and returns 1; a string asks
+    `master->valid_seteuid(this_object(), str)` and real
+    `MASTER_APPROVED` (`master.h:7`) treats an undefined apply (returns
+    `-1`) as approval, only an explicit integer `0` denies.
+    `f_export_uid`: errors "Illegal to export uid 0" if the caller's
+    euid is NULL, returns 0 if the target already has an euid, else
+    sets `target->uid = current_object->euid` and returns 1.
+    `simulate.c:546-547`: `clone_object()` errors "Object must call
+    seteuid() prior to calling clone_object()" if the caller's euid is
+    0.
+  - **LDMud (`temp/ldmud/`):** `func_spec:667-668` and
+    `doc/efun/getuid`/`geteuid` confirm the same `getuid` (aliased
+    `creator()` since 3.2.1@47) / `geteuid` concept, root apply renamed
+    `get_master_uid`; `seteuid` folded into `configure_object()` and
+    `export_uid` dropped, so those two stay FluffOS-shaped.
+  - **This driver had:** one `LpcObject::privs_` string,
+    `query_privs`/`set_privs`, `ObjectManager::initPrivsForObject()`
+    (calls `master->privs_file()` at load), and
+    `queryMasterUid()`/`MasterUidBoot` (a 31-line boot helper that
+    queries `get_root_uid` and returns the string for `main.cpp` to
+    print, storing nothing). No `uid`/`euid` fields, no uid efuns.
+    `valid_read`/`valid_write` (`EfunTable.cpp`) pass `caller->privs()`
+    as a documented stand-in for the real euid.
+  - **Corpus:** ~529 `seteuid(`, ~441 `getuid(`, ~354 `geteuid(`, ~49
+    `export_uid(` call-site lines across the vendored corpora plus the
+    bundled `mudlib/`; six `local_options.*` variants define
+    `PACKAGE_UIDS`; the bundled `mudlib/single/master.c` defines
+    `get_root_uid`/`get_bb_uid`/`creator_file` and
+    `inherit/master/valid.c` defines `valid_seteuid`.
+
+**Built.**
+
+  - New `security` library: `include/amlp/security/UidModel.hpp` +
+    `src/security/UidModel.cpp`. `UidModel { optional<string> rootUid,
+    backboneUid; bool active(); }` and the pure `resolveObjectUids()`
+    distillation of `give_uid_to_object()` (creator vs loader compare,
+    the two real outcomes). No dependency beyond the standard library.
+    Wired into `CMakeLists.txt` before `src/object`, and linked into
+    the `object` library.
+  - `LpcObject`: `uid_` / `euid_` (`optional<string>`, `nullopt` ==
+    real `euid == NULL`), with `uid()`/`setUid()`/`euid()`/`setEuid()`.
+  - `ObjectManager::captureBootUids()`: run from `loadMasterObject()`
+    right after `master_` is assigned. Applies `get_root_uid` (then
+    LDMud's `get_master_uid` as a fallback), then `get_bb_uid`; stores
+    both strings; sets `master_->uid = master_->euid = rootUid`. Leaves
+    the model inactive when `get_root_uid()` is undefined, this
+    driver's stand-in for real's `PACKAGE_UIDS` compile flag.
+  - `ObjectManager::assignObjectUid()`: run from `loadObject()` and
+    `cloneObject()` after `initPrivsForObject()` and before `create()`
+    (so a `create()` body's own `seteuid(getuid())` sees the right
+    owner). No-op unless `uidModel_.active()`. Asks
+    `master->creator_file("/path")`, then `resolveObjectUids()`.
+  - `EfunTable.cpp`: `getuid` / `geteuid` / `seteuid` / `export_uid`,
+    real bodies. `geteuid` reads a function-pointer argument's owner
+    via `Closure::owner`. `seteuid`'s master gate matches
+    `MASTER_APPROVED`: undefined `valid_seteuid` -> approved, integer
+    `0` return -> denied, void return -> denied, any other -> approved.
+
+**Named divergence from real.** `give_uid_to_object()` real-destructs
+an object whose `creator_file()` is missing or returns a non-string;
+this driver instead assigns `uid = rootUid` and keeps the object, so a
+partly-uid-aware mudlib still boots. Interned-string sharing (real
+`add_uid()`'s AVL tree) is not reproduced.
+
+**Explicitly deferred, named on row 3.1 and row 3.2.** The
+`clone_object()` euid guard; `valid_read`/`valid_write` switching their
+uid argument from `privs()` to `euid()`; real uid/gid group membership
+and domain-trust traversal; the per-domain filesystem jail and
+`call_other` capability grants (row 3.2, scoped this session, kept
+`[ ]`).
+
+**3 new regression tests (823 total, up from 820):**
+`testUidModelBootCaptureAndPerObjectAssignment` (boot capture sets
+`rootUid`/`backboneUid` and the master's own uid/euid; a load whose
+creator matches the loader inherits both uid and euid; a load whose
+creator differs gets `uid = creator`, `euid = 0`; `getuid`/`geteuid`
+including the function-pointer form), `testSeteuidGeteuidExportUid
+Semantics` (the `create() { seteuid(getuid()); }` idiom lifts euid from
+0 to the owner uid; `seteuid(0)` clears it; `export_uid` grants a
+no-euid target the caller's identity, returns 0 for a target that
+already has an euid, and errors for a caller whose own euid is 0),
+`testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel` (a
+`valid_seteuid` returning 0 denies and leaves euid unchanged; with a
+master that defines no `get_root_uid` the model stays inactive, no
+owner uid is assigned, but the efuns still work and a master with no
+`valid_seteuid` approves every `seteuid`). Every expected value traced
+by hand from `packages/uids.c` / `simulate.c`. Also live-booted the
+bundled `mudlib/`: `master get_root_uid() = "Root"`, no failed loads.
+The existing 820 re-run unchanged (the `mudlib_stub` master defines no
+`get_root_uid`, so the model is inactive for every pre-existing test).
+
+**Documentation.** ROADMAP row 3.1 -> `[x] (partial)` with the full
+citation trail, remaining-scope list, and the named divergences; row
+3.2 scoped (still `[ ]`). `COMPARISON.md` not touched this session, per
+the task's "ROADMAP and STATUS only" instruction: its 2026-09-01 sweep
+note's Phase 3 fraction (1/9) and rollups now trail the live count by
+one row (3.1) and will catch up at the file's next full sweep.
+
 **2026-09-01 (a further session, same day): `sprintf` `%f` float
 specifier, `%i` alias of `%d`, and the `+` / space pad-prefix flags.
 `sprintf` now formats a float argument with `%f` (six-place default,

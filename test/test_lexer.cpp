@@ -14182,6 +14182,178 @@ static void testSetPrivsThenQueryPrivsRoundTripsAndClearsOnNonStringArgument() {
 }
 
 // ---------------------------------------------------------------------
+// FluffOS uid / euid trust model (ROADMAP row 3.1). Real source:
+// temp/reference/fluffos-2.9-ds2.08/packages/uids.c (f_getuid/f_geteuid/
+// f_seteuid/f_export_uid), master.c:107-138 (set_master() boot uid), and
+// simulate.c:132-206 (give_uid_to_object()). Corpus: ~529 seteuid(),
+// ~441 getuid() call-site lines, overwhelmingly "void create() {
+// seteuid(getuid()); }".
+// ---------------------------------------------------------------------
+
+// A master that turns the uid model on: get_root_uid() / get_bb_uid()
+// present, a creator_file() that assigns "wiz" to any /wiz_* path and
+// "root" to everything else, and a permissive valid_seteuid().
+static const char* kUidAwareMaster =
+    "void create() {}\n"
+    "string get_root_uid() { return \"root\"; }\n"
+    "string get_bb_uid() { return \"backbone\"; }\n"
+    "string creator_file(string p) { return (p[1] == 'w') ? \"wiz\" : \"root\"; }\n"
+    "int valid_seteuid(object ob, string s) { return 1; }\n";
+
+static void testUidModelBootCaptureAndPerObjectAssignment() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", kUidAwareMaster);
+    assert(harness.objects.loadMasterObject());
+
+    // Boot capture (real master.c:108-138).
+    assert(harness.objects.uidModel().active());
+    assert(harness.objects.uidModel().rootUid.has_value() &&
+           *harness.objects.uidModel().rootUid == "root");
+    assert(harness.objects.uidModel().backboneUid.has_value() &&
+           *harness.objects.uidModel().backboneUid == "backbone");
+    // master_ob->uid = master_ob->euid = root uid.
+    auto master = harness.objects.masterObject();
+    assert(master && master->uid().has_value() && *master->uid() == "root");
+    assert(master && master->euid().has_value() && *master->euid() == "root");
+
+    // give_uid_to_object(): creator "root" matches the loader uid (root,
+    // since there is no current_object at this direct-clone call site) ->
+    // the object inherits both uid and euid.
+    harness.writeFile("/root_probe.c",
+        "string my_uid() { return getuid(); }\n"
+        "string my_euid() { return geteuid(); }\n"
+        "mixed fp_euid() { return geteuid( (: 1 :) ); }\n");
+    auto rootObj = harness.objects.cloneObject("/root_probe");
+    assert(rootObj != nullptr);
+    assert(rootObj->uid().has_value() && *rootObj->uid() == "root");
+    assert(rootObj->euid().has_value() && *rootObj->euid() == "root");
+    assert(std::get<std::string>(
+        harness.vm.callFunction(rootObj, "my_uid", {}).data) == "root");
+    assert(std::get<std::string>(
+        harness.vm.callFunction(rootObj, "my_euid", {}).data) == "root");
+    // geteuid(function) reads the closure owner's euid.
+    assert(std::get<std::string>(
+        harness.vm.callFunction(rootObj, "fp_euid", {}).data) == "root");
+
+    // give_uid_to_object(): creator "wiz" differs from the loader uid ->
+    // uid = "wiz", euid = 0 (real AUTO_SETEUID is undef).
+    harness.writeFile("/wiz_probe.c",
+        "string my_uid() { return getuid(); }\n"
+        "mixed my_euid() { return geteuid(); }\n");
+    auto wizObj = harness.objects.cloneObject("/wiz_probe");
+    assert(wizObj != nullptr);
+    assert(wizObj->uid().has_value() && *wizObj->uid() == "wiz");
+    assert(!wizObj->euid().has_value());
+    assert(std::get<std::string>(
+        harness.vm.callFunction(wizObj, "my_uid", {}).data) == "wiz");
+    // geteuid() with no euid set is int 0, not a string.
+    assert(std::get<int64_t>(
+        harness.vm.callFunction(wizObj, "my_euid", {}).data) == 0);
+
+    std::cout << "testUidModelBootCaptureAndPerObjectAssignment OK\n";
+}
+
+static void testSeteuidGeteuidExportUidSemantics() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", kUidAwareMaster);
+    assert(harness.objects.loadMasterObject());
+
+    // "void create() { seteuid(getuid()); }" -- the canonical corpus
+    // idiom. The wiz object starts with euid 0; create() lifts it to its
+    // own uid. (creator_file() in kUidAwareMaster keys on p[1]=='w', so
+    // the path has to start "/wiz" to be assigned owner "wiz".)
+    harness.writeFile("/wiz_su.c",
+        "void create() { seteuid(getuid()); }\n"
+        "mixed euid() { return geteuid(); }\n"
+        "int clear() { return seteuid(0); }\n");
+    auto w = harness.objects.cloneObject("/wiz_su");
+    assert(w != nullptr);
+    assert(w->euid().has_value() && *w->euid() == "wiz");
+    assert(std::get<std::string>(harness.vm.callFunction(w, "euid", {}).data) == "wiz");
+
+    // seteuid(0) clears the euid and returns 1.
+    assert(std::get<int64_t>(harness.vm.callFunction(w, "clear", {}).data) == 1);
+    assert(!w->euid().has_value());
+    assert(std::get<int64_t>(harness.vm.callFunction(w, "euid", {}).data) == 0);
+
+    // export_uid: a caller with euid "root" grants its identity to a
+    // target that has no euid, setting the target's owner uid.
+    harness.writeFile("/exp_giver.c",
+        "int give(object b) { return export_uid(b); }\n");
+    auto giver = harness.objects.cloneObject("/exp_giver");
+    assert(giver != nullptr && giver->euid().has_value() && *giver->euid() == "root");
+    harness.writeFile("/wiz_target.c", "int nop() { return 1; }\n");
+    auto target = harness.objects.cloneObject("/wiz_target");
+    assert(target != nullptr && *target->uid() == "wiz" && !target->euid().has_value());
+    assert(std::get<int64_t>(
+        harness.vm.callFunction(giver, "give", {amlp::Value(target)}).data) == 1);
+    assert(*target->uid() == "root");  // owner uid overwritten by the export
+
+    // export_uid onto a target that already has an euid returns 0
+    // (real f_export_uid: "if (ob->euid) { ... *sp = const0; }").
+    harness.writeFile("/wiz_has_euid.c",
+        "void create() { seteuid(getuid()); }\n"
+        "int nop() { return 1; }\n");
+    auto already = harness.objects.cloneObject("/wiz_has_euid");
+    assert(already != nullptr && already->euid().has_value());
+    assert(std::get<int64_t>(
+        harness.vm.callFunction(giver, "give", {amlp::Value(already)}).data) == 0);
+
+    // A caller whose own euid is 0 cannot export at all: real errors
+    // "Illegal to export uid 0".
+    giver->setEuid(std::nullopt);
+    bool threw = false;
+    try {
+        harness.vm.callFunction(giver, "give", {amlp::Value(target)});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testSeteuidGeteuidExportUidSemantics OK\n";
+}
+
+static void testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel() {
+    // valid_seteuid() returning 0 denies the change; euid is left as is.
+    ObjectVarHarness denying;
+    denying.writeFile("/unused.c",
+        "void create() {}\n"
+        "string get_root_uid() { return \"root\"; }\n"
+        "string get_bb_uid() { return \"bb\"; }\n"
+        "string creator_file(string p) { return \"wiz\"; }\n"
+        "int valid_seteuid(object ob, string s) { return 0; }\n");
+    assert(denying.objects.loadMasterObject());
+    denying.writeFile("/sd.c",
+        "int try_set() { return seteuid(\"wiz\"); }\n"
+        "mixed euid() { return geteuid(); }\n");
+    auto sd = denying.objects.cloneObject("/sd");
+    assert(sd != nullptr && !sd->euid().has_value());
+    assert(std::get<int64_t>(denying.vm.callFunction(sd, "try_set", {}).data) == 0);
+    assert(!sd->euid().has_value());
+    assert(std::get<int64_t>(denying.vm.callFunction(sd, "euid", {}).data) == 0);
+
+    // A master with no get_root_uid(): the model stays inactive, no owner
+    // uid is ever assigned, but the efuns still function. A master with
+    // no valid_seteuid() approves every seteuid() (real MASTER_APPROVED
+    // treats the -1 "undefined apply" return as approval).
+    ObjectVarHarness plain;
+    plain.writeFile("/unused.c", "void create() {}\n");
+    assert(plain.objects.loadMasterObject());
+    assert(!plain.objects.uidModel().active());
+    plain.writeFile("/pu.c",
+        "mixed uid0() { return getuid(); }\n"
+        "int set_it() { return seteuid(\"someone\"); }\n"
+        "mixed euid() { return geteuid(); }\n");
+    auto pu = plain.objects.cloneObject("/pu");
+    assert(pu != nullptr);
+    assert(std::get<int64_t>(plain.vm.callFunction(pu, "uid0", {}).data) == 0);
+    assert(std::get<int64_t>(plain.vm.callFunction(pu, "set_it", {}).data) == 1);
+    assert(std::get<std::string>(plain.vm.callFunction(pu, "euid", {}).data) == "someone");
+
+    std::cout << "testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel OK\n";
+}
+
+// ---------------------------------------------------------------------
 // Object variable initializer VM execution ("$objvarinit", see
 // CodeGen::generate()'s own comment). Surfaced live compiling secure/
 // daemon/wiztools.c's own "string *REISSUED_TOOLS = ({ ... });".
@@ -27621,6 +27793,9 @@ int main() {
     testQueryVerbReturnsZeroOutsideOfDispatch();
     testQueryPrivsReturnsZeroWhenNeverSet();
     testSetPrivsThenQueryPrivsRoundTripsAndClearsOnNonStringArgument();
+    testUidModelBootCaptureAndPerObjectAssignment();
+    testSeteuidGeteuidExportUidSemantics();
+    testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel();
     testObjectVarInitializerRunsBeforeCreate();
     testObjectVarInitializerRunsOnFileWithNoCreateAtAll();
     testObjectVarInitializerParentRunsBeforeChild();

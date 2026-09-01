@@ -690,7 +690,96 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
 
 bool ObjectManager::loadMasterObject() {
     master_ = loadObject(config_.masterFile());
+    if (master_) captureBootUids();
     return master_ != nullptr;
+}
+
+void ObjectManager::captureBootUids() {
+    if (!vm_ || !master_) return;
+
+    // real master.c:108 "ret = apply_master_ob(APPLY_GET_ROOT_UID, 0);".
+    // callFunction() returns a monostate Value for a function the master
+    // does not define, so a non-string result here just leaves the model
+    // inactive (real exits(-1) instead, but this driver treats "no
+    // get_root_uid()" as "this mudlib was built without PACKAGE_UIDS").
+    Value rootRet;
+    try {
+        rootRet = vm_->callFunction(master_, "get_root_uid", {});
+        if (std::holds_alternative<std::monostate>(rootRet.data)) {
+            // LDMud renamed this apply get_master_uid in 3.2.1@40
+            // (doc/master/get_master_uid HISTORY, and BootApi::
+            // masterUidApply()'s own comment). Try it as a fallback so
+            // an LDMud-dialect mudlib (temp/core-lib) activates the same
+            // model.
+            rootRet = vm_->callFunction(master_, "get_master_uid", {});
+        }
+    } catch (const std::exception&) {
+        return;
+    }
+    auto* rootStr = std::get_if<std::string>(&rootRet.data);
+    if (!rootStr || rootStr->empty()) return;
+    uidModel_.rootUid = *rootStr;
+
+    // real master.c:126 "ret = apply_master_ob(APPLY_GET_BACKBONE_UID,
+    // 0);". Apply name "get_bb_uid" (applies_table.c:12); LDMud uses the
+    // same string. Only the AUTO_TRUST_BACKBONE branch consumes it, and
+    // that is #undef in the vendored build, so a missing get_bb_uid() is
+    // not fatal here (real exits(-1)).
+    try {
+        Value bbRet = vm_->callFunction(master_, "get_bb_uid", {});
+        if (auto* bb = std::get_if<std::string>(&bbRet.data); bb && !bb->empty()) {
+            uidModel_.backboneUid = *bb;
+        }
+    } catch (const std::exception&) {
+        // leave backboneUid unset
+    }
+
+    // real master.c:121-122 "master_ob->uid = set_root_uid(ret->u.string);
+    // master_ob->euid = master_ob->uid;".
+    master_->setUid(*rootStr);
+    master_->setEuid(*rootStr);
+}
+
+void ObjectManager::assignObjectUid(const std::shared_ptr<LpcObject>& obj,
+                                     const std::string& filename) {
+    if (!obj || !vm_ || !master_ || !uidModel_.active()) return;
+
+    // real simulate.c:149-151 "push_malloced_string(add_slash(ob->obname));
+    // ret = apply_master_ob(APPLY_CREATOR_FILE, 1);".
+    std::string slashPath =
+        (filename.empty() || filename[0] == '/') ? filename : ("/" + filename);
+    std::string creatorName;
+    bool haveCreator = false;
+    if (vm_->functionExists(master_, "creator_file")) {
+        try {
+            Value ret = vm_->callFunction(master_, "creator_file", {Value(slashPath)});
+            if (auto* s = std::get_if<std::string>(&ret.data)) {
+                creatorName = *s;
+                haveCreator = true;
+            }
+        } catch (const std::exception&) {
+            // fall through to the safe default below
+        }
+    }
+    if (!haveCreator) {
+        // Named divergence from real simulate.c:157-160, which destructs
+        // the object and errors ("return value of master::creator_file()
+        // was not a string"). This driver keeps the object and makes it
+        // root-owned so a mudlib that defines get_root_uid() but not a
+        // working creator_file() still boots. rootUid is set here because
+        // uidModel_.active() is true.
+        obj->setUid(*uidModel_.rootUid);
+        return;
+    }
+
+    auto caller = vm_->currentObject();
+    std::optional<std::string> loaderUid = caller ? caller->uid() : uidModel_.rootUid;
+    std::optional<std::string> loaderEuid = caller ? caller->euid() : uidModel_.rootUid;
+
+    ResolvedObjectUids r =
+        resolveObjectUids(uidModel_, creatorName, loaderUid, loaderEuid);
+    obj->setUid(r.uid);
+    obj->setEuid(r.euid);
 }
 
 bool ObjectManager::loadSimulEfunObject() {
@@ -794,6 +883,10 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& rawFilen
     loaded_[filename] = obj;
     LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
+    // real init_object() -> give_uid_to_object() (simulate.c), run
+    // before create() so a "void create() { seteuid(getuid()); }" body
+    // sees the right owner uid. No-op unless the uid model is active.
+    assignObjectUid(obj, filename);
 
     // A runtime error thrown out of create() (a missing efun, a bad
     // sscanf(), etc.) must fail this one object's load, not crash the
@@ -834,6 +927,10 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFile
     auto obj = std::make_shared<LpcObject>(filename, program);
     LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
+    // real clone_object() -> give_uid_to_object(new_ob) (simulate.c:309),
+    // same per-object uid/euid assignment as a fresh load. No-op unless
+    // the uid model is active.
+    assignObjectUid(obj, filename);
     // real simulate.c's own "new_ob->flags |= O_CLONE | O_WILL_CLEAN_UP;"
     // (clone_object(), simulate.c:2448) -- O_CLONE set unconditionally,
     // right alongside O_WILL_CLEAN_UP, at construction, not deferred to

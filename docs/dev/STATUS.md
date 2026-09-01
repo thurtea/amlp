@@ -10,6 +10,164 @@ fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
 **2026-09-01 (a further session, same day): uid / euid object trust
+model, slice 3 (ROADMAP rows 3.1 / 3.2). The domain-trust traversal half
+of row 3.1's item (c): the `AUTO_TRUST_BACKBONE` middle branch of real
+`give_uid_to_object()`, exposed as a default-off `auto_trust_backbone`
+config key. Also a plain finding, not a build: real uid/gid *group
+membership* has no driver-level source in either the vendored FluffOS
+2.9 or LDMud, so it is deliberately not invented. Row 3.2's item (3)
+re-scoped after reading real `check_valid_path()` directly. 827 tests
+passing (up from 825). Rows 3.1 and 3.2 cells both updated; row 3.1
+stays `[x] (partial)`, row 3.2 stays `[ ]`.**
+
+**Why this, and why now.** Slice 1 built the uid/euid data model and the
+four uid efuns; slice 2 wired the two places that data first gates
+behavior (`clone_object()` guard, `valid_read`/`valid_write` uid arg).
+Row 3.1's title still named "uid/gid ... hierarchy" and its "Still not
+built" clause named "(c) real uid/gid group membership and the domain
+trust traversal". This slice closes the part of (c) that has a real
+source to port and states plainly that the rest does not.
+
+**Finding: no driver-level group membership to port.** Read directly:
+
+  - **FluffOS 2.9** (`temp/reference/fluffos-2.9-ds2.08/`): `packages/
+    uids.c` carries only `userid_t {char *name;}`, `root_uid`,
+    `backbone_uid`. No gid struct, no group list, no group-membership
+    call anywhere. `grep -n "gid\|group_member\|->groups"` across
+    `*.c`/`*.h`/`packages/` returns only OS-level `st_gid` in
+    `file.c:1181` (stat output) and `portbind.c`'s `setgid()` (the
+    privileged port-bind helper). `packages/uids_spec.c` exposes only
+    `getuid`/`geteuid`/`seteuid`/`export_uid`.
+  - **LDMud** (`temp/ldmud/`): `src/func_spec:665-668` exposes only
+    `geteuid`/`getuid`/`creator`. `doc/efun/getuid` describes the uid as
+    "the name of the wizard **or domain**" but that is a mudlib-level
+    label on one opaque string, not a driver group set. `grep -rln
+    "\bgid\b" src/*.c` hits only `pkg-openssl.c`.
+
+  Group membership in real LPMud security is entirely a mudlib concept
+  (the master's own `valid_read`/`valid_write`/`creator_file` bodies map
+  one uid string to whatever domain/group policy that mudlib wants).
+  There is nothing in either driver to port, so per this project's
+  port-not-invent discipline it is not built.
+
+**Cited real source for the domain-trust traversal, read directly.**
+
+  - **The branch:** `temp/reference/fluffos-2.9-ds2.08/simulate.c:
+    178-186`, inside `give_uid_to_object()`, between the "same uid as the
+    loader" branch (`:166-176`) and the "another wizard ... can't be
+    trusted" fallback (`:196-204`):
+    `#ifdef AUTO_TRUST_BACKBONE / if (strcmp(backbone_uid->name,
+    creator_name) == 0) { ob->uid = current_object->euid; ob->euid =
+    current_object->euid; return 1; } / #endif`. An object whose
+    `creator_file()` is the backbone uid is trusted and runs with the
+    loader's effective identity.
+  - **Why slice 1 skipped it:** `AUTO_TRUST_BACKBONE` is `#undef` in the
+    vendored reference build, `local_options:671-675` (same as
+    `options.h:677`).
+  - **Corpus evidence for making it opt-in:** `#define
+    AUTO_TRUST_BACKBONE` in three of the vendored FluffOS mudlib option
+    variants: `temp/reference/fluffos-2.9-ds2.08/local_options.lima:574`,
+    `local_options.tmi2`, `local_options.merentha`. LIMA and TMI2 are
+    both named boot candidates on ROADMAP row 3.8.
+  - **LDMud divergence:** no driver-level backbone or domain trust at
+    all. `temp/ldmud/src/simulate.c:1526-1600` `determine_uid()` calls
+    the mudlib's `H_LOAD_UIDS` / `H_CLONE_UIDS` driver hook and takes
+    whatever it returns: a string (`uid = euid = that`), a two-element
+    `({uid, euid})` array (distinct euid, this is how an LDMud mudlib
+    grants trust), or (non-strict-euids) a number. All policy is
+    mudlib-side; the driver has no backbone concept to port.
+
+**Built.**
+
+  - **`Config`** (`include/amlp/config/Config.hpp` + `src/config/
+    Config.cpp`): new `auto_trust_backbone` key, `bool
+    autoTrustBackbone()` getter, default `false` (this driver's stand-in
+    for the compile flag, matching the vendored `#undef`). Parsed next to
+    `dialect`, accepts `1`/`true`/`yes`/`on`. Every existing config file
+    that never sets it is byte-for-byte unaffected.
+  - **`UidModel`** (`include/amlp/security/UidModel.hpp`): new `bool
+    autoTrustBackbone = false` field. `resolveObjectUids()`'s header doc
+    rewritten to list all three real branches in real's own order.
+  - **`ObjectManager::captureBootUids()`** (`src/object/
+    ObjectManager.cpp`): after capturing `backboneUid`, sets
+    `uidModel_.autoTrustBackbone = config_.autoTrustBackbone()`. The
+    `get_bb_uid` comment updated (it used to say the backbone uid is
+    never consumed because the branch is `#undef`).
+  - **`resolveObjectUids()`** (`src/security/UidModel.cpp`): the middle
+    branch, taken only when `model.autoTrustBackbone && model.backboneUid
+    && creatorName == *model.backboneUid && loaderEuid.has_value()`,
+    returning `{*loaderEuid, loaderEuid}` (real `ob->uid = ob->euid =
+    current_object->euid`). The stale `(void)model;` line is gone.
+  - **Named divergence from real:** real assigns `current_object->euid`
+    unconditionally, so a loader whose euid is 0 leaves the new object
+    with a NULL uid that real's own `f_getuid()` then flags with
+    `DEBUG_CHECK("UID is a null pointer\n")`. This driver requires
+    `loaderEuid.has_value()` for the branch and otherwise falls through
+    to the untrusted branch, which cannot produce a null uid.
+
+**Row 3.2 item (3) re-scoped, not built.** Its old text asked for "a
+real per-domain writable-path check ... that consults the master rather
+than only `checkValidPath()`". Reading real FluffOS 2.9 `file.c:705-750`
+`check_valid_path()` directly: that single function IS the entire
+driver-level jail. It pushes `(path, call_object, call_fun)`, applies
+`valid_write` / `valid_read`, treats a `0` return as deny and a string
+return as a path rewrite, then runs `legal_path()` (`..` / `#` / space
+check). No second per-domain layer exists in the driver; the
+domain-to-prefix mapping is entirely in the mudlib master's `valid_*`
+body. This driver's `checkValidPath()` already does that apply with the
+object's `euid()` (slice 2) and already gates every relevant file efun.
+The one real remaining gap is the `legal_path()` `..`/`#` check, which
+`checkValidPath()`'s own comment already flags as deliberately skipped;
+that is the concrete smallest next cut for row 3.2, not a new
+master-consulting layer. The `call_other` capability-grant half still
+has no FluffOS 2.9 analog (DGD-style) and stays deferred.
+
+**2 new regression tests (827 total, up from 825),** both in
+`test/test_lexer.cpp` next to the slice 1 / slice 2 uid tests, and
+registered in `main()`:
+
+  - `testAutoTrustBackboneResolveBranch`: drives the pure
+    `resolveObjectUids()` directly (new `#include "amlp/security/
+    UidModel.hpp"` in the test). Flag off, a backbone creator with a
+    wiz-euid loader takes the untrusted branch (`uid = "backbone"`, euid
+    0). Flag on, same inputs yield `uid = euid = "wiz"` (the loader
+    euid). Branch order: when the creator equals both the loader uid and
+    the backbone uid, the "same uid as the loader" branch still wins.
+    The euid-0 decline: flag on, backbone creator, loader euid 0 -> the
+    untrusted branch, not a null uid. A non-backbone creator is
+    unaffected by the flag. Flag on but `backboneUid` unset (master
+    defined no `get_bb_uid()`) -> nothing matches, untrusted branch.
+  - `testAutoTrustBackboneEndToEndViaConfigKey`: through
+    `ObjectVarHarness`, one harness built with `auto_trust_backbone: 1`
+    in its config and one without (default). A master
+    (`kBackboneTrustMaster`) whose `creator_file()` returns `"backbone"`
+    for a `/b*` path, `"wiz"` for a `/w*` path. A `/wiz_loader` that runs
+    `seteuid(getuid())` in `create()` (euid becomes `"wiz"`) then
+    `clone_object("/bb_lib")` from an LPC function. Flag on: the clone's
+    uid and euid are both `"wiz"`. Flag off: the clone is `"backbone"` /
+    euid 0. Also asserts `uidModel().autoTrustBackbone` reflects the key
+    both ways.
+
+  The other 825 pre-existing tests re-run unchanged (no existing test
+  sets the new key, and `UidModel::autoTrustBackbone` defaults false).
+  Full clean rebuild from `cmake --build . --target clean`: no warnings,
+  no errors. Live re-boot of the bundled `mudlib/` (`etc/driver.cfg`,
+  one iteration): `master get_root_uid() = "Root"`, no failed loads, no
+  undefined-function errors (the bundled mudlib never sets
+  `auto_trust_backbone`, so the new branch is inert there). Every
+  expected value traced by hand from `simulate.c:178-186`, not read back
+  from this driver.
+
+**Documentation.** ROADMAP rows 3.1 and 3.2 cells updated (3.1's "Still
+not built" clause rewritten to separate the no-source group-membership
+part from the ported traversal, plus a "Slice 3" paragraph with the full
+citation trail and the two new test descriptions; 3.2's item (3)
+re-scoped in place). `COMPARISON.md` not touched, per the task's
+"ROADMAP and STATUS only" instruction; its 2026-09-01 sweep note's Phase
+3 fraction and suite count now trail the live numbers (suite 827) and
+will catch up at that file's next full sweep.**
+
+**2026-09-01 (a further session, same day): uid / euid object trust
 model, slice 2 (ROADMAP rows 3.1 / 3.2). The two items slice 1 named as
 explicitly deferred: the `clone_object()` "must call `seteuid()` first"
 guard, and `valid_read` / `valid_write` taking the caller's real

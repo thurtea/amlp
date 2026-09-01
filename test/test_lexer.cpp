@@ -9,6 +9,7 @@
 #include "amlp/object/ObjectManager.hpp"
 #include "amlp/object/LiveObjectRegistry.hpp"
 #include "amlp/config/Config.hpp"
+#include "amlp/security/UidModel.hpp"
 #include "amlp/efun/EfunTable.hpp"
 #include "amlp/efun/ParserPackage.hpp"
 #include "amlp/efun/DbRegistry.hpp"
@@ -14502,6 +14503,143 @@ static void testValidWriteUidArgumentIsEuidUnderActiveUidModel() {
     std::cout << "testValidWriteUidArgumentIsEuidUnderActiveUidModel OK\n";
 }
 
+// ROADMAP row 3.1 item (c), slice 3: the domain-trust traversal of real
+// give_uid_to_object(). Real simulate.c:178-186 is a middle branch,
+// "#ifdef AUTO_TRUST_BACKBONE / if (strcmp(backbone_uid->name,
+// creator_name) == 0) { ob->uid = current_object->euid; ob->euid =
+// current_object->euid; return 1; }", checked after "same uid as the
+// loader" and before "another wizard, not trusted". AUTO_TRUST_BACKBONE
+// is #undef in the vendored reference local_options but #define'd in
+// local_options.lima / .tmi2 / .merentha, so this driver exposes it as
+// the "auto_trust_backbone" config key (default off). resolveObjectUids()
+// (src/security/UidModel.cpp) is the pure distillation this exercises
+// directly, then once more end to end through the config key.
+static void testAutoTrustBackboneResolveBranch() {
+    using amlp::resolveObjectUids;
+    using amlp::UidModel;
+
+    UidModel m;
+    m.rootUid = "root";
+    m.backboneUid = "backbone";
+
+    const std::optional<std::string> wiz("wiz");
+    const std::optional<std::string> none;
+
+    // Flag off (default, matching the vendored #undef): a backbone-owned
+    // object loaded by a wiz-euid loader drops straight to the untrusted
+    // branch -- uid = creator, euid = 0.
+    {
+        auto r = resolveObjectUids(m, "backbone", wiz, wiz);
+        assert(r.uid == "backbone" && !r.euid.has_value());
+    }
+
+    m.autoTrustBackbone = true;
+
+    // Flag on: real simulate.c:181-183 -- uid = euid = the loader's euid.
+    {
+        auto r = resolveObjectUids(m, "backbone", wiz, wiz);
+        assert(r.uid == "wiz" && r.euid.has_value() && *r.euid == "wiz");
+    }
+
+    // Branch order: the "same uid as the loader" branch is checked first,
+    // so it still wins even when the creator also equals the backbone uid
+    // (here the object inherits the loader's euid 0 unchanged).
+    {
+        auto r = resolveObjectUids(m, "backbone",
+                                   std::optional<std::string>("backbone"), none);
+        assert(r.uid == "backbone" && !r.euid.has_value());
+    }
+
+    // Named divergence from real: the loader's euid is 0. Real assigns
+    // current_object->euid (NULL) as the new uid, which its own f_getuid()
+    // then flags with DEBUG_CHECK("UID is a null pointer"). This driver
+    // declines the trust grant and uses the untrusted branch instead.
+    {
+        auto r = resolveObjectUids(m, "backbone", wiz, none);
+        assert(r.uid == "backbone" && !r.euid.has_value());
+    }
+
+    // A non-backbone creator is untouched by the flag.
+    {
+        auto r = resolveObjectUids(m, "somewiz", wiz, wiz);
+        assert(r.uid == "somewiz" && !r.euid.has_value());
+    }
+
+    // Flag on but the master defined no get_bb_uid(), so backboneUid is
+    // unset: nothing to match against, untrusted branch.
+    m.backboneUid.reset();
+    {
+        auto r = resolveObjectUids(m, "backbone", wiz, wiz);
+        assert(r.uid == "backbone" && !r.euid.has_value());
+    }
+
+    std::cout << "testAutoTrustBackboneResolveBranch OK\n";
+}
+
+static const char* kBackboneTrustMaster =
+    "void create() {}\n"
+    "string get_root_uid() { return \"root\"; }\n"
+    "string get_bb_uid() { return \"backbone\"; }\n"
+    "string creator_file(string p) {\n"
+    "    if (p[1] == 'b') return \"backbone\";\n"
+    "    if (p[1] == 'w') return \"wiz\";\n"
+    "    return \"root\";\n"
+    "}\n"
+    "int valid_seteuid(object ob, string s) { return 1; }\n";
+
+static void testAutoTrustBackboneEndToEndViaConfigKey() {
+    // Flag on: a /bb_* object (creator_file() -> "backbone") cloned by a
+    // /wiz_* loader that has already seteuid()'d itself inherits that
+    // loader's euid as both its uid and its euid.
+    {
+        ObjectVarHarness on("auto_trust_backbone: 1\n");
+        on.writeFile("/unused.c", kBackboneTrustMaster);
+        assert(on.objects.loadMasterObject());
+        assert(on.objects.uidModel().active());
+        assert(on.objects.uidModel().autoTrustBackbone);
+
+        on.writeFile("/wiz_loader.c",
+            "void create() { seteuid(getuid()); }\n"
+            "object load_bb() { return clone_object(\"/bb_lib\"); }\n");
+        on.writeFile("/bb_lib.c", "int nop() { return 1; }\n");
+
+        auto loader = on.objects.cloneObject("/wiz_loader");
+        assert(loader != nullptr && loader->euid().has_value() &&
+               *loader->euid() == "wiz");
+
+        amlp::Value made = on.vm.callFunction(loader, "load_bb", {});
+        auto bb = std::get<std::shared_ptr<amlp::LpcObject>>(made.data);
+        assert(bb != nullptr);
+        assert(bb->uid().has_value() && *bb->uid() == "wiz");
+        assert(bb->euid().has_value() && *bb->euid() == "wiz");
+    }
+
+    // Flag off (default): the identical load leaves the backbone object
+    // owned by "backbone" with euid 0 (the untrusted branch).
+    {
+        ObjectVarHarness off;
+        off.writeFile("/unused.c", kBackboneTrustMaster);
+        assert(off.objects.loadMasterObject());
+        assert(off.objects.uidModel().active());
+        assert(!off.objects.uidModel().autoTrustBackbone);
+
+        off.writeFile("/wiz_loader.c",
+            "void create() { seteuid(getuid()); }\n"
+            "object load_bb() { return clone_object(\"/bb_lib\"); }\n");
+        off.writeFile("/bb_lib.c", "int nop() { return 1; }\n");
+
+        auto loader = off.objects.cloneObject("/wiz_loader");
+        assert(loader != nullptr);
+        amlp::Value made = off.vm.callFunction(loader, "load_bb", {});
+        auto bb = std::get<std::shared_ptr<amlp::LpcObject>>(made.data);
+        assert(bb != nullptr);
+        assert(bb->uid().has_value() && *bb->uid() == "backbone");
+        assert(!bb->euid().has_value());
+    }
+
+    std::cout << "testAutoTrustBackboneEndToEndViaConfigKey OK\n";
+}
+
 // ---------------------------------------------------------------------
 // Object variable initializer VM execution ("$objvarinit", see
 // CodeGen::generate()'s own comment). Surfaced live compiling secure/
@@ -27947,6 +28085,8 @@ int main() {
     testSeteuidDeniedByMasterAndUidEfunsWithoutTheBootModel();
     testCloneObjectRequiresCallerEuidUnderActiveUidModel();
     testValidWriteUidArgumentIsEuidUnderActiveUidModel();
+    testAutoTrustBackboneResolveBranch();
+    testAutoTrustBackboneEndToEndViaConfigKey();
     testObjectVarInitializerRunsBeforeCreate();
     testObjectVarInitializerRunsOnFileWithNoCreateAtAll();
     testObjectVarInitializerParentRunsBeforeChild();

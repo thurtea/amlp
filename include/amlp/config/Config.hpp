@@ -40,6 +40,24 @@ public:
     // included.
     const std::string& globalIncludeFile() const { return globalIncludeFile_; }
 
+    // Real FluffOS's own AUTO_TRUST_BACKBONE compile-time option
+    // (options.h / local_options: "define this if you want objects with
+    // the backbone uid to automatically be trusted and to have their
+    // euid set to the uid of the object that forced the object's
+    // creation"). It is #undef in the vendored reference build
+    // (temp/reference/fluffos-2.9-ds2.08/local_options), so this
+    // defaults to false and every existing config file that never sets
+    // the key behaves exactly as before. It IS #define'd in three of the
+    // vendored mudlib option variants (local_options.lima,
+    // local_options.tmi2, local_options.merentha), which is the real
+    // corpus evidence for exposing it as a runtime key here. When true,
+    // give_uid_to_object()'s middle branch fires: an object whose
+    // creator_file() is the backbone uid inherits the loader's euid as
+    // both its uid and euid (see resolveObjectUids() in
+    // src/security/UidModel.hpp). Only consulted while the uid model is
+    // active (a master that defines get_root_uid()).
+    bool autoTrustBackbone() const { return autoTrustBackbone_; }
+
     // Which LPC dialect this driver runs as -- "fluffos" (default),
     // "ldmud", or "dgd" (see src/dialect/LpcDialect.hpp's own
     // dialectFromString() for the string<->enum mapping actually used).
@@ -63,6 +81,7 @@ private:
     std::string mudName_ = "AMLP";
     std::string globalIncludeFile_ = "";
     std::string dialect_ = "fluffos";
+    bool autoTrustBackbone_ = false;
 
     std::unordered_map<std::string, std::string> raw_;
 };

@@ -40,6 +40,9 @@ bool Config::loadFromFile(const std::string& path) {
         else if (key == "mud_name") mudName_ = val;
         else if (key == "global_include_file") globalIncludeFile_ = val;
         else if (key == "dialect") dialect_ = val;
+        else if (key == "auto_trust_backbone")
+            autoTrustBackbone_ = (val == "1" || val == "true" ||
+                                  val == "yes" || val == "on");
     }
     return true;
 }

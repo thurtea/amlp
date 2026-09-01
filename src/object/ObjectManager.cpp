@@ -722,9 +722,10 @@ void ObjectManager::captureBootUids() {
 
     // real master.c:126 "ret = apply_master_ob(APPLY_GET_BACKBONE_UID,
     // 0);". Apply name "get_bb_uid" (applies_table.c:12); LDMud uses the
-    // same string. Only the AUTO_TRUST_BACKBONE branch consumes it, and
-    // that is #undef in the vendored build, so a missing get_bb_uid() is
-    // not fatal here (real exits(-1)).
+    // same string. Only give_uid_to_object()'s AUTO_TRUST_BACKBONE branch
+    // consumes it (resolveObjectUids(), reached from assignObjectUid()),
+    // and that branch is off unless the auto_trust_backbone config key is
+    // set, so a missing get_bb_uid() is not fatal here (real exits(-1)).
     try {
         Value bbRet = vm_->callFunction(master_, "get_bb_uid", {});
         if (auto* bb = std::get_if<std::string>(&bbRet.data); bb && !bb->empty()) {
@@ -733,6 +734,12 @@ void ObjectManager::captureBootUids() {
     } catch (const std::exception&) {
         // leave backboneUid unset
     }
+
+    // real: the AUTO_TRUST_BACKBONE compile-time flag. This driver reads
+    // it from the "auto_trust_backbone" config key (Config::
+    // autoTrustBackbone(), default false, matching the vendored
+    // local_options #undef).
+    uidModel_.autoTrustBackbone = config_.autoTrustBackbone();
 
     // real master.c:121-122 "master_ob->uid = set_root_uid(ret->u.string);
     // master_ob->euid = master_ob->uid;".

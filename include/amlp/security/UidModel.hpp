@@ -31,6 +31,14 @@ struct UidModel {
     // master.c: set_backbone_uid(get_bb_uid()). The shared library uid.
     std::optional<std::string> backboneUid;
 
+    // Real FluffOS's AUTO_TRUST_BACKBONE compile-time option, surfaced
+    // here as the "auto_trust_backbone" runtime config key (see
+    // Config::autoTrustBackbone()). #undef in the vendored reference
+    // local_options, #define in local_options.lima / .tmi2 / .merentha.
+    // When true, resolveObjectUids() takes give_uid_to_object()'s
+    // backbone-trust branch (real simulate.c:178-186).
+    bool autoTrustBackbone = false;
+
     bool active() const { return rootUid.has_value(); }
 };
 
@@ -50,15 +58,22 @@ struct ResolvedObjectUids {
 // load site (both taken as the root uid when there is no current object,
 // e.g. a boot preload).
 //
-// Real branches reproduced:
+// Real branches reproduced, in real's own order (simulate.c:166-204):
 //   - creatorName == loaderUid    -> uid = loaderUid, euid = loaderEuid
 //     ("the loaded object has the same uid as the loader").
+//   - creatorName == backboneUid  -> uid = euid = loaderEuid, but only
+//     when model.autoTrustBackbone is set AND loaderEuid has a value.
+//     This is real's "#ifdef AUTO_TRUST_BACKBONE" branch (simulate.c:
+//     178-186: "ob->uid = current_object->euid; ob->euid =
+//     current_object->euid;"). Named divergence: real assigns
+//     current_object->euid unconditionally, so a loader with euid 0
+//     leaves the new object with a NULL uid, which real's own
+//     f_getuid() then flags with DEBUG_CHECK("UID is a null pointer").
+//     This driver instead declines the trust grant when loaderEuid is
+//     0 and falls through to the untrusted branch below, which is
+//     strictly safer and cannot produce a null uid.
 //   - otherwise                   -> uid = creatorName, euid = NULL
 //     ("defined by another wizard ... can't be trusted").
-// Real's AUTO_TRUST_BACKBONE branch (uid = euid = loaderEuid when
-// creatorName == backbone) is NOT taken: AUTO_TRUST_BACKBONE is #undef
-// in the vendored build. A build that defined it would add that check
-// between the two branches above.
 ResolvedObjectUids resolveObjectUids(const UidModel& model,
                                      const std::string& creatorName,
                                      const std::optional<std::string>& loaderUid,

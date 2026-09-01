@@ -2905,12 +2905,15 @@ void registerCoreEfuns() {
     // table idiom) is still scoped out: it needs the row-at-a-time
     // rebuild real string_print() does, throws a clear error rather than
     // mislaying the columns.
-    // Still scoped, not the full real modifier set: "#" (table mode),
-    // "@" (array-spread), "'X'" (custom pad string), " "/"+" (positive-
-    // integer pad), "%f" (float), and capital "%X" are not implemented;
-    // throws rather than silently mishandling anything else, matching
-    // this codebase's existing convention for other partially-
-    // implemented efuns.
+    // "%f" (float, six-place default, precision, "+"/" " sign flags,
+    // field width and "-"/"|"/"0" justification via the shared block),
+    // "%i" (a plain alias of "%d"), and the "+"/" " pad-prefix flags on
+    // "%d"/"%i" are implemented. Still scoped, not the full real modifier
+    // set: "#" (table mode), "@" (array-spread), "'X'" (custom pad
+    // string), the ":"/precision combination on "%f", and capital "%X"
+    // are not implemented; throws rather than silently mishandling
+    // anything else, matching this codebase's existing convention for
+    // other partially-implemented efuns.
     // sprintf()'s own %d/%o/%x/%c: real sprintf.c's type check for every
     // one of these (fluffos-2.9-ds2.08/sprintf.c:1180, "carg->type !=
     // T_NUMBER") tests the real svalue's *type tag*, not a separate "is
@@ -3061,12 +3064,24 @@ void registerCoreEfuns() {
             bool centreJustify = false;
             bool colonMode = false;
             bool colMode = false;
+            // Pad-prefix flags, real sprintf.c INFO_PP_PLUS ('+') /
+            // INFO_PP_SPACE (' '), parsed in the same modifier scan as
+            // '-'/'|'/'='/':'. Real applies them only in the numeric
+            // branch: '+' forces a leading sign on a non-negative number,
+            // ' ' a leading space. Threaded through to %d/%i and %f here
+            // (a lone ' ' or '+' right after '%' or another modifier is
+            // the only place this scan can consume one, so ordinary
+            // literal spaces in a format string are untouched).
+            bool plusFlag = false;
+            bool spaceFlag = false;
             while (i + 1 < fmt.size() &&
                    (fmt[i + 1] == '-' || fmt[i + 1] == ':' || fmt[i + 1] == '|' ||
-                    fmt[i + 1] == '=')) {
+                    fmt[i + 1] == '=' || fmt[i + 1] == '+' || fmt[i + 1] == ' ')) {
                 if (fmt[i + 1] == '-') leftJustify = true;
                 else if (fmt[i + 1] == '|') centreJustify = true;
                 else if (fmt[i + 1] == '=') colMode = true;
+                else if (fmt[i + 1] == '+') plusFlag = true;
+                else if (fmt[i + 1] == ' ') spaceFlag = true;
                 else colonMode = true;
                 ++i;
             }
@@ -3146,12 +3161,26 @@ void registerCoreEfuns() {
                     throw LpcRuntimeError("sprintf: %s argument is not a string");
                 }
                 piece = std::get<std::string>(argVal.data);
-            } else if (spec == 'd') {
+            } else if (spec == 'd' || spec == 'i') {
+                // real sprintf.c: "case 'd': case 'i': finfo |=
+                // INFO_T_INT;" -- 'i' is a plain alias of 'd'. Corpus:
+                // "%i"/"%3i" in FTP-daemon and status-report code across
+                // several corpora. The '+'/' ' pad-prefix flags build a
+                // real C "%+lld"/"% lld" here, matching real's own cheat
+                // string; "%+d" alone is about 8 corpus call-site lines
+                // (signed stat deltas).
                 int64_t n;
                 if (!sprintfNumericArg(argVal, n)) {
                     throw LpcRuntimeError("sprintf: %d argument is not an int");
                 }
-                piece = std::to_string(n);
+                if (plusFlag || spaceFlag) {
+                    char sbuf[32];
+                    std::snprintf(sbuf, sizeof(sbuf), plusFlag ? "%+lld" : "% lld",
+                                  static_cast<long long>(n));
+                    piece = sbuf;
+                } else {
+                    piece = std::to_string(n);
+                }
             } else if (spec == 'o' || spec == 'x') {
                 // sprintf.c's own INFO_T_OCT/INFO_T_HEX: the integer arg
                 // printed in octal/hex, plain C conversion, no leading
@@ -3186,10 +3215,45 @@ void registerCoreEfuns() {
                 // the way %s/%d/%c/%o/%x each require one) -- svalue_to_
                 // string() itself has a case for every real svalue type.
                 piece = valueToDebugString(argVal, 0);
+            } else if (spec == 'f') {
+                // real sprintf.c INFO_T_FLOAT (line 911 sets it, line
+                // 1162/1203 formats it): a C "%[+ ][.pres]f" cheat string
+                // run on carg->u.real, then add_justified() applies the
+                // field width afterward (so width is handled by the
+                // shared field-width block below, not baked in here).
+                // The argument must be a float: real errors "Incorrect
+                // argument type to %f" for anything else (sprintf.c:1180,
+                // cheat ends in 'f' && carg->type != T_REAL), so an int
+                // is NOT silently coerced. A precision of 0, whether from
+                // a bare "%f" or an explicit "%.0f", means C's default 6
+                // places: real only appends ".pres" when "if (pres)" is
+                // true, i.e. pres is nonzero. Corpus: about 20 files,
+                // "%.2f"/"%9.2f"/"%3.1f"/"%+4.2f" for weights, money, and
+                // percentages, e.g. a weight-to-string simul_efun's
+                // sprintf("%.2f lbs", w).
+                const double* dv = std::get_if<double>(&argVal.data);
+                if (!dv) {
+                    throw LpcRuntimeError("sprintf: %f argument is not a float");
+                }
+                std::string cfmt = "%";
+                if (plusFlag) cfmt += '+';
+                else if (spaceFlag) cfmt += ' ';
+                if (havePrecision && precision > 0) {
+                    int p = precision > 128 ? 128 : precision;
+                    cfmt += '.';
+                    cfmt += std::to_string(p);
+                }
+                cfmt += 'f';
+                int need = std::snprintf(nullptr, 0, cfmt.c_str(), *dv);
+                if (need < 0) {
+                    throw LpcRuntimeError("sprintf: %f formatting failed");
+                }
+                piece.resize(static_cast<size_t>(need));
+                std::snprintf(&piece[0], static_cast<size_t>(need) + 1, cfmt.c_str(), *dv);
             } else {
                 throw LpcRuntimeError(
                     std::string("sprintf: unsupported format specifier '%") + spec +
-                    "' (only %s, %d, %c, %o, %x, and %O are implemented)");
+                    "' (only %s, %d, %i, %f, %c, %o, %x, and %O are implemented)");
             }
 
             // "%=" column / word-wrap mode. Only meaningful for a

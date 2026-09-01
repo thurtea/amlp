@@ -15555,6 +15555,74 @@ static void testSprintfZeroPaddedStarFieldWidthThrows() {
     std::cout << "testSprintfZeroPaddedStarFieldWidthThrows OK\n";
 }
 
+// sprintf "%f" (float), "%i" (alias of "%d"), and the "+"/" " pad-prefix
+// flags -- real fluffos-2.9-ds2.08/sprintf.c INFO_T_FLOAT (line 911) and
+// INFO_PP_PLUS/INFO_PP_SPACE (lines 869-873), the cheat-string build at
+// lines 1140-1204. Every expected string was traced by hand from that
+// path (a C "%[+ ][.pres]f" run on the double, then add_justified()
+// applying the field width), not read back from this driver.
+static void testSprintfFloatSpecifierAndSignFlags() {
+    // Plain "%f": C default six decimal places (real only appends
+    // ".pres" when pres is nonzero).
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%f\", 3.5);\n").data) == "3.500000");
+    // Explicit precision.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%.2f\", 3.14159);\n").data) == "3.14");
+    // "%.0f" is precision 0, which real treats as "no precision" -> six
+    // places, NOT zero places.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%.0f\", 2.5);\n").data) == "2.500000");
+    // Field width: formatted number right-justified (default) then
+    // space-padded to the field, width applied after the C conversion.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%9.2f\", 3.5);\n").data) == "     3.50");
+    // "-" left-justifies the padded field.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%-9.2f\", 3.5);\n").data) == "3.50     ");
+    // "0" field-width prefix pads with zeros (ahead of the sign, real's
+    // add_pad() behavior, same as this driver's %d zero-pad).
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%06.2f\", 3.5);\n").data) == "003.50");
+    // "+" forces a leading sign on a non-negative value; a negative one
+    // keeps its own "-".
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%+.2f\", 3.5);\n").data) == "+3.50");
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%+.2f\", -3.5);\n").data) == "-3.50");
+    // " " puts a space where the "+" sign would go.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"% .2f\", 3.5);\n").data) == " 3.50");
+    // "%f" requires a real/float argument: an int is not coerced, real
+    // errors "Incorrect argument type to %f".
+    bool threwOnInt = false;
+    try {
+        runProbe("return sprintf(\"%f\", 42);\n");
+    } catch (const std::exception&) {
+        threwOnInt = true;
+    }
+    assert(threwOnInt);
+
+    // "%i" is a plain alias of "%d".
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%i\", 42);\n").data) == "42");
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%3i\", 7);\n").data) == "  7");
+    // "+"/" " pad-prefix flags on an integer.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%+d\", 42);\n").data) == "+42");
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%+d\", -42);\n").data) == "-42");
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"% d\", 42);\n").data) == " 42");
+    // A literal space between two specifiers is still literal, not
+    // swallowed as a flag.
+    assert(std::get<std::string>(
+        runProbe("return sprintf(\"%d %d\", 1, 2);\n").data) == "1 2");
+
+    std::cout << "testSprintfFloatSpecifierAndSignFlags OK\n";
+}
+
 // ---------------------------------------------------------------------
 // printf(string, ...): real efuns_main.c's own f_printf() -- formats
 // through the exact same machinery as sprintf() (confirmed against
@@ -27624,6 +27692,7 @@ int main() {
     testSprintfStarFieldWidthPullsWidthFromLeadingArgument();
     testSprintfStarPrecisionPullsPrecisionFromLeadingArgument();
     testSprintfZeroPaddedStarFieldWidthThrows();
+    testSprintfFloatSpecifierAndSignFlags();
     testPrintfWritesSprintfFormattedResultToCurrentConnection();
     testPrintfThrowsOnNonStringFormatArgument();
     testFunctionExistsReturnsTruthyStringForALocallyDefinedFunction();

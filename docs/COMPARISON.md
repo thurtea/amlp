@@ -105,10 +105,10 @@ of genuine LDMud and DGD dialect support behind a config switch. It is
 not yet a drop-in replacement for either real driver: Phase 2 and Phase 3
 (the features meant to eventually *exceed* what either real driver
 offers) are still mostly planning documents rather than implemented
-code, though 34 Phase 2 rows are now real and landed. Six of those are
+code, though 35 Phase 2 rows are now real and landed. Six of those are
 substantial runtime work (statedump v1, dual persistence coexistence, a
 coroutine scheduler v1, apply cache, full PCRE suite, built-in SQLite);
-the other 28 are a package-by-package efun-conformance sweep. One
+the other 29 are a package-by-package efun-conformance sweep. One
 Phase 3 row is done (a real third-party mudlib now run through
 substantial gameplay, not just booted). Phase 1's own real,
 corpus-driven dialect-compatibility work is now substantially
@@ -150,14 +150,14 @@ The directories the largest Phase 2/3 work would live in (`src/jit`,
 `instruct.md`, and the biggest novel-architecture items (JIT
 compilation, hotboot, object swapout, TLS, WebSocket, an LSP server,
 generational GC) are all still real, considered plans, not real code.
-But 34 Phase 2 rows and one Phase 3 row are now real, landed code:
+But 35 Phase 2 rows and one Phase 3 row are now real, landed code:
 statedump v1 (2.1), dual persistence coexistence (2.4), a coroutine
 scheduler v1 (2.5), the apply cache (2.9), the full PCRE
 `pcre_match`/`pcre_assoc` suite (2.12), built-in SQLite `db_*` efuns
-(2.15, dialect-gated to `ldmud` per row 2.40), and 28 smaller
+(2.15, dialect-gated to `ldmud` per row 2.40), and 29 smaller
 single-efun or single-argument spec-conformance slices from a
 package-by-package `src/packages/*/*.spec` sweep (2.16, 2.23 through
-2.30, 2.33a, 2.37, 2.46 through 2.61), plus a real third-party mudlib
+2.30, 2.33a, 2.37, 2.46 through 2.62), plus a real third-party mudlib
 boot-and-substantial-gameplay confirmation (3.9). See the table
 immediately below for the current fraction of each phase, and the
 2026-09-01 sweep note above for the full re-derivation.
@@ -301,36 +301,37 @@ refresh.
   evidence, not blocked). DGD-only rows 1.11 through 1.15 are excluded
   per the Phase 1 header's own scope.
 - **Phase 1 including the 5 DGD-only comparison rows: 10/16, 63%.**
-- **Phase 2: 34/62, 55%** (up from this file's own prior 14/45). Done:
+- **Phase 2: 35/63, 56%** (up from this file's own prior 14/45). Done:
   2.1, 2.4, 2.5, 2.9, 2.12, 2.15, 2.16, 2.23 through 2.30, 2.33a, 2.37,
-  2.40, 2.46 through 2.61. Open (28): 2.2, 2.3, 2.6 through 2.8, 2.10,
+  2.40, 2.46 through 2.62. Open (28): 2.2, 2.3, 2.6 through 2.8, 2.10,
   2.11, 2.13, 2.14, 2.17 through 2.22, 2.31 through 2.36, 2.38, 2.39,
   2.41 through 2.45. Full row-by-row table immediately below the phase
-  table. (This sweep found 33/61; row 2.61, `implode()`'s function/fold
-  form, landed later the same session, bringing it to 34/62.)
+  table. (This sweep found 33/61; rows 2.61 and 2.62, `implode()`'s
+  function/fold form and `sprintf` `%f`, landed later the same session,
+  bringing it to 35/63.)
 - **Phase 3: 1/9, 11%** (only row 3.9 done).
-- **Rollup, excluding the 5 DGD-only Phase 1 rows: 61/98, about 62%**
-  (16 + 11 + 62 + 9 rows; 16 + 10 + 34 + 1 done).
-- **Rollup, including all Phase 1 rows: 61/103, about 59%.**
-- **Test suite: 819 passing** (`STATUS.md`, row 2.61's own entry: "819
-  tests passing, up from 818"; the prior 2026-08-30 entry was 818).
+- **Rollup, excluding the 5 DGD-only Phase 1 rows: 62/99, about 63%**
+  (16 + 11 + 63 + 9 rows; 16 + 10 + 35 + 1 done).
+- **Rollup, including all Phase 1 rows: 62/104, about 60%.**
+- **Test suite: 820 passing** (`STATUS.md`, row 2.62's own entry: "820
+  tests passing, up from 819"; the prior 2026-08-30 entry was 818).
 
 **Discrepancy flagged, per this file's own "trust `ROADMAP.md`'s
 checkbox and re-derive" rule.** The brief that requested this refresh
 carried a Phase 2 model of 22 rows and 6 done (27%), a 761 test total,
 and rollups of 33/58 (about 57%) and 33/63 (about 52%). Those figures
-predate roughly 17 `ROADMAP.md` rows (2.33a and 2.46 through 2.61, a
+predate roughly 18 `ROADMAP.md` rows (2.33a and 2.46 through 2.62, a
 package-by-package `src/packages/*/*.spec` sweep plus several
-already-registered-efun argument-shape fixes) and about 58 regression
+already-registered-efun argument-shape fixes) and about 59 regression
 tests that have landed since, through 2026-09-01. The live checkboxes
 and the live test count were used instead. The brief's narrower "6 real
 Phase 2 rows" reading is still a fair description of the
 architecturally substantial runtime work that has landed: statedump v1
 (2.1), dual persistence coexistence (2.4), a coroutine scheduler v1
 (2.5), the apply cache (2.9), the full PCRE suite (2.12), and built-in
-SQLite (2.15). The other 28 done Phase 2 rows are small, single-efun or
+SQLite (2.15). The other 29 done Phase 2 rows are small, single-efun or
 single-argument spec-conformance slices. Counting them as equal rows
-makes "55% of Phase 2" and the roughly 62% rollup overstate how much of
+makes "56% of Phase 2" and the roughly 63% rollup overstate how much of
 Phase 2's novel-architecture surface actually exists. Object swapout
 (2.2), hotboot (2.3), `async`/`await` with the awaitable call_out and
 Open Hydra (2.6 through 2.8), closure bake-at-construction (2.10), the
@@ -361,10 +362,10 @@ command, unlike real FluffOS's per-task recovery) was also fixed,
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 62 | 34 | 28 | 55% |
+| 2, Beyond both (novel features) | 63 | 35 | 28 | 56% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
-| Rollup, excluding the 5 DGD-only Phase 1 rows | 98 | 61 | 37 | ~62% |
-| Rollup, including all Phase 1 rows | 103 | 61 | 42 | ~59% |
+| Rollup, excluding the 5 DGD-only Phase 1 rows | 99 | 62 | 37 | ~63% |
+| Rollup, including all Phase 1 rows | 104 | 62 | 42 | ~60% |
 
 ### Phase 2, row by row (from `ROADMAP.md`'s own current checkboxes)
 
@@ -432,6 +433,7 @@ command, unlike real FluffOS's per-task recovery) was also fixed,
 | 2.59 | Done | `get_dir(string, int flags)`: the optional stat-flag argument |
 | 2.60 | Done | `sprintf` `%=` column / word-wrap mode (single-column form) |
 | 2.61 | Done | `implode()` function/fold form, and non-string skipping in the join form |
+| 2.62 | Done | `sprintf` `%f` float specifier, `%i` alias, `+`/space pad-prefix flags |
 
 **What is left open in Phase 1, and why each item stays open** (each
 with its own detailed, source-cited scoping note in `ROADMAP.md`, not
@@ -621,15 +623,15 @@ applicable).
   JIT, hotboot, object swapout, TLS, WebSocket, the LSP server,
   hot-reload, `async`/`await`, a conformance suite, and generational
   GC all still have only a real `instruct.md` and zero implementation,
-  and none should be described as "in progress." Thirty-four Phase 2
+  and none should be described as "in progress." Thirty-five Phase 2
   rows are the exception, real and landed rather than planned. Six are
   architecturally substantial runtime work: statedump v1 (2.1), dual
   persistence coexistence (2.4), the coroutine scheduler v1 (2.5), the
   apply cache (2.9), the full PCRE suite (2.12), and built-in SQLite
-  (2.15, dialect-gated to `ldmud` per row 2.40). The other 28 are
+  (2.15, dialect-gated to `ldmud` per row 2.40). The other 29 are
   small single-efun or single-argument spec-conformance slices from a
   package-by-package `src/packages/*/*.spec` sweep (2.16, 2.23 through
-  2.30, 2.33a, 2.37, 2.46 through 2.61). Phase 3's own row 3.9 (the
+  2.30, 2.33a, 2.37, 2.46 through 2.62). Phase 3's own row 3.9 (the
   AetherMUD mudlib, now run through login, character creation,
   movement, dialogue, and real combat, not just a boot) is the one
   landed Phase 3 row.
@@ -669,7 +671,7 @@ undersells what already works: AMLP is not a wrapper or a fork of any
 of the three real drivers: its own lexer, parser, code generator,
 bytecode VM, object system, and network layer are original
 implementations, verified continuously against real vendored source and
-a real bundled mudlib rather than against assumption. 819 regression
+a real bundled mudlib rather than against assumption. 820 regression
 tests pass as of this writing (`STATUS.md` 2026-09-01; the count
 changes every session), and the discipline behind every checked
 row above is the same: read the real source, port the real behavior

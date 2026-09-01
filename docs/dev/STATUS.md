@@ -9,6 +9,107 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-01 (a further session, same day): `sprintf` `%f` float
+specifier, `%i` alias of `%d`, and the `+` / space pad-prefix flags.
+`sprintf` now formats a float argument with `%f` (six-place default,
+explicit precision, field width, `-` / `|` / `0` justification), treats
+`%i` as a plain alias of `%d`, and honors the `+` and ` ` pad-prefix
+flags on `%d` / `%i` / `%f`, instead of throwing `sprintf: unsupported
+format specifier '%f'`. 820 tests passing (up from 819). New
+`ROADMAP.md` row 2.62.**
+
+**Why this slice.** Continues the same one-package-at-a-time discipline
+of rows 2.57 through 2.61: extend an already-registered efun to the real
+argument shapes its own body rejects. `sprintf`'s own top comment
+already listed `%f`, `%X`, and the `" "` / `"+"` pad-prefix flags among
+the real modifiers it does not implement, and row 2.60's own STATUS
+entry repeated that list. A corpus pass ranked `%f` well above the
+others: it is the widest real gap of the remaining sprintf set.
+
+**Real surface.** `temp/reference/fluffos-2.9-ds2.08/sprintf.c:911`
+`case 'f': finfo |= INFO_T_FLOAT;`; `:906-909` `case 'd': case 'i':
+finfo |= INFO_T_INT;` (so `i` is a plain alias of `d`); `:869-873`
+`case ' ': finfo |= INFO_PP_SPACE;` / `case '+': finfo |=
+INFO_PP_PLUS;`.
+
+**Real semantics, read from `sprintf.c:1134-1211` (the shared numeric
+branch) plus `add_justified()` at `:562`.** A C cheat string is built
+as `"%"` + (`"+"` for `INFO_PP_PLUS`, `" "` for `INFO_PP_SPACE`) +
+(`".<pres>"` only when `if (pres)` is true, i.e. precision is nonzero) +
+the type char (`f` for float, `ld` for int), then run through C
+`sprintf` on `carg->u.real` (float) or `carg->u.number` (int). The
+field width `fs` is NOT part of the cheat string: it is applied
+afterward by `add_justified()` (pad to `fs`, `-` left / `|` centre /
+default right; a `0` field-width prefix pads with `'0'` ahead of any
+sign, exactly as this driver's existing `%d` field-width block already
+does). The float argument must be a real: `sprintf.c:1180` errors
+`"Incorrect argument type to %f"` when the cheat ends in `f` and
+`carg->type != T_REAL`, so an int is not silently coerced. A precision
+of 0, whether from a bare `%f` or an explicit `%.0f`, means C's default
+six places, per real's own `if (pres)` guard, a deliberate quirk
+reproduced here.
+
+**Corpus evidence, checked before implementing.** Grepped every
+vendored corpus under `temp/` (`core-lib`, `dead-souls`, `es2_mudlib`,
+`lima`, `nightmare3`, `reference-lpc-mud-library`, `wiz_tools`, `lil`)
+plus `mudlib/` for `sprintf(...%...f)`: about 20 distinct files, roughly
+60 call-site lines, dominated by `%.2f` (14), `%9.2f` (9), `%3.1f` (6),
+`%2.2f` (5) for weights, money, CPU-time, and percentages (e.g. a
+weight-to-string simul_efun's `sprintf("%.2f lbs", w)`), plus `%+4.2f`
+(signed) and a scattering of `%.3f` / `%16.4f` / `%10.4f`. `%i` / `%3i`
+appears in FTP-daemon and status-report code across several corpora;
+`%+d` in roughly 8 call-site lines (signed stat deltas). Every one of
+these previously threw `sprintf: unsupported format specifier`.
+
+**Built** (`EfunTable.cpp`, `sprintfImpl`).
+
+  - The modifier scan now also consumes `+` and ` ` (a lone one
+    directly after `%` or another modifier; ordinary literal spaces
+    between specifiers are never in that position, covered by a
+    regression test).
+  - `spec == 'i'` joins the `spec == 'd'` branch. `%d` / `%i` with a
+    sign flag format through C `"%+lld"` / `"% lld"` instead of
+    `std::to_string`; without a flag the existing `std::to_string` path
+    is unchanged.
+  - A new `spec == 'f'` branch requires a `double` value (throws
+    `sprintf: %f argument is not a float` otherwise, matching real),
+    builds the `"%[+ ][.pres]f"` cheat string, sizes the result with a
+    zero-length `std::snprintf` probe, formats into the `piece` string,
+    and lets the existing shared field-width / justify / zero-pad block
+    finish it.
+  - No new include or dependency (`std::snprintf` was already in use in
+    this file).
+
+**Scoped out, named.** `%X` (capital hex), `#` (table mode), `@`
+(array-spread), `'X'` (custom pad string), and the `:` colon
+precision-tie combined with `%f` are still not implemented (zero corpus
+evidence; `%f` with `:` appears nowhere). `+` / ` ` on `%o` / `%x` is
+accepted by the modifier scan but has no effect, matching C where those
+flags are meaningless for the unsigned conversions.
+
+**1 new regression test (820 total, up from 819):**
+`testSprintfFloatSpecifierAndSignFlags` in `test/test_lexer.cpp` --
+the six-place default (`"%f"` over `3.5` gives `"3.500000"`), explicit
+precision (`"%.2f"` over `3.14159` gives `"3.14"`), the
+`%.0f`-is-six-places quirk, field width right (`"%9.2f"`), left
+(`"%-9.2f"`), and zero-pad (`"%06.2f"` gives `"003.50"`), the `+` sign
+flag on both a positive (`"+3.50"`) and a negative (`"-3.50"`) value,
+the ` ` space flag (`" 3.50"`), the int-argument-to-`%f` throw, `%i`
+and `%3i`, `%+d` / `% d`, and a literal space between two specifiers
+(`"%d %d"`) staying literal. Every expected string was traced by hand
+from `sprintf.c`'s cheat-string build and `add_justified()`, not read
+back from this driver. The existing 819 re-run unchanged.
+
+**Documentation updated to match.** One new `ROADMAP.md` row, 2.62
+(`[x]`, full citation trail in its own cell). `COMPARISON.md` had its
+full 2026-09-01 phase-fraction re-derivation earlier this same session;
+its numbers were nudged for this row too so the two documents stay
+consistent rather than a row apart: Phase 2 35/63 (56%), rollups 62/99
+(~63%) excluding the 5 DGD-only Phase 1 rows and 62/104 (~60%)
+including them, running test total 820. `sprintf`'s own top comment in
+`EfunTable.cpp` updated to move `%f` / `%i` / `+` / ` ` from the "not
+implemented" list to the "implemented" list.
+
 **2026-09-01: `implode()` function/fold form, and non-string skipping
 in the join form. The already-registered `implode` efun now accepts a
 function pointer as its 2nd argument (a real left fold, with or without

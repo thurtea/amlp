@@ -18,8 +18,13 @@ below exist so a reader can see how a third, architecturally different
 driver solved the same problems, not because AMLP is trying to match it
 feature-for-feature.
 
-Last updated: 2026-08-21 (a fresh full-project status sweep: Phase 0
-confirmed still 16/16 with no open sub-gap of its own, row 1.7's own
+Last updated: 2026-09-01 (full re-derivation of every phase fraction,
+both rollups, and the test total directly from `ROADMAP.md`'s current
+checkboxes and `STATUS.md`'s 2026-08-30 entry; new Phase 2 row-by-row
+table; see the "Re-swept 2026-09-01" note below the phase table for the
+numbers and the discrepancy flag against the requesting brief's stale
+figures. Prior sweep, 2026-08-21: a fresh full-project status sweep,
+Phase 0 confirmed still 16/16 with no open sub-gap of its own, row 1.7's own
 `privilege_violation()` authorization gate now real for four trigger
 points, `bind_lambda()`'s cross-object form, `set_driver_hook()`,
 `call_out_info()`, and `input_to()`, and every driver-hook/efun-surface
@@ -100,10 +105,13 @@ of genuine LDMud and DGD dialect support behind a config switch. It is
 not yet a drop-in replacement for either real driver: Phase 2 and Phase 3
 (the features meant to eventually *exceed* what either real driver
 offers) are still mostly planning documents rather than implemented
-code, though three Phase 2 rows (apply cache, full PCRE suite, built-in
-SQLite) and one Phase 3 row (a real third-party mudlib boot-and-play
-confirmation) are now real and landed, not just planned, and Phase 1's
-own real, corpus-driven dialect-compatibility work is now substantially
+code, though 34 Phase 2 rows are now real and landed. Six of those are
+substantial runtime work (statedump v1, dual persistence coexistence, a
+coroutine scheduler v1, apply cache, full PCRE suite, built-in SQLite);
+the other 28 are a package-by-package efun-conformance sweep. One
+Phase 3 row is done (a real third-party mudlib now run through
+substantial gameplay, not just booted). Phase 1's own real,
+corpus-driven dialect-compatibility work is now substantially
 exhausted: see immediately below.
 
 **Phase 0 (stabilize the current base): complete.**
@@ -137,21 +145,22 @@ citations for the underlying evidence on every count below, not repeated
 here.
 
 **Phase 2 and Phase 3: mostly still planning, but no longer zero code.**
-Most of the directories Phase 2/3 work would live in (`src/jit`,
-`src/gc`, `src/lsp`, `src/persist`, `src/security`) still contain
-nothing but their own planning `instruct.md`, and the large novel-
-architecture items (coroutine scheduling, JIT compilation, hotboot,
-world-level statedump, TLS, generational GC) are all still real,
-considered plans, not real code. But seven Phase 2 rows and one Phase 3
-row are now real, landed code, not plans: the apply cache (2.9), the
-full PCRE `pcre_match`/`pcre_assoc` suite (2.12), built-in SQLite
-`db_*` efuns (2.15), the `hash()` efun (2.16, landed 2026-08-27),
-`time_ns()`/`perf_counter_ns()` (2.23, landed 2026-08-27),
-`secure_random()` (2.24, landed 2026-08-27), and `log2()`/`round()`
-(2.25, landed 2026-08-27), and a real third-party mudlib boot-and-play
-confirmation (3.9). See the table immediately below for the current
-fraction of each phase, not the "zero" framing an earlier revision of
-this file gave both.
+The directories the largest Phase 2/3 work would live in (`src/jit`,
+`src/gc`, `src/lsp`) still contain nothing but their own planning
+`instruct.md`, and the biggest novel-architecture items (JIT
+compilation, hotboot, object swapout, TLS, WebSocket, an LSP server,
+generational GC) are all still real, considered plans, not real code.
+But 34 Phase 2 rows and one Phase 3 row are now real, landed code:
+statedump v1 (2.1), dual persistence coexistence (2.4), a coroutine
+scheduler v1 (2.5), the apply cache (2.9), the full PCRE
+`pcre_match`/`pcre_assoc` suite (2.12), built-in SQLite `db_*` efuns
+(2.15, dialect-gated to `ldmud` per row 2.40), and 28 smaller
+single-efun or single-argument spec-conformance slices from a
+package-by-package `src/packages/*/*.spec` sweep (2.16, 2.23 through
+2.30, 2.33a, 2.37, 2.46 through 2.61), plus a real third-party mudlib
+boot-and-substantial-gameplay confirmation (3.9). See the table
+immediately below for the current fraction of each phase, and the
+2026-09-01 sweep note above for the full re-derivation.
 
 **Re-swept 2026-08-27:** row 2.16 (`hash()`) landed this session,
 picked specifically because it is real *current* FluffOS surface (this
@@ -276,13 +285,153 @@ silent wrong-shape footgun under this driver's own default
 gap. See `ROADMAP.md` rows 2.15/2.40 and `STATUS.md`'s own dated entry
 for the full trail. 2 new regression tests (794 total, up from 792).
 
+**Re-swept 2026-09-01: full re-derivation from `ROADMAP.md`'s and
+`STATUS.md`'s current state, not carried forward from the 2026-08-27
+notes above.** Every phase fraction below was re-counted directly
+against `ROADMAP.md`'s own current checkboxes, and the test total taken
+from `STATUS.md`'s own most recent dated entry (2026-08-30), not from
+any figure already in this file or in the brief that requested this
+refresh.
+
+- **Phase 0: 16/16, 100%** (rows 0.1 through 0.15 plus 0.13a, every box
+  `[x]`).
+- **Phase 1, real blockers only: 10/11, 91%** (rows 1.1 through 1.7,
+  1.9, 1.10, 1.16 done; row 1.8, the `#'lfun::`/`#'sefun::`/`#'var::`
+  closure-literal prefixes, still `[ ]`, deferred on zero real corpus
+  evidence, not blocked). DGD-only rows 1.11 through 1.15 are excluded
+  per the Phase 1 header's own scope.
+- **Phase 1 including the 5 DGD-only comparison rows: 10/16, 63%.**
+- **Phase 2: 34/62, 55%** (up from this file's own prior 14/45). Done:
+  2.1, 2.4, 2.5, 2.9, 2.12, 2.15, 2.16, 2.23 through 2.30, 2.33a, 2.37,
+  2.40, 2.46 through 2.61. Open (28): 2.2, 2.3, 2.6 through 2.8, 2.10,
+  2.11, 2.13, 2.14, 2.17 through 2.22, 2.31 through 2.36, 2.38, 2.39,
+  2.41 through 2.45. Full row-by-row table immediately below the phase
+  table. (This sweep found 33/61; row 2.61, `implode()`'s function/fold
+  form, landed later the same session, bringing it to 34/62.)
+- **Phase 3: 1/9, 11%** (only row 3.9 done).
+- **Rollup, excluding the 5 DGD-only Phase 1 rows: 61/98, about 62%**
+  (16 + 11 + 62 + 9 rows; 16 + 10 + 34 + 1 done).
+- **Rollup, including all Phase 1 rows: 61/103, about 59%.**
+- **Test suite: 819 passing** (`STATUS.md`, row 2.61's own entry: "819
+  tests passing, up from 818"; the prior 2026-08-30 entry was 818).
+
+**Discrepancy flagged, per this file's own "trust `ROADMAP.md`'s
+checkbox and re-derive" rule.** The brief that requested this refresh
+carried a Phase 2 model of 22 rows and 6 done (27%), a 761 test total,
+and rollups of 33/58 (about 57%) and 33/63 (about 52%). Those figures
+predate roughly 17 `ROADMAP.md` rows (2.33a and 2.46 through 2.61, a
+package-by-package `src/packages/*/*.spec` sweep plus several
+already-registered-efun argument-shape fixes) and about 58 regression
+tests that have landed since, through 2026-09-01. The live checkboxes
+and the live test count were used instead. The brief's narrower "6 real
+Phase 2 rows" reading is still a fair description of the
+architecturally substantial runtime work that has landed: statedump v1
+(2.1), dual persistence coexistence (2.4), a coroutine scheduler v1
+(2.5), the apply cache (2.9), the full PCRE suite (2.12), and built-in
+SQLite (2.15). The other 28 done Phase 2 rows are small, single-efun or
+single-argument spec-conformance slices. Counting them as equal rows
+makes "55% of Phase 2" and the roughly 62% rollup overstate how much of
+Phase 2's novel-architecture surface actually exists. Object swapout
+(2.2), hotboot (2.3), `async`/`await` with the awaitable call_out and
+Open Hydra (2.6 through 2.8), closure bake-at-construction (2.10), the
+LLVM JIT (2.11), TLS (2.13), WebSocket (2.14),
+`json_encode`/`json_decode` (2.17), async HTTP (2.18), the LSP server
+(2.19), structured error objects (2.20), live hot-reload (2.21), and
+the LPC-native test runner (2.22) are all still `[ ]`.
+
+**Row 3.9 (third-party mudlib) strengthened since this file last called
+it a "boot-and-play confirmation".** AetherMUD (a real
+Nightmare-3.2-lineage Rifts mudlib) is now exercised through login,
+character creation, movement, inventory/`help`/`quit`, NPC dialogue,
+and real non-safe-zone combat reached by genuine player progression,
+with hit/miss/parry/dodge/armor-destruction resolution confirmed
+firing, not just a boot test. Two real driver-side gaps were found and
+fixed during that pass, both cited in `ROADMAP.md` row 3.9:
+`sprintf`'s own `%d`/`%o`/`%x`/`%c` rejecting a missing-mapping-key
+value that real FluffOS unifies as `T_NUMBER` 0 (fixed 2026-08-25),
+and array-form `call_other()`/`->` on an `object *` target, a real
+first-class `func_spec.c` form this driver threw on (fixed
+2026-08-25). A separate per-command error-isolation gap (an uncaught
+command error closing the whole connection instead of just that
+command, unlike real FluffOS's per-task recovery) was also fixed,
+2026-08-27.
+
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 45 | 14 | 31 | 31% |
+| 2, Beyond both (novel features) | 62 | 34 | 28 | 55% |
 | 3: Production hardening + docs | 9 | 1 | 8 | 11% |
+| Rollup, excluding the 5 DGD-only Phase 1 rows | 98 | 61 | 37 | ~62% |
+| Rollup, including all Phase 1 rows | 103 | 61 | 42 | ~59% |
+
+### Phase 2, row by row (from `ROADMAP.md`'s own current checkboxes)
+
+| Row | Status | Item |
+|---|---|---|
+| 2.1 | Done | World-level statedump: full-heap binary snapshot (v1 slice) |
+| 2.2 | Open | Object swapout: page inactive objects to disk, demand-page on access |
+| 2.3 | Open | Hotboot: fd-passing exec into a new binary without dropping connections |
+| 2.4 | Done | Dual persistence: per-object `save_object` and world snapshot coexist |
+| 2.5 | Done | C++20 coroutine scheduler: cooperative suspend/resume (v1 slice) |
+| 2.6 | Open | LPC `async`/`await` keyword pair backed by the coroutine scheduler |
+| 2.7 | Open | `call_out_future(delay)`: awaitable call_out |
+| 2.8 | Open | Open Hydra: speculative parallel tasks on disjoint object graphs |
+| 2.9 | Done | Apply cache: (object x function-name) to FunctionEntry, invalidate on recompile |
+| 2.10 | Open | Closure bake-at-construction: resolve `FP_*` kind and index at bind time |
+| 2.11 | Open | LLVM JIT backend: compile hot bytecode functions to native |
+| 2.12 | Done | Full PCRE regexp suite (`pcre_match`/`pcre_assoc`) |
+| 2.13 | Open | TLS support (OpenSSL/BoringSSL) for game plus MXP/WebSocket |
+| 2.14 | Open | WebSocket framing on top of TLS |
+| 2.15 | Done | SQLite built-in `db_*` efuns (LDMud shape, dialect-gated to `ldmud`) |
+| 2.16 | Done | `hash()` digest efun (SHA-256/512, MD5, RIPEMD, and more) |
+| 2.17 | Open | `json_encode`/`json_decode` efun pair |
+| 2.18 | Open | `http_get`/`http_post` async efuns (non-blocking, via async scheduler) |
+| 2.19 | Open | LSP server for LPC (`--lsp`): hover, go-to-def, diagnostics |
+| 2.20 | Open | Structured error objects: JSON-serializable source/line/column/message |
+| 2.21 | Open | Hot-reload: recompile and migrate one `.c` file while the server is live |
+| 2.22 | Open | LPC-native test runner: `assert_equal`/`assert_throws` efun suite |
+| 2.23 | Done | `time_ns()`/`perf_counter_ns()`: nanosecond-precision time efuns |
+| 2.24 | Done | `secure_random(int n)`: cryptographically secure random efun |
+| 2.25 | Done | `log2()`/`round()`: base-2 logarithm and rounding efuns |
+| 2.26 | Done | `trim()`/`ltrim()`/`rtrim()`: string trimming efuns |
+| 2.27 | Done | `explode_reversible(string, string)`: lossless string split |
+| 2.28 | Done | `call_out_walltime(...)`: real-seconds call_out variant |
+| 2.29 | Done | `enable_wizard()`/`disable_wizard()`/`wizardp()`: wizard-flag efuns |
+| 2.30 | Done | `sys_network_ports()`: list active listening ports |
+| 2.31 | Open | `query_notify_destruct()`/`set_notify_destruct()`: destruct-notification efuns |
+| 2.32 | Open | GMCP/MSDP/MSP/ZMP/MXP telnet protocol extension efuns |
+| 2.33 | Open | UTF-8/charset conversion plus remaining buffer-type efuns |
+| 2.33a | Done | Buffer value type plus the dependency-free buffer efuns |
+| 2.34 | Open | `set_config(int, mixed)`: runtime-mutable driver config |
+| 2.35 | Open | `defer(function)`: run-on-current-function-end (success or error) |
+| 2.36 | Open | Driver-internals diagnostic efuns (`cache_stats`/`malloc_status`/etc.) |
+| 2.37 | Done | `roll_MdN()`/`vowel()`/`add_a()`: dice-roll and article-selection efuns |
+| 2.38 | Open | `seteuid()`/`geteuid()`/`getuid()`/`export_uid()`: UID/EUID trust hierarchy |
+| 2.39 | Open | `socket_get_option()`/`socket_set_option()`: per-socket TLS config |
+| 2.40 | Done | Resolve the LDMud-vs-FluffOS `db_*` naming collision (dialect gate) |
+| 2.41 | Open | `domain_stats()`/`author_stats()`: per-domain/per-author mudlib statistics |
+| 2.42 | Open | `compress()`/`uncompress()`/`compress_file()`/`uncompress_file()`: zlib efuns |
+| 2.43 | Open | `external_start(...)`: spawn an external shell command |
+| 2.44 | Open | `async_read`/`async_write`/`async_getdir`/`async_db_exec`: non-blocking I/O efuns |
+| 2.45 | Open | `ffi_*` (18 names), remaining `develop.spec` debug internals, misc packages |
+| 2.46 | Done | `sha1(string)`: SHA-1 digest efun |
+| 2.47 | Done | `matrix.spec` slice 1: `id_matrix()`/`translate()`/`scale()` |
+| 2.48 | Done | `matrix.spec` slice 2: `rotate_x()`/`rotate_y()`/`rotate_z()` |
+| 2.49 | Done | `matrix.spec` final slice: `lookat_rotate()`/`lookat_rotate2()` |
+| 2.50 | Done | `contrib.spec` timezone efuns: `zonetime()`/`is_daylight_savings_time()` |
+| 2.51 | Done | `math.spec` vector efuns: `norm()`/`dotprod()`/`distance()`/`angle()` |
+| 2.52 | Done | `string_difference(string, string)`: Levenshtein edit distance |
+| 2.53 | Done | `pcre.spec` read side: `pcre_version()`/`pcre_extract()`/`pcre_match_all()` |
+| 2.54 | Done | `pcre_replace(string, string, string *, void\|int)` |
+| 2.55 | Done | `dwlib.spec` markup escaping: `replace_html()`/`replace_mxp()` |
+| 2.56 | Done | `str_to_arr()`/`arr_to_str()`: `USE_ICONV` UTF-8 conversion pair |
+| 2.57 | Done | `replace_string()` occurrence-range 4th/5th arguments |
+| 2.58 | Done | `strsrch()`/`strstr()`: int-char needle and direction-flag 3rd argument |
+| 2.59 | Done | `get_dir(string, int flags)`: the optional stat-flag argument |
+| 2.60 | Done | `sprintf` `%=` column / word-wrap mode (single-column form) |
+| 2.61 | Done | `implode()` function/fold form, and non-string skipping in the join form |
 
 **What is left open in Phase 1, and why each item stays open** (each
 with its own detailed, source-cited scoping note in `ROADMAP.md`, not
@@ -432,10 +581,10 @@ applicable).
 | PCRE `regexp`/`regexplode`/`reg_assoc` | Yes | Yes | Yes (own regexp efuns) |, |
 | Full telnet IAC negotiation, echo suppression, NAWS | Yes | Yes | Yes | Yes |
 | `socket_*` efun family | Partial (STREAM/DATAGRAM only, no MUD mode, no binary modes) | Yes (full) | Yes (full) |, |
-| Coroutine scheduler / `async`/`await` | No (Phase 2, not started) |, |, |, |
+| Coroutine scheduler / `async`/`await` | Partial (row 2.5 coroutine scheduler v1 slice landed; `async`/`await` keywords row 2.6, not started) |, |, |, |
 | LLVM JIT backend | No (Phase 2, not started) |, |, |, |
-| Hotboot (fd-passing exec, connections survive) | No (Phase 2, not started) | Yes | Yes | Yes (via statedump/restart, different mechanism) |
-| World-level statedump / object swapout | No (Phase 2, not started) |, |, | Yes (DGD's own signature architecture) |
+| Hotboot (fd-passing exec, connections survive) | No (Phase 2 row 2.3, not started) | Yes | Yes | Yes (via statedump/restart, different mechanism) |
+| World-level statedump / object swapout | Partial (row 2.1 statedump v1 slice landed, plus row 2.4 dual persistence coexistence; object swapout row 2.2, not started) |, |, | Yes (DGD's own signature architecture) |
 | TLS / WebSocket | No (Phase 2, not started) | Not in this vendored ds2.08 snapshot | Not checked | Not checked |
 | Built-in SQLite / hash / JSON efuns | Partial (SQLite `db_connect`/`db_exec`/`db_fetch`/`db_close`, row 2.15, real LDMud shape specifically, dialect-gated to `dialect: ldmud` per row 2.40 -- real current FluffOS's own `db.spec` has a genuinely different `db_*` contract this driver does not implement; `hash()`, row 2.16, built and landed; JSON efuns, row 2.17, not started) | Some (own DB package options) | Some | Some |
 | LSP server (`--lsp`) | No (Phase 2, not started) |, |, |: |
@@ -457,22 +606,33 @@ applicable).
   documented category of memory a genuine GC would reclaim that this
   driver currently never does. Phase 3's own `src/gc` item is exactly
   this, and is entirely unstarted.
+- **The headline "exceed FluffOS/LDMud" features do not exist yet.**
+  No TLS (row 2.13), no WebSocket (row 2.14), no hotboot (row 2.3), no
+  LLVM JIT (row 2.11), no LSP server (row 2.19), no object swapout
+  (row 2.2), no `async`/`await` (rows 2.6 through 2.8), no live
+  hot-reload (row 2.21), no generational GC (Phase 3 row 3.3, `src/gc`
+  is `instruct.md`-only). Production-hardening and documentation are
+  almost entirely open: rows 3.1 through 3.8 (full uid/gid trust
+  hierarchy, per-domain filesystem jail, generational GC, a
+  conformance test suite, an LPC language spec, a per-dialect driver
+  API reference and porting guide, a second real third-party mudlib)
+  are all `[ ]`; only row 3.9 is done.
 - **Most Phase 2/3 differentiators are still a plan, not code.**
-  Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
-  conformance suite, generational GC -- all still have a real
-  `instruct.md` and zero implementation, and none of them should be
-  described as "in progress." Fourteen Phase 2 rows are the exception,
-  real and landed rather than planned: the apply cache (2.9), the full
-  PCRE suite (2.12), built-in SQLite (2.15, now correctly dialect-gated
-  to `ldmud` per row 2.40), the `hash()` efun (2.16),
-  `time_ns()`/`perf_counter_ns()` (2.23), `secure_random()` (2.24),
-  `log2()`/`round()` (2.25), `trim()`/`ltrim()`/`rtrim()` (2.26),
-  `explode_reversible()` (2.27), `call_out_walltime()` (2.28),
-  `enable_wizard()`/`disable_wizard()`/`wizardp()` (2.29),
-  `sys_network_ports()` (2.30), `roll_MdN()`/`vowel()`/`add_a()`
-  (2.37), and the LDMud-vs-FluffOS `db_*` naming-collision resolution
-  itself (2.40) -- along with Phase 3's own row 3.9, a
-  real third-party mudlib boot-and-play confirmation.
+  JIT, hotboot, object swapout, TLS, WebSocket, the LSP server,
+  hot-reload, `async`/`await`, a conformance suite, and generational
+  GC all still have only a real `instruct.md` and zero implementation,
+  and none should be described as "in progress." Thirty-four Phase 2
+  rows are the exception, real and landed rather than planned. Six are
+  architecturally substantial runtime work: statedump v1 (2.1), dual
+  persistence coexistence (2.4), the coroutine scheduler v1 (2.5), the
+  apply cache (2.9), the full PCRE suite (2.12), and built-in SQLite
+  (2.15, dialect-gated to `ldmud` per row 2.40). The other 28 are
+  small single-efun or single-argument spec-conformance slices from a
+  package-by-package `src/packages/*/*.spec` sweep (2.16, 2.23 through
+  2.30, 2.33a, 2.37, 2.46 through 2.61). Phase 3's own row 3.9 (the
+  AetherMUD mudlib, now run through login, character creation,
+  movement, dialogue, and real combat, not just a boot) is the one
+  landed Phase 3 row.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger
   master-object callback surface: see the section above. LDMud's
@@ -509,9 +669,9 @@ undersells what already works: AMLP is not a wrapper or a fork of any
 of the three real drivers: its own lexer, parser, code generator,
 bytecode VM, object system, and network layer are original
 implementations, verified continuously against real vendored source and
-a real bundled mudlib rather than against assumption. 743 regression
-tests pass as of this writing (see `STATUS.md` for the current count,
-which changes every session), and the discipline behind every checked
+a real bundled mudlib rather than against assumption. 819 regression
+tests pass as of this writing (`STATUS.md` 2026-09-01; the count
+changes every session), and the discipline behind every checked
 row above is the same: read the real source, port the real behavior
 (including confirmed real quirks and off-by-ones where they exist, not
 just the "sensible" version), and verify live against a real running

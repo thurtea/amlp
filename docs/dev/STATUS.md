@@ -9,12 +9,122 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
-**2026-08-30 (a further session, same day): `sprintf` `%=` column /
-word-wrap mode, single-column form. The `sprintf` efun now accepts a
-`%=` modifier and word-wraps a string argument to a column of the
-given field width instead of throwing `sprintf: unsupported format
-specifier '%='`. 818 tests passing (up from 817). New `ROADMAP.md` row
-2.60.**
+**2026-09-01: `implode()` function/fold form, and non-string skipping
+in the join form. The already-registered `implode` efun now accepts a
+function pointer as its 2nd argument (a real left fold, with or without
+a seed) and, in the string-separator form, skips non-string elements
+instead of throwing on them, both matching real FluffOS. 819 tests
+passing (up from 818). New `ROADMAP.md` row 2.61.**
+
+**Why this slice.** Continues the one-package-at-a-time discipline of
+rows 2.57 through 2.60: extend an already-registered efun to the real
+argument shapes its own body rejects, rather than registering a new
+name. `implode`'s own code comment already said "the function-per-
+element form real implode() also supports is not implemented," and row
+2.58's own STATUS entry listed `implode(arr, function [, seed])` (the
+reduce form) as a known remaining gap, "lower frequency than the two
+above and needs a closure trampoline. Noted, not scheduled here." The
+closure trampoline is not actually new work: `map`/`filter`/
+`sort_array` already call `vm.callClosure()` from inside their efun
+bodies.
+
+**Real surface.** `temp/reference/fluffos-2.9-ds2.08/func_spec.c:76`
+`mixed implode(mixed *, string | function, void | mixed);`;
+`efun_defs.c:99` `{"implode",F_IMPLODE,0,0,2,3,TYPE_ANY,T_ARRAY,
+T_STRING|T_FUNCTION,T_ANY,T_ANY,...}` (2 to 3 args, 2nd arg string or
+function). Identical in the current clone
+`temp/fluffos/src/packages/core/core.spec:55`.
+
+**Real semantics, read line by line from
+`temp/reference/fluffos-2.9-ds2.08/efuns_main.c:1032` `f_implode()`
+plus `array.c:395` `implode_string()` and `array.c:428`
+`implode_array()`.**
+
+  - 2nd arg a string is the join form. Real `implode_string()` counts
+    only `T_STRING` elements: the separator goes between consecutive
+    string elements only, non-string elements are skipped (not
+    stringified, not an error), and an array with no string element
+    returns `""`. A 3rd argument alongside a string separator is a hard
+    error (`"Third argument to implode() is illegal with implode(array,
+    string)"`).
+  - 2nd arg a function is a left fold. The function is called with
+    exactly two arguments `(accumulator, element)` each step. With a
+    seed (3 args): `acc = seed`, then `acc = f(acc, elem)` for every
+    element; an empty array returns the seed unchanged. Without a seed
+    (2 args): an empty array returns int `0`; a one-element array
+    returns that element unchanged with the function never called;
+    otherwise `acc = arr[0]`, then `acc = f(acc, arr[i])` for `i` in
+    `1..n-1`. Real `implode_array()`'s own `if (!v) *dest = const0`
+    mid-fold path (a call through a destructed-object function pointer)
+    is approximated by a null-`Closure` guard returning `0`, since this
+    driver's `vm.callClosure()` throws rather than returning a
+    sentinel, the same choice `map`/`filter` already make.
+  - `check_for_destr(arr)` (real drops destructed object refs to `0`
+    before folding or joining) is not reproduced: no corpus call site
+    depends on it, and the prior body did not do it either.
+
+**Built.** The `implode` registration in `EfunTable.cpp` rewritten to
+dispatch on `args[1]`'s type: `std::string` takes the join branch
+(now element-skipping, with the 3rd-argument error), `std::shared_ptr<
+Closure>` takes the fold branch (seed and no-seed shapes), anything
+else throws, and 2 or 3 args only (a 4th throws). No new include or
+dependency.
+
+**Corpus evidence, checked before implementing.** Most of the ~1200
+`implode(` call sites across the vendored corpora (`core-lib`,
+`dead-souls`, `es2_mudlib`, `lima`, `nightmare3`,
+`reference-lpc-mud-library`, `wiz_tools`, `lil`, `mudlib`) pass a
+literal string separator, already handled; the visible function-shaped
+hits are almost all a nested `implode(map(...), "\n")` where `implode`
+itself still takes a string. The fold form's own conformance case is
+pinned directly by `temp/lil/single/tests/efuns/implode.c`'s own 9
+assertions (`implode(({1,2,3}),(: $1 + $2 :)) == 6`,
+`implode(({1,2,3}),(: $1 + $2 :),"") == "123"`,
+`implode(({}),(: $1 :),666) == 666`, `implode(({}),(: $1 :)) == 0`,
+`implode(({555}),(: $1 + 5 :)) == 555`, plus the join-form
+non-string-skipping cases `implode(({1,2,3}),"foo") == ""` and
+`implode(({1,"foo","bar"}),"bazz") == "foobazzbar"`);
+`temp/dead-souls/lib/doc/efun/strings/implode` documents the same. The
+prior body's "throw on a non-string element" was itself a divergence
+from real `implode_string()`; the new behavior is strictly more
+lenient, so no existing all-string call site changes.
+
+**1 new regression test (819 total, up from 818):**
+`testImplodeFunctionFoldFormAndNonStringSkipping` in
+`test/test_lexer.cpp` -- every `temp/lil` assertion above, plus the
+string-separator-with-a-3rd-argument error path. Every expected value
+was traced by hand from `f_implode()` / `implode_string()` /
+`implode_array()`, not read back from this driver. The existing 818
+re-run unchanged.
+
+**Documentation updated to match:** one new `ROADMAP.md` row, 2.61
+(`[x]`, full citation trail in its own cell).
+
+**Same session, before this slice: two documentation-only passes, both
+recorded here since this file is the dev log.** (1) `COMPARISON.md` was
+given a full phase-fraction re-derivation from `ROADMAP.md`'s and
+`STATUS.md`'s current state (its Phase 2 table was stale at 14/45 and
+its running test total at 743). Re-counted directly from the current
+checkboxes: Phase 0 16/16, Phase 1 real-blockers 10/11, Phase 2 33/61
+at sweep time (34/62 after this slice), Phase 3 1/9; rollups 60/97
+(~62%) excluding the 5 DGD-only Phase 1 rows and 60/102 (~59%)
+including them, 61/98 and 61/103 after this slice. The brief that
+requested that refresh carried its own stale figures (Phase 2 "6/22,
+27%", 761 tests, rollup "33/58"); the discrepancy is flagged in
+`COMPARISON.md`'s own new "Re-swept 2026-09-01" note, live checkboxes
+used instead. New Phase 2 row-by-row table added there; row 3.9's own
+gameplay depth and its two driver-side fixes (sprintf missing-mapping-
+key, array-form `call_other`) written up. (2) `ROADMAP.md` row 1.8
+(LDMud `#'lfun::`/`#'sefun::`/`#'var::` closure-literal prefixes, the
+one open real Phase 1 blocker) had its own standing "re-check the
+zero-evidence claim fresh" caution acted on: `grep -rnE
+"#'[A-Za-z_][A-Za-z0-9_]*::"` across every vendored mudlib corpus
+returns exactly one hit, the already-implemented `#'efun::` form; zero
+for the three prefixes this row still covers, outside `temp/ldmud/`'s
+own docs. The 2026-08-20 finding stands, the row stays deferred, Phase
+1's real-blocker fraction stays 10/11, and hotboot (row 2.3) is
+recorded in that cell as the recommended next target since it builds on
+row 2.4's landed dual-persistence work.**
 
 **Why this slice.** Row 3.9's own STATUS notes explicitly flagged this
 as a "confirmed real need" reachable in ordinary play:

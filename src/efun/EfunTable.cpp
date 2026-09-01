@@ -1960,35 +1960,75 @@ void registerCoreEfuns() {
     });
 
     // mixed implode(mixed *arr, string | function sep, void | mixed) --
-    // real func_spec.cpp signature. Only the plain string-separator form
-    // is implemented (join every element, converted to string, with sep
-    // between them) -- confirmed the only shape used anywhere on this
-    // driver's confirmed real path (every real call site here passes
-    // an array already containing strings and a literal separator, e.g.
-    // std/user/nmsh.c's own "implode(words, \" \")" and
-    // "implode(map_array(...), \", \")"); the function-per-element form
-    // real implode() also supports is not implemented.
-    t.registerEfun("implode", [](VM&, std::vector<Value>& args) -> Value {
-        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data) ||
-            !std::holds_alternative<std::string>(args[1].data)) {
-            throw LpcRuntimeError("implode: expected (array, string) arguments "
-                                   "(function-per-element form not implemented)");
+    // real func_spec.c:76, efun_defs.c:99 (2..3 args; 2nd arg
+    // T_STRING|T_FUNCTION). Real efuns_main.c f_implode() dispatches on
+    // the 2nd argument's type:
+    //   - string  -> join form, real array.c:395 implode_string(): only
+    //     T_STRING elements contribute, the separator goes between
+    //     consecutive string elements only, non-string elements are
+    //     skipped (not stringified, not an error), zero string elements
+    //     yields "". A 3rd argument here is an error ("Third argument to
+    //     implode() is illegal with implode(array, string)").
+    //   - function -> left-fold form, real array.c:428 implode_array():
+    //     with a seed (3 args) acc = seed, then acc = f(acc, elem) for
+    //     every element (empty array returns the seed unchanged); without
+    //     a seed (2 args) an empty array returns int 0, a one-element
+    //     array returns that element unchanged (f is not called),
+    //     otherwise acc = arr[0] then acc = f(acc, arr[i]) for i in
+    //     1..n-1. f is called with exactly two arguments each step.
+    // Semantics pinned by temp/lil/single/tests/efuns/implode.c's own 9
+    // assertions. check_for_destr(arr) (real drops destructed object refs
+    // to 0 before folding) is not reproduced: no corpus call site relies
+    // on it and the prior body did not do it either.
+    t.registerEfun("implode", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || args.size() > 3 ||
+            !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("implode: expected (array, string | function"
+                                   "[, start]) arguments");
         }
         auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
-        const std::string& sep = std::get<std::string>(args[1].data);
-        std::string result;
-        if (arr) {
-            for (size_t i = 0; i < arr->items.size(); ++i) {
-                if (i > 0) result += sep;
-                if (auto* s = std::get_if<std::string>(&arr->items[i].data)) {
-                    result += *s;
-                } else {
-                    throw LpcRuntimeError("implode: array element " + std::to_string(i) +
-                                           " is not a string");
+
+        if (auto* sepPtr = std::get_if<std::string>(&args[1].data)) {
+            if (args.size() == 3) {
+                throw LpcRuntimeError("implode: third argument is illegal with "
+                                       "implode(array, string)");
+            }
+            const std::string& sep = *sepPtr;
+            std::string result;
+            bool any = false;
+            if (arr) {
+                for (const auto& item : arr->items) {
+                    if (auto* s = std::get_if<std::string>(&item.data)) {
+                        if (any) result += sep;
+                        result += *s;
+                        any = true;
+                    }
                 }
             }
+            return Value(result);
         }
-        return Value(result);
+
+        if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
+            auto& closure = *closurePtr;
+            const size_t n = arr ? arr->items.size() : 0;
+            if (args.size() == 3) {
+                Value acc = args[2];
+                for (size_t i = 0; i < n; ++i) {
+                    if (!closure) return Value(int64_t{0});
+                    acc = vm.callClosure(closure, {acc, arr->items[i]});
+                }
+                return acc;
+            }
+            if (n == 0) return Value(int64_t{0});
+            Value acc = arr->items[0];
+            for (size_t i = 1; i < n; ++i) {
+                if (!closure) return Value(int64_t{0});
+                acc = vm.callClosure(closure, {acc, arr->items[i]});
+            }
+            return acc;
+        }
+
+        throw LpcRuntimeError("implode: second argument must be a string or a function");
     });
 
     // string repeat_string(string, int) -- func_spec.c/efun_defs.c

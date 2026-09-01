@@ -15098,6 +15098,52 @@ static void testImplodeOnEmptyArrayReturnsEmptyString() {
     std::cout << "testImplodeOnEmptyArrayReturnsEmptyString OK\n";
 }
 
+// implode()'s function/fold form and non-string skipping in the join
+// form -- real func_spec.c:76 (mixed implode(mixed *, string | function,
+// void | mixed)), real efuns_main.c f_implode() dispatching to
+// array.c:395 implode_string() (join) or array.c:428 implode_array()
+// (left fold). Every expected value traced by hand from those and
+// cross-checked against temp/lil/single/tests/efuns/implode.c's own
+// assertions.
+static void testImplodeFunctionFoldFormAndNonStringSkipping() {
+    // Join form: non-string elements are skipped, not stringified and not
+    // an error; the separator falls only between consecutive strings; an
+    // array with no string element yields "".
+    assert(std::get<std::string>(
+        runProbe("return implode(({ 1, 2, 3 }), \"foo\");\n").data) == "");
+    assert(std::get<std::string>(
+        runProbe("return implode(({ 1, \"foo\", \"bar\" }), \"bazz\");\n").data) == "foobazzbar");
+    assert(std::get<std::string>(
+        runProbe("return implode(({ \"foo\", \"bar\" }), \"\");\n").data) == "foobar");
+
+    // Fold form, no seed: acc = arr[0], then acc = f(acc, elem) for the rest.
+    assert(std::get<int64_t>(
+        runProbe("return implode(({ 1, 2, 3 }), (: $1 + $2 :));\n").data) == 6);
+    // Fold form with a seed: acc = seed, then folded over every element
+    // ("" + 1 -> "1", "1" + 2 -> "12", "12" + 3 -> "123").
+    assert(std::get<std::string>(
+        runProbe("return implode(({ 1, 2, 3 }), (: $1 + $2 :), \"\");\n").data) == "123");
+    // Empty array: the seed is returned unchanged; with no seed, int 0.
+    assert(std::get<int64_t>(
+        runProbe("return implode(({}), (: $1 :), 666);\n").data) == 666);
+    assert(std::get<int64_t>(
+        runProbe("return implode(({}), (: $1 :));\n").data) == 0);
+    // One-element array, no seed: that element unchanged, f never called.
+    assert(std::get<int64_t>(
+        runProbe("return implode(({ 555 }), (: $1 + 5 :));\n").data) == 555);
+
+    // A 3rd argument alongside a string separator is an error.
+    bool threw = false;
+    try {
+        runProbe("return implode(({ \"a\" }), \",\", \"x\");\n");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testImplodeFunctionFoldFormAndNonStringSkipping OK\n";
+}
+
 // sprintf's "%c" -- surfaced live: daemon/terminal.c's own ANSI(p)/ESC(p)
 // macros, "sprintf(\"%c[\"+(p)+\"m\", 27)", building a raw ESC (ASCII 27)
 // byte ahead of an ANSI escape sequence. Confirmed against
@@ -27544,6 +27590,7 @@ int main() {
     testSortArrayWithStringFunctionNameOrdersByComparatorResult();
     testImplodeJoinsStringArrayWithSeparator();
     testImplodeOnEmptyArrayReturnsEmptyString();
+    testImplodeFunctionFoldFormAndNonStringSkipping();
     testSprintfPercentCEmitsSingleCharacterFromIntArgument();
     testSprintfPercentCThrowsOnNonIntArgument();
     testSprintfPercentDThrowsOnNonIntArgument();

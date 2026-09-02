@@ -1111,12 +1111,118 @@ int reclaimSweepValue(Value& v, int depth) {
 // `check_valid_path()`'s own `path = v->u.string;` and core-lib's own
 // real `valid_write()` return value on success). Anything else (e.g. a
 // bare truthy `1`) allows with the original path unchanged, matching
-// `check_valid_path()`'s own final `else` branch. Deliberately does not
-// also replicate real `legal_path()`'s own separate `..`/`#`-character
-// sanity checks below `check_valid_path()` in the same real function --
-// a different, narrower concern (basic path-traversal hygiene, already
-// partly covered by this driver's own existing mudlib-root-relative path
-// resolution) than the master-apply gate this row is specifically about.
+// `check_valid_path()`'s own final `else` branch. ROADMAP row 3.2's own
+// last named gap, closed here: after the master-apply gate above,
+// `legal_path()`'s own `..`/`#`-character sanity check (`legalPathFluffos`/
+// `legalPathLdmud` just above, ported from real `file.c:295-334` /
+// `simulate.c:1734-1776`) now runs on whatever path the master approved,
+// exactly where real `check_valid_path()` runs it -- after the apply,
+// on the (possibly rewritten) path, with one leading '/' stripped for the
+// check only (`checkPath` below; the leading-'/'-keeping return value
+// itself is unchanged, matching this driver's own established
+// `resolveMudlibPath()` convention rather than adopting real code's own
+// separate "return without a leading '/'" contract). Real FluffOS denies
+// silently (`file.c:750`'s bare `return 0`, indistinguishable from a
+// master `valid_write`/`valid_read` denial to every existing call site
+// here); real LDMud instead throws a catchable runtime error
+// (`simulate.c:3846-3849`'s own `errorf("Illegal path '%s' for %s() by
+// %s\n", ...)`), a genuine dialect divergence ported faithfully below
+// rather than flattened to one shared behavior.
+// Mechanical port of real FluffOS `file.c:295-334`'s own `legal_path()` --
+// the traversal/injection gate `check_valid_path()` (`file.c:747`) runs
+// AFTER the `valid_read`/`valid_write` master apply, on whatever path that
+// apply returned, stripped of one leading '/' (`file.c:743-746`, mirrored
+// locally by `checkValidPath()` below rather than changing this driver's
+// own established `resolveMudlibPath()` leading-'/'-keeping convention).
+// Ported line by line off real `p[0]`/`p[1]` pointer-walk semantics
+// (`std::string::operator[]` is UB past `size()`, so a bounds-checked `at`
+// lambda stands in for C's own null-terminator read), not reimplemented
+// from a general "block dot-dot-slash" idea -- this preserves every real
+// quirk exactly, including ones a from-scratch rewrite would likely lose:
+// a bare "." is accepted (real: "trailing '.' ok"), but embedded "/./" and
+// even a *leading* "./" are both rejected right along with "..", because
+// real code's own `if (p[1] == '/' || p[1] == '\0') return 0;` fires for
+// any single-dot component, not only a double-dot one. Real corpus
+// evidence this is not academic: this driver's own `resolveMudlibPath()`
+// (`VM.cpp`) is a bare `config_.mudlibRoot() + lpcPath` string
+// concatenation with no sandboxing of its own -- every mudlib in this
+// project's corpus builds file-efun paths straight from LPC string
+// concatenation, much of it player-influenced (e.g. `secure/daemon/
+// master.c`-style `valid_write()` bodies gate by prefix, and callers like
+// `"/save/" + name + ".o"` in login/creation flows before this gate
+// existed would have let a crafted `name` -- literally "..#etc#passwd"-
+// shaped -- walk `write_file()`/`read_file()` straight past `mudlibRoot`
+// on real disk I/O). The real `#`-rejection (`file.c:307-309`) is its own
+// documented real-world motivation, not invented here: "disallowing #
+// seems the easiest way to solve a bug involving loading files containing
+// that character" -- real FluffOS filenames use trailing `#<clone-number>`
+// for cloned-object identity (`object.c`'s own `#` clone-suffix
+// convention), so a raw `#` reaching a file efun risks colliding with or
+// forging that internal naming scheme, a truncation/confusion attack
+// distinct from plain `../` traversal.
+bool legalPathFluffos(const std::string& path) {
+    if (path.empty()) return false;   // real: `path == NULL` guard
+    if (path[0] == '/') return false; // real: dead code once upstream
+                                       // strips one leading '/', kept for
+                                       // a doubled "//..." to still reject
+    if (path.find('#') != std::string::npos) return false;
+
+    auto at = [&](size_t i) -> char { return i < path.size() ? path[i] : '\0'; };
+    for (size_t p = 0;;) {
+        if (at(p) == '.') {
+            if (at(p + 1) == '\0') break;              // trailing '.' ok
+            if (at(p + 1) == '.') p++;                 // '..' or '../'
+            if (at(p + 1) == '/' || at(p + 1) == '\0') return false;
+        }
+        size_t next = path.find("/.", p);
+        if (next == std::string::npos) break;
+        p = next + 1; // step over '/'
+    }
+    return true;
+}
+
+// Mechanical port of real LDMud `simulate.c:1762-1776`'s own `legal_path()`
+// plus the `check_no_parentdirs()` helper it calls (`simulate.c:1734-1759`),
+// invoked the same way real `check_valid_path()` does
+// (`simulate.c:3841`), after the master apply and the leading-'/' strip.
+// A genuinely different dialect shape from FluffOS's own version above,
+// confirmed by reading both real bodies directly rather than assuming a
+// shared algorithm behind the shared name: LDMud never rejects '#' at all
+// (grepped the whole file, no mention), a leading '/' is checked the same
+// way, and only a literal anchored ".." *component* is rejected -- real
+// `check_no_parentdirs()` only fires when the second dot is followed by
+// end-of-string or '/' AND the first dot is at the start of the path or
+// immediately after a '/' -- so unlike FluffOS's own version, a plain
+// embedded "/./ " or a leading "./" is left alone here, matching real
+// LDMud's narrower check exactly rather than harmonizing the two dialects.
+// LDMud's own `legal_path()` also rejects a bare space unless
+// `allow_filename_spaces` (`main.c:139`) was set, which defaults
+// `MY_FALSE` and is a command-line-only toggle (`main.c:372,2863-2867`)
+// this driver exposes no equivalent config key for, so the space check
+// below is applied unconditionally, matching the real default build.
+bool legalPathLdmud(const std::string& path) {
+    if (path.find(' ') != std::string::npos) return false;
+    if (!path.empty() && path[0] == '/') return false;
+
+    size_t p = path.find('.');
+    while (p != std::string::npos) {
+        char afterFirst = (p + 1 < path.size()) ? path[p + 1] : '\0';
+        if (afterFirst != '.') {
+            p = path.find('.', p + 1);
+            continue;
+        }
+        char afterSecond = (p + 2 < path.size()) ? path[p + 2] : '\0';
+        bool atComponentStart = (p == 0) || (path[p - 1] == '/');
+        if ((afterSecond == '\0' || afterSecond == '/') && atComponentStart) {
+            return false;
+        }
+        // real: `p++;` (simulate.c:1756) then the for-loop's own
+        // `strchr(p+1, '.')` -- together a search resuming from `p + 2`.
+        p = path.find('.', p + 2);
+    }
+    return true;
+}
+
 std::optional<std::string> checkValidPath(VM& vm, const std::string& rawPath, bool writeFlag,
                                            const std::string& funcName) {
     // Same "not loaded yet" skip already established for privs
@@ -1154,15 +1260,42 @@ std::optional<std::string> checkValidPath(VM& vm, const std::string& rawPath, bo
     }
     Value result = vm.applyMaster(writeFlag ? "valid_write" : "valid_read", std::move(args));
 
-    if (std::holds_alternative<std::monostate>(result.data)) return rawPath;
-    if (auto* denied = std::get_if<int64_t>(&result.data)) {
-        if (*denied == 0) return std::nullopt;
-        return rawPath;
+    std::optional<std::string> gated;
+    if (std::holds_alternative<std::monostate>(result.data)) {
+        gated = rawPath;
+    } else if (auto* denied = std::get_if<int64_t>(&result.data)) {
+        gated = (*denied == 0) ? std::nullopt : std::optional<std::string>(rawPath);
+    } else if (auto* rewritten = std::get_if<std::string>(&result.data)) {
+        gated = *rewritten;
+    } else {
+        gated = rawPath;
     }
-    if (auto* rewritten = std::get_if<std::string>(&result.data)) {
-        return *rewritten;
+    if (!gated) return std::nullopt;
+
+    // real: `if (path[0] == '/') path++;` (file.c:743-744 /
+    // simulate.c:3825-3832) -- for the legality check only, see this
+    // function's own header comment on why the returned path itself keeps
+    // its leading '/'.
+    const std::string& approved = *gated;
+    std::string checkPath = (!approved.empty() && approved[0] == '/') ? approved.substr(1) : approved;
+
+    bool ldmud = vm.config().dialect() == "ldmud";
+    bool legal = ldmud ? legalPathLdmud(checkPath) : legalPathFluffos(checkPath);
+    if (legal) return gated;
+
+    if (ldmud) {
+        // real: `errorf("Illegal path '%s' for %s() by %s\n", ...)`
+        // (simulate.c:3846-3849) -- a catchable runtime error, not a
+        // silent denial. `caller` may be null here in ways real code's own
+        // `fatal("Illegal caller for check_valid_path.\n")` guard would
+        // not permit (this driver already reaches this point for calls
+        // with no current object); "?" stands in rather than crashing.
+        throw LpcRuntimeError("Illegal path '" + checkPath + "' for " + funcName + "() by " +
+                               (caller ? caller->filename() : "?"));
     }
-    return rawPath;
+    // real: `file.c:750`'s bare `return 0` -- silent denial,
+    // indistinguishable from a master-apply deny to every call site.
+    return std::nullopt;
 }
 
 // Backs replace_program() below. Real search_inherited() (replace_program.c):

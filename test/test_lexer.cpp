@@ -4289,6 +4289,185 @@ static void testValidWriteReceivesRealArgumentShapePerDialect() {
     std::cout << "testValidWriteReceivesRealArgumentShapePerDialect OK\n";
 }
 
+// ROADMAP row 3.2's own last named gap, closed here: legal_path()'s
+// '..'/'#' traversal-and-injection check (real file.c:295-334 /
+// simulate.c:1734-1776), now enforced by checkValidPath() after the
+// (permissive-default, since none of these tests' masters define
+// valid_write/valid_read) master-apply gate above it. Real corpus
+// motivation: this driver's own resolveMudlibPath() (VM.cpp) is a bare
+// mudlibRoot + lpcPath string concatenation with no sandboxing of its
+// own, matching real FluffOS's own disk-I/O shape -- a mudlib building a
+// save path from player-suppliable input (a real, common shape, e.g.
+// login/creation flows composing "/save/" + name + ".o") would otherwise
+// let a crafted name walk write_file()/read_file() straight past
+// mudlibRoot on real disk I/O once it reached this driver's own file
+// efuns. These tests prove the gate actually stops that, not just that
+// checkValidPath() compiles.
+
+static void testCheckValidPathRejectsParentDirectoryTraversalFluffos() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/traverse_caller.c",
+        "int probe() { return write_file(\"/../amlp_row32_escaped.txt\", \"pwned\"); }\n");
+    auto caller = harness.objects.cloneObject("/traverse_caller");
+    assert(caller != nullptr);
+
+    // The naive pre-gate resolution real disk I/O would have used:
+    // mudlibRoot's own parent directory.
+    std::string outsidePath =
+        harness.tempDir.substr(0, harness.tempDir.find_last_of('/')) + "/amlp_row32_escaped.txt";
+    std::remove(outsidePath.c_str()); // in case a prior failed run left it behind
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0); // denied, matching real file.c:750's bare "return 0"
+
+    std::ifstream check(outsidePath);
+    assert(!check.good()); // genuinely never written outside mudlibRoot
+    check.close();
+    std::remove(outsidePath.c_str());
+
+    std::cout << "testCheckValidPathRejectsParentDirectoryTraversalFluffos OK\n";
+}
+
+static void testCheckValidPathRejectsEmbeddedHashFluffos() {
+    // Real file.c:307-309's own stated motivation: real FluffOS filenames
+    // use a trailing "#<clone-number>" suffix for cloned-object identity,
+    // so a raw '#' reaching a file efun risks colliding with or forging
+    // that internal naming scheme.
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/hash_caller.c",
+        "int probe() { return write_file(\"/sav#e.o\", \"pwned\"); }\n");
+    auto caller = harness.objects.cloneObject("/hash_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::ifstream check(harness.tempDir + "/sav#e.o");
+    assert(!check.good());
+
+    std::cout << "testCheckValidPathRejectsEmbeddedHashFluffos OK\n";
+}
+
+static void testCheckValidPathRejectsLeadingDotSlashFluffos() {
+    // Real file.c's own genuine quirk (not a from-scratch reimplementation
+    // choice): `if (p[1] == '/' || p[1] == '\0') return 0;` fires for any
+    // single-dot path component, so a leading "./" is rejected right
+    // along with "../" -- ported faithfully rather than "cleaned up".
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/dotslash_caller.c",
+        "int probe() { return write_file(\"/./sneaky.txt\", \"pwned\"); }\n");
+    auto caller = harness.objects.cloneObject("/dotslash_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testCheckValidPathRejectsLeadingDotSlashFluffos OK\n";
+}
+
+static void testCheckValidPathAcceptsOrdinaryDottedFilenameFluffos() {
+    // Not just an attack-shape sweep -- confirms the new gate does not
+    // also reject the overwhelmingly common real case of dots inside an
+    // ordinary filename (a versioned save name here), matching real
+    // file.c's own legal_path(): only an actual ".." or "." *component*
+    // is special, a '.' sitting inside a filename is not.
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/dotted_caller.c",
+        "int write_it() { return write_file(\"/player.v1.2.o\", \"data\\n\"); }\n"
+        "string read_it() { return read_file(\"/player.v1.2.o\"); }\n");
+    auto caller = harness.objects.cloneObject("/dotted_caller");
+    assert(caller != nullptr);
+
+    amlp::Value writeResult = harness.vm.callFunction(caller, "write_it", {});
+    assert(std::holds_alternative<int64_t>(writeResult.data));
+    assert(std::get<int64_t>(writeResult.data) == 1);
+
+    amlp::Value readResult = harness.vm.callFunction(caller, "read_it", {});
+    assert(std::holds_alternative<std::string>(readResult.data));
+    assert(std::get<std::string>(readResult.data) == "data\n");
+
+    std::cout << "testCheckValidPathAcceptsOrdinaryDottedFilenameFluffos OK\n";
+}
+
+static void testCheckValidPathLdmudThrowsCatchableRuntimeErrorOnTraversal() {
+    // Real dialect divergence, ported faithfully rather than flattened:
+    // FluffOS's own check_valid_path() denies a bad path silently
+    // (file.c:750's bare "return 0"), but LDMud's own version throws a
+    // catchable runtime error instead (simulate.c:3846-3849's own
+    // errorf("Illegal path '%s' for %s() by %s\n", ...)). Verified two
+    // ways here: LPC-level catch() actually traps it (proving it is a
+    // genuine LPC error, not a process-level crash) with the real
+    // errorf() message shape, and the write itself never happened.
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/ldmud_traverse_caller.c",
+        "mixed probe() { return catch(write_file(\"/../ldmud_escaped.txt\", \"pwned\")); }\n");
+    auto caller = harness.objects.cloneObject("/ldmud_traverse_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    const std::string& msg = std::get<std::string>(result.data);
+    assert(msg.find("Illegal path") != std::string::npos);
+    assert(msg.find("../ldmud_escaped.txt") != std::string::npos);
+    assert(msg.find("write_file") != std::string::npos);
+    assert(msg.find(caller->filename()) != std::string::npos);
+
+    std::string outsidePath =
+        harness.tempDir.substr(0, harness.tempDir.find_last_of('/')) + "/ldmud_escaped.txt";
+    std::ifstream check(outsidePath);
+    assert(!check.good());
+
+    std::cout << "testCheckValidPathLdmudThrowsCatchableRuntimeErrorOnTraversal OK\n";
+}
+
+static void testCheckValidPathLdmudRejectsSpaceButAllowsHash() {
+    // Real dialect divergence the other direction: LDMud's own
+    // legal_path() (simulate.c:1762-1776) never mentions '#' at all, but
+    // does reject an embedded space unless allow_filename_spaces was set
+    // (main.c:139, default MY_FALSE, no equivalent config key in this
+    // driver -- see legalPathLdmud()'s own comment in EfunTable.cpp).
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/ldmud_shape_caller.c",
+        "mixed probe_space() { return catch(write_file(\"/sav ed.o\", \"x\")); }\n"
+        "int probe_hash() { return write_file(\"/sav#ed.o\", \"y\"); }\n");
+    auto caller = harness.objects.cloneObject("/ldmud_shape_caller");
+    assert(caller != nullptr);
+
+    amlp::Value spaceResult = harness.vm.callFunction(caller, "probe_space", {});
+    assert(std::holds_alternative<std::string>(spaceResult.data));
+    assert(std::get<std::string>(spaceResult.data).find("Illegal path") != std::string::npos);
+
+    amlp::Value hashResult = harness.vm.callFunction(caller, "probe_hash", {});
+    assert(std::holds_alternative<int64_t>(hashResult.data));
+    assert(std::get<int64_t>(hashResult.data) == 1); // '#' is fine under LDMud
+
+    std::ifstream check(harness.tempDir + "/sav#ed.o");
+    assert(check.good());
+
+    std::cout << "testCheckValidPathLdmudRejectsSpaceButAllowsHash OK\n";
+}
+
 static void testCreateRuntimeErrorFailsLoadInsteadOfCrashing() {
     ObjectVarHarness harness;
 
@@ -27760,6 +27939,12 @@ int main() {
     testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero();
     testValidWriteRewritesPathWhenMasterReturnsAString();
     testValidWriteReceivesRealArgumentShapePerDialect();
+    testCheckValidPathRejectsParentDirectoryTraversalFluffos();
+    testCheckValidPathRejectsEmbeddedHashFluffos();
+    testCheckValidPathRejectsLeadingDotSlashFluffos();
+    testCheckValidPathAcceptsOrdinaryDottedFilenameFluffos();
+    testCheckValidPathLdmudThrowsCatchableRuntimeErrorOnTraversal();
+    testCheckValidPathLdmudRejectsSpaceButAllowsHash();
     testCreateRuntimeErrorFailsLoadInsteadOfCrashing();
     testAbsoluteIncludePathResolvesAgainstMudlibRoot();
     testCppWarningsDoNotFailPreprocessing();

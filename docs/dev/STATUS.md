@@ -9,6 +9,153 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-02: `legal_path()` `..`/`#` traversal check, closing row 3.2
+(ROADMAP rows 3.1 / 3.2). The concrete next cut the prior session's
+row 3.2 re-scoping named: `checkValidPath()`'s own comment flagged real
+`legal_path()`'s `..`/`#`-character sanity check as deliberately not
+replicated. Built it, dialect-faithful (FluffOS silent deny, LDMud
+catchable runtime error). 833 tests passing (up from 827). Row 3.2 now
+`[x]`; row 3.1 unchanged. This closes the real driver-level
+uid/security cluster (rows 3.1 + 3.2) -- see below.**
+
+**Why this, and why now.** Row 3.2's own 2026-09-01 re-scoping already
+identified this as the one genuine remaining gap once items (1) and (2)
+were done in row 3.1's slice 2: `checkValidPath()` already ran the
+`valid_write`/`valid_read` master apply, but never followed it with
+`legal_path()`, the second half of what real `check_valid_path()` does.
+Picked up directly rather than re-searching the cluster, per that
+session's own explicit framing of it as "the concrete smallest next cut
+for this row if picked up."
+
+**Real source, read directly, both dialects.** FluffOS 2.9
+`temp/reference/fluffos-2.9-ds2.08/file.c:295-334`'s own `legal_path()`:
+rejects a leading `/`, any `#` anywhere in the path (own comment,
+verbatim: "disallowing # seems the easiest way to solve a bug involving
+loading files containing that character" -- real FluffOS filenames use a
+trailing `#<clone-number>` suffix for cloned-object identity, so a raw
+`#` reaching a file efun risks colliding with or forging that internal
+naming scheme), and, via its own real pointer-walk over `strstr(p,
+"/.")`, any `..` or bare `.` path component -- including a genuine quirk
+that is easy to lose in a from-scratch reimplementation: a *leading*
+`./` is illegal too, not only `../`, because real code's own `if (p[1]
+== '/' || p[1] == '\0') return 0;` fires for any single-dot component,
+not only a double-dot one. `file.c:705-750`'s own `check_valid_path()`
+confirmed the full real pipeline directly: push `(path, call_object,
+call_fun)`, apply `valid_write`/`valid_read`, a `0` return denies, a
+string return rewrites the path, strip one leading `/`, an all-slash
+path becomes `.`, THEN `legal_path()` runs as the final gate -- and
+there is no second per-domain layer anywhere in the driver, the
+domain-to-path-prefix mapping lives entirely in the mudlib master's own
+`valid_write()` body (`secure/daemon/master.c`-shaped). LDMud's
+equivalent, also read directly rather than assumed to share FluffOS's
+algorithm behind the shared name: `temp/ldmud/src/simulate.c:1734-1776`
+(`check_no_parentdirs()` + `legal_path()`): rejects a leading `/`, an
+embedded space unless `allow_filename_spaces` (`main.c:139`, defaults
+`MY_FALSE`, a command-line-only toggle this driver has no config-key
+equivalent for), and an anchored `..` path component -- narrower than
+FluffOS's own version in two real ways: no `#` check at all (grepped the
+whole file, never mentioned), and a bare embedded `/./ ` is left alone,
+not rejected. `simulate.c:3752-3851`'s own `check_valid_path()` runs the
+same apply-then-strip-then-`legal_path()` shape as FluffOS, but a real,
+material divergence on failure: an illegal path throws a catchable
+runtime error (`:3846-3849`'s own `errorf("Illegal path '%s' for %s() by
+%s\n", ...)`), not FluffOS's silent `return 0`.
+
+**Real corpus evidence this is not academic.** This driver's own
+`resolveMudlibPath()` (`VM.cpp`) is a bare `mudlibRoot + lpcPath` string
+concatenation with no sandboxing of its own, matching real FluffOS's own
+disk-I/O shape exactly. Every vendored mudlib corpus this project tracks
+builds file-efun paths from ordinary LPC string concatenation, much of
+it player-influenced -- a login/account-creation flow composing a save
+path from a player-chosen name (`"/save/" + name + ".o"`-shaped) is the
+representative real case. Before this session, a crafted
+`../../../etc/passwd`-shaped (or `#`-embedding) path reaching any of
+this driver's already-gated file efuns would walk straight past
+`mudlibRoot` on real disk I/O the moment the permissive-by-default
+master-apply step passed it through unmodified, which it does for every
+master that never defines `valid_write`/`valid_read` at all -- this
+driver's own bundled `mudlib/` included.
+
+**Built.** `legalPathFluffos()` and `legalPathLdmud()` (`EfunTable.cpp`,
+anonymous namespace, immediately above `checkValidPath()`), each a
+bounds-checked, line-by-line port of its real body -- a bounds-checked
+`at()` lambda stands in for C's own null-terminator read where the real
+pointer walk reads one character past a match, otherwise the same
+`p[0]`/`p[1]`/`p[2]` branching -- not a from-scratch "block dot-dot-
+slash" reimplementation, which is why the real quirks above (FluffOS's
+own leading-`./`-illegal behavior, LDMud's own leave-`/./`-alone
+behavior) survive intact rather than being designed away. `checkValidPath()`
+now runs the dialect-appropriate one of the two, after the existing
+master-apply gate, against the approved path with one leading `/`
+stripped for the check only (`checkPath`, local to the check; the value
+`checkValidPath()` actually returns keeps its leading `/` unchanged,
+this driver's own established `resolveMudlibPath()` convention, not
+real code's own separate "return without a leading '/'" contract, since
+changing that would touch every existing file-efun call site's own path
+handling for no reason this row needs). Denies silently under FluffOS
+(`std::nullopt`, indistinguishable from a master-apply deny to every
+existing call site, matching real `file.c:750`); throws `LpcRuntimeError`
+with the real `errorf()`-format message under LDMud, a genuine dialect
+divergence ported faithfully rather than flattened to one shared
+behavior. **Named divergence:** a null caller (a shape real LDMud's own
+`fatal("Illegal caller for check_valid_path.\n")` guard would not
+permit, but this driver already reaches this point for calls with no
+current object elsewhere in its own existing permissive-default
+precedent) substitutes the literal string `"?"` for the caller name in
+the LDMud error message rather than crashing.
+
+**6 new regression tests (833 total, up from 827):**
+`testCheckValidPathRejectsParentDirectoryTraversalFluffos` (`/../foo`
+denied, confirmed genuinely never written outside `mudlibRoot`, not just
+that the return value was 0), `testCheckValidPathRejectsEmbeddedHashFluffos`,
+`testCheckValidPathRejectsLeadingDotSlashFluffos` (the real leading-`./`
+quirk specifically, not folded into the `..` test), `testCheckValidPathAcceptsOrdinaryDottedFilenameFluffos`
+(the false-positive check -- an ordinary versioned-save-style dotted
+filename still round-trips write then read, proving the new gate does
+not over-reject the common case), `testCheckValidPathLdmudThrowsCatchableRuntimeErrorOnTraversal`
+(verified through an actual LPC-level `catch()`, not only a native
+try/catch around `callFunction()`, proving it is a genuine catchable LPC
+error and checking the message shape matches real `errorf()`'s own
+format), `testCheckValidPathLdmudRejectsSpaceButAllowsHash` (the two
+dialects' own real, opposite-direction divergence exercised in one
+test: LDMud denies a space FluffOS would allow through, and allows a
+`#` FluffOS would deny). Full clean rebuild, full suite re-run, 833
+passing, zero regressions among the pre-existing 827. Live re-boot of
+the bundled `mudlib/` (`./build/amlp etc/driver.cfg`, 5 seconds): stayed
+silent and running the whole time, no compile errors, no crash --
+confirms the new gate does not break any real file access this mudlib's
+own boot or master.c path already relies on.
+
+**Row 3.2 marked `[x]`.** The `call_other` capability-grant half named
+in row 3.2's own title (an object may only `call_other()` into another
+object's functions it has been granted access to) is explicitly *not*
+part of what closes this row: re-confirmed this session that it has no
+real FluffOS analog in the vendored 2.9 source (nothing new since the
+2026-09-01 finding) -- it is a DGD-style capability model, a genuinely
+novel design item, not a port, and stays deliberately deferred until and
+unless it is explicitly wanted. Marking the row `[x]` reflects that
+every item it named with an actual real source citation is now built.
+
+**This closes the real driver-level uid/security cluster.** As of this
+session, rows 3.1 and 3.2 together have now had every one of their own
+named items read directly against real FluffOS 2.9 and/or LDMud source
+and either built or explicitly ruled out as having no real driver-level
+source to port (uid/gid group membership, row 3.1; `call_other`
+capability grants, row 3.2). There is nothing further in this specific
+cluster with real driver-level source left to search for. The next real
+target in this area, if wanted, is genuinely novel design work (the
+`call_other` capability grants above, or a from-scratch per-domain
+filesystem jail beyond what real `valid_write()`-in-the-mudlib already
+provides), not a further FluffOS/LDMud port. Recommend picking up a
+different roadmap row instead -- 3.3 (generational GC) or 3.4 (full
+telnet option negotiation) are the next `[ ]` rows under this same Phase
+3 with real, concrete scope already written up.
+
+`ROADMAP.md` row 3.2 updated in place; row 3.1 untouched.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-09-01 (a further session, same day): uid / euid object trust
 model, slice 3 (ROADMAP rows 3.1 / 3.2). The domain-trust traversal half
 of row 3.1's item (c): the `AUTO_TRUST_BACKBONE` middle branch of real

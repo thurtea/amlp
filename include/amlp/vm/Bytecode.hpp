@@ -48,6 +48,12 @@ enum class OpCode : uint8_t {
     // needs it, only the plain-int flags-bitmask shape).
     BitOr,
     BitXor,
+    // Unary "~": one's-complement bitwise NOT, int-only (real
+    // interpret.c's own F_COMPL: "if (sp->type != T_NUMBER) error(\"Bad
+    // argument to ~\n\"); sp->u.number = ~sp->u.number;" -- see Ast.hpp's
+    // UnaryOp::BitNot comment for the real corpus evidence this driver
+    // previously lexed as an unrecognized character).
+    BitNot,
     Eq, Neq, Lt, Lte, Gt, Gte,
     Not,
     Jump,

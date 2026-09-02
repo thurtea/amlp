@@ -112,6 +112,36 @@ Token Lexer::lexNumber() {
         text += advance();
     }
 
+    // Hex literal ("0x1A", real C/LPC syntax): a leading "0" (already
+    // consumed by the loop above, so text == "0" here) immediately
+    // followed by 'x'/'X' and at least one hex digit. Found live against
+    // a real third-party mudlib corpus (row 3.8's TMI-2 boot attempt):
+    // adm/simul_efun/vt100.c's own real "if (color_mode & 0x0010)"
+    // (VT100 bright/bold-attribute bitflag test) -- previously this
+    // driver's own lexNumber() only ever consumed the leading "0" as a
+    // complete Number token, then re-entered the tokenizer's main loop
+    // at 'x', producing a stray Ident token ("x0010") the parser could
+    // not make sense of ("expected \")\" in if condition ... got
+    // \"x0010\""). Kept as its own branch, not folded into the plain
+    // decimal path, and the "0x"/"0X" prefix is kept in the token's own
+    // text (not stripped here) -- Parser.cpp's IntLiteral construction
+    // is the one place that actually interprets a Number token's text,
+    // exactly like the float '.' case just below already keeps the '.'
+    // in the text for that same later decision point. Octal ("0755") is
+    // a deliberately separate, unevidenced concern -- no octal literal
+    // appears anywhere in this same corpus pass, and unlike hex, blindly
+    // reinterpreting any leading-zero decimal integer as octal would be
+    // a real, silent behavior change for a literal like "010" wherever
+    // one already exists -- not made here without real evidence forcing it.
+    if (text == "0" && (peek() == 'x' || peek() == 'X') &&
+        std::isxdigit(static_cast<unsigned char>(peekNext()))) {
+        text += advance(); // 'x' / 'X'
+        while (!atEnd() && std::isxdigit(static_cast<unsigned char>(peek()))) {
+            text += advance();
+        }
+        return Token{TokenType::Number, text, startLine};
+    }
+
     // Float literal ("1.5"): a '.' immediately after the integer part,
     // followed by a digit, distinct from the ".." range operator
     // ("arr[a..b]") and "..." varargs marker, which both start with a
@@ -316,6 +346,24 @@ Token Lexer::lexSymbol() {
         advance();
         return Token{TokenType::Symbol, std::string(1, c) + "=", startLine};
     }
+    // Bitwise compound-assignment forms ("|=", "&=", "^="), real LPC's
+    // own operators same as C's -- previously absent here entirely, so
+    // "|=" (etc) lexed as two separate tokens, '|' then '=', which the
+    // parser's own compound-assignment recognition never matches (it
+    // checks the *next* token's exact text against "|="), silently
+    // falling through to ordinary binary-or parsing and then failing on
+    // the bare "=" it did not expect. Found live against a real
+    // third-party mudlib corpus (row 3.8's TMI-2 boot attempt):
+    // adm/obj/master/access.c's own "access[path][name] |= WRITE;",
+    // a real, common LPC permission-bitmask idiom -- corpus-wide, TMI-2
+    // alone has 30 "|=", 6 "&=", 2 "^=" real call sites. Shift operators
+    // ("<<"/">>"/"<<="/">>=") are a separate, unevidenced gap (zero real
+    // hits anywhere in that same corpus, and this driver has no plain
+    // "<<"/">>" binary operator at all yet either) -- not added here.
+    if ((c == '|' || c == '&' || c == '^') && peek() == '=') {
+        advance();
+        return Token{TokenType::Symbol, std::string(1, c) + "=", startLine};
+    }
     if (c == '=' && peek() == '=') {
         advance();
         return Token{TokenType::Symbol, "==", startLine};
@@ -480,7 +528,7 @@ std::vector<Token> Lexer::tokenize() {
                    c == ';' || c == ',' || c == '-' || c == '=' ||
                    c == '!' || c == '<' || c == '>' || c == '*' || c == '+' ||
                    c == '|' || c == '&' || c == '/' || c == '%' || c == '.' ||
-                   c == '?' || c == '^') {
+                   c == '?' || c == '^' || c == '~') {
             tokens.push_back(lexSymbol());
         } else {
             int errLine = line_;

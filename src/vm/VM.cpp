@@ -1068,7 +1068,27 @@ Value VM::evalQuotedLambdaNode(const Value& node, const std::vector<std::string>
 }
 
 std::string VM::resolveMudlibPath(const std::string& lpcPath) const {
-    return config_.mudlibRoot() + lpcPath;
+    // Real LPC file paths are mudlib-root-relative whether or not the
+    // string itself carries a leading '/' -- the same real convention
+    // already fixed for inherit targets (ObjectManager::normalizeFilename())
+    // and deep_inherit_list()'s own output (EfunTable.cpp), and found
+    // live a third time against the same real TMI-2 corpus (row 3.8's
+    // boot attempt): adm/daemons/ga_server.c's own real "#define
+    // GLOBAL_ALIASES \"adm/etc/global_aliases\"" (no leading slash) fed
+    // straight into "read_file(GLOBAL_ALIASES)". Naively concatenating
+    // config_.mudlibRoot() + lpcPath without this produced a
+    // real, silent, missing-separator path ("...lib" + "adm/etc/..." =
+    // "...libadm/etc/..."), so read_file() always returned falsy for a
+    // relative-form path -- confirmed live: ga_server's own create()
+    // then failed with "explode: expected (string, string) arguments"
+    // (explode()'s own first argument was the falsy read_file() result,
+    // not a string), cascading into "call_other() couldn't find object"
+    // for every command std/user.c's own do_xverb() routes through it.
+    std::string normalized = lpcPath;
+    if (normalized.empty() || normalized[0] != '/') {
+        normalized.insert(normalized.begin(), '/');
+    }
+    return config_.mudlibRoot() + normalized;
 }
 
 const std::string& VM::mudName() const {
@@ -1854,6 +1874,22 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 break;
             }
 
+            // Real interpret.c's own F_COMPL: "if (sp->type != T_NUMBER)
+            // error(\"Bad argument to ~\n\"); sp->u.number =
+            // ~sp->u.number;" -- a direct C bitwise complement, int-only.
+            case OpCode::BitNot: {
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("BitNot: stack underflow");
+                }
+                Value v = localStack.back(); localStack.pop_back();
+                if (!std::holds_alternative<int64_t>(v.data)) {
+                    throw LpcRuntimeError("Bad argument to ~");
+                }
+                localStack.emplace_back(Value(~std::get<int64_t>(v.data)));
+                ++ip;
+                break;
+            }
+
             case OpCode::ForeachKeys: {
                 if (localStack.empty()) {
                     throw LpcRuntimeError("ForeachKeys: stack underflow");
@@ -2203,7 +2239,31 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     }
                     int64_t i = std::get<int64_t>(indexVal.data);
                     if (indexFromEnd) i = static_cast<int64_t>(str->size()) - i;
-                    if (i < 0 || static_cast<size_t>(i) >= str->size()) {
+                    // Real interpret.c's own F_INDEX T_STRING case:
+                    // "if ((i > SVALUE_STRLEN(sp)) || (i < 0)) error(...)"
+                    // -- strictly greater than, not >=, so indexing
+                    // exactly at the string's own length (one past the
+                    // last real character, the position of its implicit
+                    // NUL terminator) is real, defined, non-throwing
+                    // behavior that reads back 0, not an error. Found
+                    // live against a real third-party mudlib corpus (row
+                    // 3.8's TMI-2 boot attempt): the ubiquitous real LPC
+                    // idiom "if (lines[i][0] == '#' || lines[i] == \"\")
+                    // continue;" (adm/obj/master/groups.c and access.c
+                    // both) relies on this exact leniency for an empty
+                    // exploded line -- lines[i][0] must read back 0 (a
+                    // real string's own std::string::operator[](size())
+                    // is already guaranteed by the C++ standard to yield
+                    // a null character, so no special-casing is needed
+                    // here beyond relaxing the bound itself) rather than
+                    // throwing, or the comparison against '#'/'\n' never
+                    // even runs and every real mudlib using this idiom
+                    // (effectively every one built on classic LPC/MudOS
+                    // conventions) throws on its very first blank config
+                    // line. This driver's own prior ">=" check threw
+                    // exactly there, a real, narrow off-by-one divergence
+                    // from real FluffOS, not a deliberate design choice.
+                    if (i < 0 || static_cast<size_t>(i) > str->size()) {
                         throw LpcRuntimeError("Index: string index out of bounds");
                     }
                     unsigned char ch = static_cast<unsigned char>((*str)[static_cast<size_t>(i)]);

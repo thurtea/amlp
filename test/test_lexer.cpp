@@ -947,19 +947,44 @@ static void testStringIndexingReturnsByteValue() {
     std::cout << "testStringIndexingReturnsByteValue OK\n";
 }
 
-static void testStringIndexingOutOfBoundsThrows() {
+// Real interpret.c's own F_INDEX T_STRING case: "if ((i >
+// SVALUE_STRLEN(sp)) || (i < 0)) error(...)" -- strictly greater than,
+// not >=, so indexing exactly at a string's own length (its implicit NUL
+// terminator) is real, defined, non-throwing behavior that reads back 0,
+// only one further past that throws. This driver's own VM.cpp previously
+// used ">=", throwing at exactly str.size() too -- a real, narrow
+// off-by-one divergence from real FluffOS found live against a real
+// third-party mudlib corpus (row 3.8's TMI-2 boot attempt): the
+// ubiquitous real LPC idiom "if (lines[i][0] == '#' || lines[i] == \"\")
+// continue;" (adm/obj/master/groups.c/access.c both) relies on
+// lines[i][0] reading back 0 for an empty exploded line, not throwing.
+static void testStringIndexingAtLengthReadsZeroPastLengthThrows() {
+    amlp::Value atLength = runProbe(
+        "string s;\n"
+        "s = \"\";\n"
+        "return s[0];\n");
+    assert(std::holds_alternative<int64_t>(atLength.data));
+    assert(std::get<int64_t>(atLength.data) == 0);
+
+    amlp::Value nonEmptyAtLength = runProbe(
+        "string s;\n"
+        "s = \"hi\";\n"
+        "return s[2];\n");
+    assert(std::holds_alternative<int64_t>(nonEmptyAtLength.data));
+    assert(std::get<int64_t>(nonEmptyAtLength.data) == 0);
+
     bool threw = false;
     try {
         runProbe(
             "string s;\n"
             "s = \"\";\n"
-            "return s[0] == '#';\n");
+            "return s[1];\n");
     } catch (const amlp::LpcRuntimeError&) {
         threw = true;
     }
     assert(threw);
 
-    std::cout << "testStringIndexingOutOfBoundsThrows OK\n";
+    std::cout << "testStringIndexingAtLengthReadsZeroPastLengthThrows OK\n";
 }
 
 static void testGuardConditionShapeWithRealStringIndexing() {
@@ -1095,6 +1120,41 @@ static void testUnaryMinusParsesAsNegExpr() {
     assert(innerLit->value == 1);
 
     std::cout << "testUnaryMinusParsesAsNegExpr OK\n";
+}
+
+// Real interpret.c's own F_COMPL: "sp->u.number = ~sp->u.number;", a
+// direct C one's-complement bitwise NOT, int-only ("Bad argument to ~"
+// otherwise). Found live against a real third-party mudlib corpus (row
+// 3.8's TMI-2 boot attempt): std/user/bitflags.c's own real
+// "bitflags &= ~(n);" bitmask-clearing idiom, previously not even lexed
+// at all ("unrecognized character '~'"). Expected values hand-computed
+// from two's-complement identity (~x == -x-1), not read back from this
+// driver: ~5 == -6, ~-3 == 2, ~~7 == 7 (double negation restores the
+// original value).
+static void testBitNotVmExecution() {
+    amlp::Value positive = runProbe("return ~5;\n");
+    assert(std::holds_alternative<int64_t>(positive.data));
+    assert(std::get<int64_t>(positive.data) == -6);
+
+    amlp::Value negative = runProbe("return ~(-3);\n");
+    assert(std::holds_alternative<int64_t>(negative.data));
+    assert(std::get<int64_t>(negative.data) == 2);
+
+    amlp::Value doubled = runProbe("return ~~7;\n");
+    assert(std::holds_alternative<int64_t>(doubled.data));
+    assert(std::get<int64_t>(doubled.data) == 7);
+
+    bool threw = false;
+    try {
+        runProbe("return ~\"str\";\n");
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("Bad argument to ~") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testBitNotVmExecution OK\n";
 }
 
 static void testMultiplicativeBindsTighterThanAdditive() {
@@ -4151,6 +4211,41 @@ static void testWriteFileThenReadFileRoundTrips() {
     std::cout << "testWriteFileThenReadFileRoundTrips OK\n";
 }
 
+// Found live against a real third-party mudlib corpus (row 3.8's TMI-2
+// boot attempt): adm/daemons/ga_server.c's own real "#define
+// GLOBAL_ALIASES \"adm/etc/global_aliases\"" -- no leading slash, fed
+// straight into "read_file(GLOBAL_ALIASES)". Real LPC file paths are
+// mudlib-root-relative whether or not the string carries a leading '/'
+// (the same real convention already fixed for inherit targets and
+// deep_inherit_list()'s own output); VM::resolveMudlibPath() previously
+// concatenated the raw path onto mudlibRoot with no separator guarantee,
+// so a relative-form path like this produced a real, silent,
+// missing-separator filesystem path that never resolved to a real file.
+static void testWriteFileThenReadFileRoundTripsWithNoLeadingSlashPath() {
+    ObjectVarHarness harness;
+
+    harness.writeFile("/writer2.c",
+        "int write_it() {\n"
+        "    return write_file(\"output2.txt\", \"hello relative\\n\", 1);\n"
+        "}\n"
+        "string read_it() {\n"
+        "    return read_file(\"output2.txt\");\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/writer2");
+    assert(obj != nullptr);
+
+    amlp::Value writeResult = harness.vm.callFunction(obj, "write_it", {});
+    assert(std::holds_alternative<int64_t>(writeResult.data));
+    assert(std::get<int64_t>(writeResult.data) == 1);
+
+    amlp::Value content = harness.vm.callFunction(obj, "read_it", {});
+    assert(std::holds_alternative<std::string>(content.data));
+    assert(std::get<std::string>(content.data) == "hello relative\n");
+
+    std::cout << "testWriteFileThenReadFileRoundTripsWithNoLeadingSlashPath OK\n";
+}
+
 // ROADMAP.md row 1.16's own real cross-cutting gap, confirmed by real
 // corpus evidence (see EfunTable.cpp's own checkValidPath() comment for
 // the full citation and dialect-shape derivation). The permissive
@@ -4510,6 +4605,81 @@ static void testAbsoluteIncludePathResolvesAgainstMudlibRoot() {
     assert(std::get<int64_t>(result.data) == 42);
 
     std::cout << "testAbsoluteIncludePathResolvesAgainstMudlibRoot OK\n";
+}
+
+// Found live against a real third-party mudlib corpus (row 3.8's TMI-2
+// boot attempt): std/object/sec_ob.c's own real "#include
+// \"/std/object/prop.c\"" (itself resolved fine by the single-level
+// rewrite the test just above covers) contains a further real
+// "#include \"/std/object/prop_logic.c\"" of its own -- an absolute
+// include nested inside a file reached via another absolute include,
+// previously unresolvable (real cpp's own recursive #include expansion
+// never ran this driver's own path rewrite a second time, so the nested
+// include kept its untouched leading '/' and cpp tried to open it as a
+// literal OS-root-absolute path). Two levels deep here, matching the
+// real corpus shape exactly (not an arbitrary N for its own sake).
+static void testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves() {
+    ObjectVarHarness harness;
+
+    harness.writeFile("/innermost.c",
+        "int innermost() {\n"
+        "    return 7;\n"
+        "}\n");
+
+    harness.writeFile("/middle.c",
+        "#include \"/innermost.c\"\n"
+        "int middle() {\n"
+        "    return innermost() + 1;\n"
+        "}\n");
+
+    harness.writeFile("/outer.c",
+        "#include \"/middle.c\"\n"
+        "int probe() {\n"
+        "    return middle() + 1;\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/outer");
+    assert(obj != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 9); // 7 + 1 + 1
+
+    std::cout << "testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves OK\n";
+}
+
+// Found live against a real third-party mudlib corpus (row 3.8's TMI-2
+// boot attempt): std/object/sec_ob.c's own real "inherit
+// \"std/object/ob_logic\";" -- no leading '/', a real, valid LPC form
+// this driver's own normalizeFilename() previously left untouched,
+// producing a malformed concatenation ("mudlibRoot" + "std/object/
+// ob_logic.c", missing the path separator entirely) once every other
+// caller assumed a leading '/' was already present. Real semantics: an
+// object pathname is always mudlib-root-relative whether or not it
+// carries a leading '/', both forms name the same real object.
+static void testInheritPathWithoutLeadingSlashResolvesSameAsWithOne() {
+    ObjectVarHarness harness;
+
+    harness.writeFile("/base.c",
+        "int base_value() {\n"
+        "    return 5;\n"
+        "}\n");
+
+    // No leading '/' on the inherit target -- the real TMI-2 shape.
+    harness.writeFile("/child.c",
+        "inherit \"base\";\n"
+        "int probe() {\n"
+        "    return base_value() + 1;\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/child");
+    assert(obj != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 6);
+
+    std::cout << "testInheritPathWithoutLeadingSlashResolvesSameAsWithOne OK\n";
 }
 
 static void testCppWarningsDoNotFailPreprocessing() {
@@ -8282,23 +8452,32 @@ static void testShallowAndDeepInheritListWalkARealThreeLevelChain() {
     auto probe = harness.objects.cloneObject("/gtest_probe");
     assert(probe != nullptr);
 
+    // Real add_slash() (interpret.c), unconditionally prepending '/' to
+    // every entry array.c's own deep_inherit_list()/inherit_list() body
+    // builds -- confirmed by reading that real source directly, not
+    // assumed from any one mudlib's own usage convention (see
+    // normalizeInheritPath's own comment in EfunTable.cpp for the real
+    // TMI-2 corpus finding that caught this: this driver previously
+    // stripped the leading slash instead of ensuring one, silently
+    // breaking every real "member_array(\"/std/x.c\",
+    // deep_inherit_list(ob))"-style security check).
     amlp::Value shallow = harness.vm.callFunction(probe, "probe_shallow", {amlp::Value(top)});
     auto* shallowArr = std::get_if<std::shared_ptr<amlp::Array>>(&shallow.data);
     assert(shallowArr != nullptr && (*shallowArr)->items.size() == 1);
-    assert(std::get<std::string>((*shallowArr)->items[0].data) == "gtest_mid.c");
+    assert(std::get<std::string>((*shallowArr)->items[0].data) == "/gtest_mid.c");
 
     // Real inherit_list is the exact same efun as shallow_inherit_list
     // (efun_defs.c's own F_ALIAS_FLAG), not a second implementation.
     amlp::Value alias = harness.vm.callFunction(probe, "probe_alias", {amlp::Value(top)});
     auto* aliasArr = std::get_if<std::shared_ptr<amlp::Array>>(&alias.data);
     assert(aliasArr != nullptr && (*aliasArr)->items.size() == 1);
-    assert(std::get<std::string>((*aliasArr)->items[0].data) == "gtest_mid.c");
+    assert(std::get<std::string>((*aliasArr)->items[0].data) == "/gtest_mid.c");
 
     amlp::Value deep = harness.vm.callFunction(probe, "probe_deep", {amlp::Value(top)});
     auto* deepArr = std::get_if<std::shared_ptr<amlp::Array>>(&deep.data);
     assert(deepArr != nullptr && (*deepArr)->items.size() == 2);
-    assert(std::get<std::string>((*deepArr)->items[0].data) == "gtest_mid.c");
-    assert(std::get<std::string>((*deepArr)->items[1].data) == "gtest_base.c");
+    assert(std::get<std::string>((*deepArr)->items[0].data) == "/gtest_mid.c");
+    assert(std::get<std::string>((*deepArr)->items[1].data) == "/gtest_base.c");
 
     std::cout << "testShallowAndDeepInheritListWalkARealThreeLevelChain OK\n";
 }
@@ -9157,7 +9336,7 @@ static void testSwitchParsesToSwitchStmtWithInterleavedLabels() {
     std::cout << "testSwitchParsesToSwitchStmtWithInterleavedLabels OK\n";
 }
 
-static void testSwitchRangeCaseLabelThrowsNotImplemented() {
+static void testSwitchRangeCaseLabelParsesWithRangeEndSet() {
     std::string src =
         "void probe() {\n"
         "    switch (x) {\n"
@@ -9167,16 +9346,62 @@ static void testSwitchRangeCaseLabelThrowsNotImplemented() {
         "}\n";
     amlp::Lexer lexer(src);
     amlp::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
 
-    bool threw = false;
-    try {
-        parser.parseProgram();
-    } catch (const amlp::NotImplementedError&) {
-        threw = true;
-    }
-    assert(threw);
+    auto& body = program->functions[0]->body->statements;
+    auto* switchStmt = dynamic_cast<amlp::SwitchStmt*>(body[0].get());
+    assert(switchStmt != nullptr);
+    auto* label = dynamic_cast<amlp::CaseLabel*>(switchStmt->body[0].get());
+    assert(label != nullptr);
+    assert(label->value != nullptr);
+    assert(label->rangeEnd != nullptr);
 
-    std::cout << "testSwitchRangeCaseLabelThrowsNotImplemented OK\n";
+    std::cout << "testSwitchRangeCaseLabelParsesWithRangeEndSet OK\n";
+}
+
+// Real grammar.y's own "L_CASE case_label L_RANGE case_label ':'" --
+// found live against a real third-party mudlib corpus (row 3.8's TMI-2
+// boot attempt): std/user.c's own real "case 2..3:" / "case 4..6:" / ...
+// level-tier ladder, previously rejected outright with a deliberate
+// "not implemented" parse error. Covers a match at each end of a range
+// (inclusive both sides), a genuine miss falling through to default, and
+// that an ordinary single-value case right after a range case is
+// unaffected by the new codegen path.
+static void testSwitchRangeCaseLabelVmExecution() {
+    auto runWith = [](int64_t x) {
+        return runProbe(
+            "int x;\n"
+            "x = " + std::to_string(x) + ";\n"
+            "switch (x) {\n"
+            "    case 2..3: return 100;\n"
+            "    case 4..6: return 200;\n"
+            "    case 7: return 300;\n"
+            "    default: return -1;\n"
+            "}\n"
+            "return -2;\n");
+    };
+
+    amlp::Value low = runWith(2);
+    assert(std::holds_alternative<int64_t>(low.data));
+    assert(std::get<int64_t>(low.data) == 100); // low end of the range, inclusive
+
+    amlp::Value high = runWith(3);
+    assert(std::holds_alternative<int64_t>(high.data));
+    assert(std::get<int64_t>(high.data) == 100); // high end of the range, inclusive
+
+    amlp::Value mid = runWith(5);
+    assert(std::holds_alternative<int64_t>(mid.data));
+    assert(std::get<int64_t>(mid.data) == 200); // second range, unaffected by the first
+
+    amlp::Value plain = runWith(7);
+    assert(std::holds_alternative<int64_t>(plain.data));
+    assert(std::get<int64_t>(plain.data) == 300); // ordinary single-value case still works
+
+    amlp::Value miss = runWith(10);
+    assert(std::holds_alternative<int64_t>(miss.data));
+    assert(std::get<int64_t>(miss.data) == -1); // outside every range, falls to default
+
+    std::cout << "testSwitchRangeCaseLabelVmExecution OK\n";
 }
 
 static void testSwitchMatchingCaseVmExecution() {
@@ -27983,12 +28208,13 @@ int main() {
     testMalformedCharLiteralThrows();
     testCharLiteralParsesAsIntLiteral();
     testStringIndexingReturnsByteValue();
-    testStringIndexingOutOfBoundsThrows();
+    testStringIndexingAtLengthReadsZeroPastLengthThrows();
     testGuardConditionShapeWithRealStringIndexing();
     testDivisionAndModuloTokenizeAsSymbols();
     testCommentsStillWorkAfterSlashWhitelisting();
     testDivisionAndModuloParseToCorrectBinOp();
     testUnaryMinusParsesAsNegExpr();
+    testBitNotVmExecution();
     testMultiplicativeBindsTighterThanAdditive();
     testCodegenEmitsDivAndModOpcodes();
     testArithmeticVmExecution();
@@ -28116,6 +28342,7 @@ int main() {
     testNullStatementAsLoopBodyParsesAndExecutesAsNoOp();
     testReadFileReturnsFileContentAndFalsyForMissingFile();
     testWriteFileThenReadFileRoundTrips();
+    testWriteFileThenReadFileRoundTripsWithNoLeadingSlashPath();
     testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero();
     testValidWriteRewritesPathWhenMasterReturnsAString();
     testValidWriteReceivesRealArgumentShapePerDialect();
@@ -28127,6 +28354,8 @@ int main() {
     testCheckValidPathLdmudRejectsSpaceButAllowsHash();
     testCreateRuntimeErrorFailsLoadInsteadOfCrashing();
     testAbsoluteIncludePathResolvesAgainstMudlibRoot();
+    testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves();
+    testInheritPathWithoutLeadingSlashResolvesSameAsWithOne();
     testCppWarningsDoNotFailPreprocessing();
     testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg();
     testIncludeDirSingleEntryWithNoColonStillWorks();
@@ -28279,7 +28508,8 @@ int main() {
     testOpenEndedRangeIndexVmExecution();
     testForLoopCommaExprChainInInitAndUpdateVmExecution();
     testSwitchParsesToSwitchStmtWithInterleavedLabels();
-    testSwitchRangeCaseLabelThrowsNotImplemented();
+    testSwitchRangeCaseLabelParsesWithRangeEndSet();
+    testSwitchRangeCaseLabelVmExecution();
     testSwitchMatchingCaseVmExecution();
     testSwitchDefaultCaseVmExecution();
     testSwitchFallthroughWithoutBreakVmExecution();

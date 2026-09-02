@@ -20,6 +20,7 @@
 #include <chrono>
 #include <iterator>
 #include <vector>
+#include <unordered_set>
 
 namespace amlp {
 
@@ -219,6 +220,12 @@ std::string buildPredefinedMacroFlags(const Config& config, const std::string& c
     return flags.str();
 }
 
+// Forward declaration: maskHashQuote() is defined further down this same
+// anonymous namespace (right below rewriteAbsoluteIncludes() historically)
+// but rewriteAbsoluteIncludesRecursive() below now needs to apply it to
+// every spliced-in file's own content too, not just the outermost file's.
+std::string maskHashQuote(const std::string& source);
+
 // Real LPC/FluffOS resolves a quoted #include path that starts with '/'
 // against the mudlib root, the same convention as every other absolute
 // LPC path in this codebase (inherit "/path";, clone_object("/path"),
@@ -228,14 +235,54 @@ std::string buildPredefinedMacroFlags(const Config& config, const std::string& c
 // leading '/' as the actual filesystem root, so without this rewrite it
 // fails outright ("No such file or directory"). This driver shells out
 // to a real cpp (see the module comment above runPreprocessor), so the
-// fix has to happen before cpp ever sees the source: rewrite each such
-// #include line to an actual absolute filesystem path by prepending the
-// mudlib root, here, on the raw source text.
-std::string rewriteAbsoluteIncludes(const std::string& source, const std::string& mudlibRoot) {
+// fix has to happen before cpp ever sees the source.
+//
+// Rewriting the #include line's own path text to a mudlib-root-relative
+// form (letting cpp's own quote-search plus this driver's "-I '.'"
+// resolve it) is enough for the *outermost* file being compiled, but not
+// for an absolute include belonging to a file reached transitively via a
+// real cpp #include of its own -- found live against a real third-party
+// mudlib corpus (row 3.8's TMI-2 boot attempt): std/object/sec_ob.c's own
+// real "#include \"/std/object/prop.c\"" (already correctly rewritten,
+// resolved, and inlined by cpp) itself contains a further real
+// "#include \"/std/object/prop_logic.c\"" -- that second include's raw
+// text was never touched by this function (it only ever ran once, on
+// sec_ob.c's own outer text, before cpp started), so cpp hit it during
+// its own recursive expansion still bearing the untouched leading '/',
+// and (confirmed directly, not assumed: a leading '/' quoted include is
+// resolved as a literal OS-absolute path by real cpp unconditionally, no
+// -I search path applies to it at all, and GCC's own "--sysroot" flag
+// does not redirect quote-form includes either) failed outright.
+//
+// Fixed by splicing the real target file's own content directly in
+// place of the #include line (recursing into that spliced content the
+// same way, so an absolute include nested arbitrarily deep resolves
+// correctly) instead of only ever rewriting the path text -- real cpp
+// itself already works exactly this way for an ordinary, resolvable
+// #include (textual substitution), this is the identical operation,
+// just performed here for the one case (an absolute leading-'/' quoted
+// path) real cpp cannot resolve on its own. A target that cannot
+// actually be read from disk (a genuinely missing file, or a real
+// include cycle -- activeIncludes guards against ever splicing the same
+// real path into itself) falls back to the original path-text rewrite,
+// so real cpp's own "No such file or directory" diagnostic still
+// surfaces for an actually-broken include rather than this driver
+// silently swallowing it.
+std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const std::string& mudlibRoot,
+                                              std::unordered_set<std::string>& activeIncludes,
+                                              int depth) {
+    // Real, pathological include cycles aside (already guarded by
+    // activeIncludes), 64 is far deeper than any genuine mudlib's own
+    // absolute-include nesting -- the deepest real corpus case seen so
+    // far (TMI-2's own sec_ob.c -> prop.c -> prop_logic.c) is depth 2.
+    // A pure safety net, not expected to ever actually fire.
+    if (depth > 64) return source;
+
     std::istringstream in(source);
     std::ostringstream out;
     std::string line;
     while (std::getline(in, line)) {
+        bool spliced = false;
         size_t hashPos = line.find_first_not_of(" \t");
         if (hashPos != std::string::npos && line[hashPos] == '#') {
             size_t incPos = line.find("include", hashPos + 1);
@@ -243,13 +290,40 @@ std::string rewriteAbsoluteIncludes(const std::string& source, const std::string
                 size_t quotePos = line.find('"', incPos);
                 if (quotePos != std::string::npos && quotePos + 1 < line.size() &&
                     line[quotePos + 1] == '/') {
+                    size_t endQuote = line.find('"', quotePos + 1);
+                    if (endQuote != std::string::npos) {
+                        std::string quotedPath = line.substr(quotePos + 1, endQuote - quotePos - 1);
+                        std::string realPath = mudlibRoot + quotedPath;
+                        if (!activeIncludes.count(realPath)) {
+                            std::ifstream target(realPath);
+                            if (target) {
+                                std::ostringstream targetBuf;
+                                targetBuf << target.rdbuf();
+                                activeIncludes.insert(realPath);
+                                out << rewriteAbsoluteIncludesRecursive(
+                                           maskHashQuote(targetBuf.str()), mudlibRoot,
+                                           activeIncludes, depth + 1)
+                                    << "\n";
+                                activeIncludes.erase(realPath);
+                                spliced = true;
+                            }
+                        }
+                    }
+                }
+                if (!spliced && quotePos != std::string::npos && quotePos + 1 < line.size() &&
+                    line[quotePos + 1] == '/') {
                     line.insert(quotePos + 1, mudlibRoot);
                 }
             }
         }
-        out << line << "\n";
+        if (!spliced) out << line << "\n";
     }
     return out.str();
+}
+
+std::string rewriteAbsoluteIncludes(const std::string& source, const std::string& mudlibRoot) {
+    std::unordered_set<std::string> activeIncludes;
+    return rewriteAbsoluteIncludesRecursive(source, mudlibRoot, activeIncludes, 0);
 }
 
 // ROADMAP.md row 1.2/1.3's own scoping note: real system cpp (see
@@ -528,10 +602,34 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vecto
 ObjectManager::ObjectManager(Config& config) : config_(config) {}
 
 std::string ObjectManager::normalizeFilename(const std::string& filename) {
-    if (filename.size() >= 2 && filename.compare(filename.size() - 2, 2, ".c") == 0) {
-        return filename.substr(0, filename.size() - 2);
+    std::string result = filename;
+    if (result.size() >= 2 && result.compare(result.size() - 2, 2, ".c") == 0) {
+        result = result.substr(0, result.size() - 2);
     }
-    return filename;
+    // Real LPC object pathnames are always mudlib-root-relative whether
+    // or not the string itself carries a leading '/' -- confirmed live
+    // against a real third-party mudlib corpus (row 3.8's TMI-2 boot
+    // attempt): std/object/sec_ob.c's own real "inherit
+    // \"std/object/ob_logic\";" (no leading slash), whose real target
+    // (std/object/ob_logic.c) sits directly under the mudlib root at
+    // exactly the mudlib-root-relative path the string already names.
+    // Every caller of compile()/loadObject()/cloneObject()/etc. that
+    // builds a real filesystem path from this normalized name
+    // (`config_.mudlibRoot() + filename + ".c"`) has always assumed a
+    // leading '/' was already present -- true for every absolute path
+    // this driver's own corpus had exercised until now, but not a real
+    // LPC requirement, so a relative inherit target like this one
+    // produced a malformed concatenation missing the path separator
+    // entirely ("...tmi2_fluffos_v3/lib" + "std/object/ob_logic.c" =
+    // "...tmi2_fluffos_v3/libstd/object/ob_logic.c", confirmed live: a
+    // real "source file not found" failure with exactly that missing
+    // slash). Prepending '/' here when absent makes both forms resolve
+    // identically, matching real semantics, for every one of this
+    // function's own callers at once.
+    if (result.empty() || result[0] != '/') {
+        result.insert(result.begin(), '/');
+    }
+    return result;
 }
 
 std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFilename) {

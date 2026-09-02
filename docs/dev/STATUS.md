@@ -9,6 +9,285 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-02 (a further session, same day): TMI-2 boot, row 3.8, real
+feature-complete boot and gameplay confirmed. Login, character
+creation, look, inventory, and movement between real rooms all
+verified over a real TCP connection. 11 real, narrow driver bugs found
+and fixed, same rigor as row 3.9's AetherMUD pass -- real citation,
+real fix, real regression test for each. 844 tests passing (up from
+839), zero regressions at every step. Row 3.8 marked `[x]`.**
+
+**Setup.** `temp/tmi2_fluffos_v3.zip` was already vendored on disk from
+a prior session (never previously booted); extracted this session to
+`temp/tmi2_fluffos_v3_extracted/` (gitignored under `temp/`, see
+CLAUDE.md). `etc/driver_tmi2.cfg` built from that mudlib's own real
+`bin/config.tmi2` ("mudlib directory : /mud/tmi2/lib", "master file :
+/adm/obj/master", "simulated efun file : /adm/obj/simul_efun",
+"include directories : /include", "global include file : <mudlib.h>"),
+same derivation discipline as `etc/driver_aethermud.cfg`.
+
+**The 11 real driver fixes, in the order the boot attempt actually hit
+them:**
+
+1. **`sscanf()` output arguments restricted to a bare variable name.**
+   Real `grammar.y`'s own `sscanf:` production uses `lvalue_list`, not
+   a name list -- any indexed lvalue is real, valid syntax. Real corpus:
+   `adm/obj/master/access.c`'s own `sscanf(lines[i], "(%s)%s", path,
+   lines[i])`, writing its second output straight back into the very
+   array element the source string was read from. Fixed in
+   `Parser`/`CodeGen`: an indexed output target (`IndexExpr`) is written
+   through a hidden compiler-synthesized temp local (the existing
+   `SscanfVarSlot` mechanism, unchanged) plus a deferred `IndexAssign`
+   sequence emitted right after the `Sscanf` instruction -- `OpCode::
+   Sscanf` itself needed no changes at all. Range-form output targets
+   (`arr[1..3]`) are rejected as a parse error, not silently misparsed.
+
+2. **`|=`/`&=`/`^=` compound bitwise assignment entirely unlexed.**
+   `access[path][name] |= WRITE;` (real corpus: 30 `|=`, 6 `&=`, 2 `^=`
+   call sites in this one mudlib alone) lexed as two separate tokens,
+   `|` then `=`, so the parser's own compound-assign recognition (which
+   checks the *next* token's exact text) never matched, silently
+   falling through to plain binary-or parsing and failing on the bare
+   `=` it did not expect. `Lexer::lexSymbol()` gained the missing
+   two-char cases; both `Parser` compound-op tables (the statement-level
+   `IndexAssignStmt` fast path and the unified expression-level
+   `AssignExpr`/`IndexAssignExpr` path) gained the three entries; all
+   three `CodeGen` combine-op switches gained the three cases, reusing
+   the already-implemented `OpCode::BitOr`/`BitAnd`/`BitXor` real
+   plain-binary-operator opcodes. Shift operators (`<<`/`>>`/their
+   compound forms) are a separate, unevidenced gap -- zero real hits
+   anywhere in this same corpus pass, and this driver has no plain
+   shift operator at all yet either -- not added.
+
+3. **Hex integer literals (`0x0010`) not lexed past the leading `0`.**
+   `adm/simul_efun/vt100.c`'s own real `if (color_mode & 0x0010)` (a
+   VT100 bright/bold-attribute bitflag test). `Lexer::lexNumber()`
+   consumed only the leading `0`, then re-entered the tokenizer at `x`,
+   producing a stray `Ident` token ("x0010") the parser could not use
+   ("expected \")\" in if condition ... got \"x0010\""). Fixed with a
+   dedicated hex branch in `lexNumber()` (kept in the token's own text,
+   not stripped, matching how the float `.` case already works);
+   `Parser`'s `IntLiteral` construction detects the `0x`/`0X` prefix and
+   parses with `std::stoll(raw, nullptr, 16)`, every non-hex literal
+   completely unaffected (still plain `std::stoll(raw)`, base 10).
+   Octal is a deliberately separate, unevidenced concern -- no octal
+   literal appears anywhere in this same corpus, and switching the
+   general integer-literal path to base-0 auto-detection would have
+   been a real, silent behavior change for any existing leading-zero
+   decimal literal (`010` becoming 8 instead of 10) with no real
+   evidence forcing it -- not made.
+
+4. **A real off-by-one in single-character string indexing.** Real
+   `interpret.c`'s own `F_INDEX` `T_STRING` case: `if ((i >
+   SVALUE_STRLEN(sp)) || (i < 0)) error(...)` -- strictly greater than,
+   not `>=`, so indexing exactly at a string's own length (its implicit
+   NUL terminator) is real, defined, non-throwing behavior reading back
+   0. This driver's own `VM.cpp` used `>=`, throwing exactly there
+   instead. Broke the ubiquitous real LPC idiom `if (lines[i][0] == '#'
+   || lines[i] == "") continue;` (`adm/obj/master/groups.c` and
+   `access.c` both) for any empty exploded line: `lines[i][0]` on an
+   empty string needs to read back 0, not throw, or the `""` comparison
+   never even runs. Fixed by relaxing the bound to `>` -- a real
+   `std::string::operator[](size())` is already guaranteed by the C++
+   standard to return a null character, so no special-casing was needed
+   beyond the bound itself.
+
+5. **No trailing comma allowed in a call's argument list.** Real
+   `grammar.y`'s own `expr_list2 ','` production explicitly allows one,
+   dropped with no extra element added -- the same real allowance array/
+   mapping literals already had here. Real corpus:
+   `adm/daemons/newuserd.c`'s own `body->set("PATH", AUTO_WIZHOOD);`,
+   where `AUTO_WIZHOOD` is a real, deliberately valueless flag `#define`
+   (`config.h`'s own "The AUTO_WIZHOOD define causes all those [logging
+   in] as new users to be [granted wizard status]", a pure boolean
+   `#ifdef`-style flag) -- real cpp's own correct expansion is literally
+   `body->set("PATH", );`, previously rejected outright ("expected
+   expression ... got ')'"). Fixed in `Parser::parseArgList()`.
+
+6. **Switch `case A..B:` range labels.** Previously a deliberate
+   `NotImplementedError` -- "nothing in this mudlib uses them", true of
+   the bundled `mudlib/` at the time, not of TMI-2: `std/user.c`'s own
+   real level-tier ladder (`case 2..3:`, `case 4..6:`, ...). Real
+   `grammar.y`'s own `L_CASE case_label L_RANGE case_label ':'`
+   production. `CaseLabel` gained a `rangeEnd` field; `CodeGen::
+   emitSwitchStmt()` builds the range check as the same short-circuit
+   `(subject>=low) && (subject<=high)` shape `emitLogicalExpr()`'s own
+   AND branch already uses, written directly against the subject's
+   local slot -- reusing `OpCode::Gte`/`Lte`/`Not`/`JumpIfFalse`/`Dup`/
+   `Pop`, no VM opcode changes at all. The open-ended real grammar forms
+   (`case A..:`, `case ..B:`) are a separate, still-unevidenced gap --
+   neither appears anywhere in this same corpus pass -- and stay
+   unimplemented.
+
+7. **Unary `~` (bitwise NOT) entirely unlexed.** `std/user/bitflags.c`'s
+   own real `bitflags &= ~(n);` bitmask-clearing idiom threw
+   "unrecognized character '~'" outright -- there was no lexer case for
+   a bare `~` at all. Real `grammar.y`'s own `'~' expr0` at the same
+   `%right L_NOT '~'` precedence tier as unary `!`. Added end to end:
+   `UnaryOp::BitNot` (Ast.hpp), `OpCode::BitNot` (Bytecode.hpp), a
+   right-associative `~` prefix in `Parser::parseUnary()` (matching
+   `!`/`-`'s own shape), `CodeGen`'s emission case, and a new
+   `OpCode::BitNot` VM handler matching real `interpret.c`'s own
+   `F_COMPL` exactly, including its literal "Bad argument to ~" message
+   for a non-int operand. 4 new regression-test assertions, hand-
+   computed from the two's-complement identity `~x == -x-1`, not read
+   back from this driver: `~5 == -6`, `~(-3) == 2`, `~~7 == 7` (double
+   negation), plus the non-int throw.
+
+8. **A nested absolute `#include` was never resolved.** Real cpp has no
+   concept of a mudlib root, so a quoted `#include "/..."` fails
+   outright ("No such file or directory") unless rewritten first; this
+   driver's own `rewriteAbsoluteIncludes()` already did that, but only
+   ever once, on the *outermost* file's own raw text, before cpp ever
+   ran. A file reached transitively via cpp's own recursive `#include`
+   expansion (because *its* own absolute include had already been
+   correctly rewritten and resolved) never had its own absolute
+   includes rewritten at all. Real corpus:
+   `std/object/sec_ob.c`'s own `#include "/std/object/prop.c"`
+   (resolved fine) itself contains `#include
+   "/std/object/prop_logic.c"` (never touched, cpp choked on it as a
+   literal OS-root-absolute path). Confirmed directly, not assumed: a
+   leading-`/` quoted include is resolved as a raw absolute filesystem
+   path by real cpp unconditionally, no `-I` search path applies to it,
+   and GCC's own `--sysroot` flag does not redirect quote-form includes
+   either (tested empirically before ruling it out). Fixed by making
+   `rewriteAbsoluteIncludes()` recursive: for each absolute quoted
+   include whose real target file can actually be read, its content is
+   spliced directly in place (masked for `#'` the same way the outer
+   file already is, then recursed into for its own further absolute
+   includes), with a real-cycle guard (`activeIncludes`) and a depth cap
+   as a pure safety net. A target that cannot be read falls back to the
+   original path-text rewrite, so real cpp's own "No such file or
+   directory" still surfaces for a genuinely broken include. New
+   regression test: two levels of absolute-include nesting, matching
+   the real corpus shape exactly. The existing 50-real-include
+   AetherMUD test (`testAbsoluteIncludePathResolvesAgainstMudlibRoot`
+   and its own live corpus, `secure/SimulEfun/SimulEfun.c`) re-ran
+   unchanged throughout, confirming the switch from path-rewrite to
+   content-splice is behaviorally equivalent for the single-level case.
+
+9. **`ObjectManager::normalizeFilename()` assumed every real LPC
+   pathname already carried a leading `/`.** Real LPC object pathnames
+   are mudlib-root-relative whether or not the string itself has one --
+   `inherit "std/room";` and `inherit "/std/room";` name the same real
+   object. Real corpus: `std/object/sec_ob.c`'s own `inherit
+   "std/object/ob_logic";` (no leading slash; the real file sits
+   directly at that mudlib-root-relative path). This driver's own
+   `compile()`/`loadObject()`/`cloneObject()`/etc. all build a real
+   filesystem path as `config_.mudlibRoot() + filename + ".c"`,
+   assuming a leading `/` was already present -- true for every
+   absolute-written path this driver's own corpus had exercised before
+   now, silently wrong for a relative one ("...tmi2_fluffos_v3/lib" +
+   "std/object/ob_logic.c" = "...tmi2_fluffos_v3/libstd/object/
+   ob_logic.c", confirmed live as a real "source file not found").
+   Fixed by having `normalizeFilename()` ensure exactly one leading `/`
+   (stripping one first if already present, not blindly prepending a
+   second one). New regression test: an `inherit` target with no
+   leading slash resolves to the exact same real object as the
+   leading-slash form.
+
+10. **`deep_inherit_list()`/`shallow_inherit_list()`/`inherit_list()`'s
+    own leading-slash convention was backwards.** A prior session's own
+    comment claimed "no leading slash" from a different corpus's own
+    `member_array("std/armour.c", deep_inherit_list(ob))`-style call
+    sites -- never actually checked against real driver source, and
+    wrong: real `array.c`'s own `deep_inherit_list()`/`inherit_list()`
+    both do `ret->item[il].u.string = add_slash(pr->filename);` for
+    every entry, and real `add_slash()` (`interpret.c`) unconditionally
+    prepends `/`. Found live against a real *third* mudlib corpus:
+    `adm/simul_efun/overrides.c`'s own real security-gated `exec()`
+    simul_efun override (this same mudlib defines its own `exec()`,
+    shadowing the raw efun, exactly as real LPC's own function-
+    resolution order allows) does `member_array("/std/body.c",
+    deep_inherit_list(to_obj)) == -1` -- *with* a leading slash, real
+    add_slash()-matching, not that other corpus's own convention. This
+    driver's own prior "strip the leading slash" behavior meant this
+    real, load-bearing security gate (verifying a new character's own
+    body object genuinely inherits `/std/body.c` before granting it the
+    interactive connection) could never find a match, always denying.
+    This alone was the root cause of "Error connecting to your body..."
+    on every single character creation attempt, cascading moments later
+    into a real call_other-on-a-destructed-object crash in
+    `adm/daemons/newuserd.c`'s own `get_real_name()` (`body_ob` had
+    already been `remove()`d by the denied `exec()`'s own real cleanup
+    path). Debugged by adding temporary `std::cerr` tracing directly
+    inside the real `exec()` efun (reverted immediately once the actual
+    root cause -- the efun was never even reached, `overrides.c`'s own
+    simul_efun shadowed it first -- was confirmed), not guessed. Fixed
+    by having `normalizeInheritPath()` ensure exactly one leading `/`
+    instead of stripping one. Existing regression test
+    (`testShallowAndDeepInheritListWalkARealThreeLevelChain`) updated in
+    place to assert the correct, now-verified-against-real-source
+    format.
+
+11. **`VM::resolveMudlibPath()` had the identical "assumes a leading
+    /" bug, for every file efun.** Real corpus, found live a *third*
+    time in this same pass: `adm/daemons/ga_server.c`'s own `#define
+    GLOBAL_ALIASES "adm/etc/global_aliases"` (no leading slash) fed
+    straight into `read_file(GLOBAL_ALIASES)`. `resolveMudlibPath()`
+    concatenated `config_.mudlibRoot() + lpcPath` with no separator
+    guarantee, so `read_file()` silently returned falsy for this
+    relative-form path, cascading into `ga_server`'s own `create()`
+    failing ("explode: expected (string, string) arguments" -- its
+    first argument was the falsy `read_file()` result), which in turn
+    left every command routed through `std/user.c`'s own `do_xverb()`
+    failing with "call_other() couldn't find object". This alone was
+    the root cause of `look` and `inventory` both failing immediately
+    after a successful login. Fixed the same way as (9): ensure exactly
+    one leading `/` rather than assuming one. New regression test: a
+    relative-form `read_file`/`write_file` path round-trips identically
+    to the existing leading-slash test.
+
+**Real, well-evidenced issues found and correctly left unfixed.**
+`include/login.h`/`include/tsh.h`/`adm/simul_efun/overrides.c` all use
+`#ifdef 0` as a "commented out" idiom -- invalid per the C standard
+(`#ifdef` requires an identifier; `0` is a pp-number token, not one),
+rejected by any strict modern cpp with "macro names must be
+identifiers". Real 1990s-era content meeting a modern system cpp: real
+modern FluffOS booting this exact same file against this exact same
+system cpp would hit the identical error, not a driver defect.
+`adm/simul_efun/iwrap.c`'s own `str[0..D_IN]` is a separate, genuine C
+preprocessor "pp-number" tokenization gotcha: `0..D_IN` greedily
+lexes as one single opaque pp-number token under the real C standard's
+own pp-number grammar (a digit followed by any run of digits,
+identifier-nondigits, or `.`), so it is never macro-expanded at all --
+also real cpp behavior, confirmed by direct empirical test (`cpp -x c`
+on the isolated fragment), not this driver's. `/cmds/std/_score::
+cmd_score()`'s own sprintf usage hits the `%=` column-mode gap row
+3.9's AetherMUD pass already found and explicitly scoped out -- not
+re-litigated here, same known limitation. The real Intermud3 network
+daemon (`adm/daemons/network/I3`) cannot reach a real external gateway
+server from this sandboxed test environment -- a genuine environmental
+constraint (no real internet access to whatever real i3 router TMI-2
+targets), not a driver bug -- cascading into `adm/daemons/channels.c`'s
+own I3-channel-list registration on daemon boot. Three of these four
+(the two `#ifdef 0` files and the `channels.c` I3 line) were given a
+minimal, clearly-labeled, non-tracked local patch purely to keep the
+live verification going past them -- `temp/` is gitignored and never
+committed, so this is not a driver change and not a claim that real
+FluffOS tolerates any of them; it is exactly what a real admin running
+this mudlib locally today would also have to do.
+
+**Live verification, over a real TCP connection (Python socket
+client), through several full runs:** account/character creation
+(name, confirmation, password, gender, race, email, real name) all the
+way through "[You have been granted automatic wizard status]" and into
+the real starting room ("This is the famous TMI-2 quad reincarnated.");
+`look` re-showing the same real room description; `inventory` showing
+"You are carrying 0 objects."; `north` moving to a real, different room
+("This is the driver room..."), `look` there confirming it, `south`
+moving back. `score` also worked partway (real HP/SP display) before
+hitting the already-known, already-tracked `%=` sprintf gap. Full clean
+rebuild and full suite re-run after every single fix in this list, 844
+passing throughout, zero regressions at any point.
+
+`ROADMAP.md` row 3.8 marked `[x]` with the full fix list and citations
+in its own cell. The other two named row 3.8 candidates (LPUniversity,
+LIL) remain open if a further third-party-mudlib boot is wanted next.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-09-02 (a further session, same day): row 3.3 vs row 3.4 scoped
 and compared, TELOPT_TTYPE negotiation built (row 3.4's first slice).
 With the uid/security cluster (rows 3.1/3.2) closed, this session

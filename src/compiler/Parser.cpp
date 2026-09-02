@@ -122,7 +122,29 @@ std::vector<AstPtr> Parser::parseArgList() {
     if (checkText(")")) return args;
     for (;;) {
         args.push_back(parseExpr());
-        if (checkText(",")) { advance(); continue; }
+        if (checkText(",")) {
+            advance();
+            // Real grammar.y's own "expr_list2 ','" production: a
+            // trailing comma right before the closing ')' is real,
+            // explicit LPC syntax (not this driver's own invention --
+            // mirrors the same real allowance array/mapping literals
+            // already have here), dropped with no extra element added,
+            // not a syntax error. Found live against a real third-party
+            // mudlib corpus (row 3.8's TMI-2 boot attempt):
+            // adm/daemons/newuserd.c's own "body->set(\"PATH\",
+            // AUTO_WIZHOOD);", where AUTO_WIZHOOD is a real, deliberately
+            // valueless flag #define (config.h's own "#define
+            // AUTO_WIZHOOD", no value -- its own header comment: "The
+            // AUTO_WIZHOOD define causes all those [logging in] as new
+            // users to be [granted wizard status]", a pure boolean
+            // #ifdef-style flag), so cpp's real, correct expansion is
+            // literally "body->set(\"PATH\", );" -- a real, valid,
+            // single-argument call in real LPC's own grammar, previously
+            // rejected outright here ("expected expression ... got
+            // ')'"), not a malformed one to route around.
+            if (checkText(")")) break;
+            continue;
+        }
         break;
     }
     return args;
@@ -158,7 +180,15 @@ AstPtr Parser::parsePrimary() {
             return lit;
         }
         auto lit = std::make_unique<IntLiteral>();
-        lit->value = std::stoll(advance().text);
+        const std::string& raw = advance().text;
+        // Lexer::lexNumber()'s own hex-literal branch keeps the "0x"/"0X"
+        // prefix in the token text rather than stripping it -- base 16
+        // here (std::stoll itself already understands a "0x"/"0X" prefix
+        // once told the base is 16) is the one place that prefix is
+        // actually consumed. Every non-hex literal is completely
+        // unaffected: plain std::stoll(raw), base 10, exactly as before.
+        bool isHex = raw.size() > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X');
+        lit->value = isHex ? std::stoll(raw, nullptr, 16) : std::stoll(raw);
         return lit;
     }
 
@@ -571,14 +601,33 @@ AstPtr Parser::parsePrimary() {
             sscanfExpr->target = std::move(args[0]);
             sscanfExpr->format = std::move(args[1]);
             for (size_t i = 2; i < args.size(); ++i) {
-                auto* ref = dynamic_cast<VarRefExpr*>(args[i].get());
-                if (!ref) {
-                    throw LpcRuntimeError(
-                        "sscanf: output argument " + std::to_string(i - 1) +
-                        " must be a plain variable name (sscanf's output arguments are "
-                        "implicit lvalues in real LPC, there is no \"&var\" reference syntax)");
+                if (auto* ref = dynamic_cast<VarRefExpr*>(args[i].get())) {
+                    sscanfExpr->varNames.push_back(ref->name);
+                    sscanfExpr->indexedTargets.push_back(nullptr);
+                    continue;
                 }
-                sscanfExpr->varNames.push_back(ref->name);
+                // Real LPC's sscanf() output arguments are ordinary
+                // lvalues, not restricted to a bare variable name -- see
+                // Ast.hpp's own SscanfExpr comment for the real corpus
+                // evidence (TMI-2's own access.c) this relaxation is for.
+                // A range form ("arr[1..3]") is never a valid lvalue in
+                // real LPC either, so it is rejected here the same way a
+                // non-lvalue expression is, not silently accepted.
+                if (auto* idx = dynamic_cast<IndexExpr*>(args[i].get())) {
+                    if (idx->rangeEnd) {
+                        throw LpcRuntimeError(
+                            "sscanf: output argument " + std::to_string(i - 1) +
+                            " cannot be a range expression");
+                    }
+                    sscanfExpr->varNames.push_back(std::string());
+                    sscanfExpr->indexedTargets.push_back(std::move(args[i]));
+                    continue;
+                }
+                throw LpcRuntimeError(
+                    "sscanf: output argument " + std::to_string(i - 1) +
+                    " must be a plain variable name or an indexed lvalue like arr[i] "
+                    "(sscanf's output arguments are implicit lvalues in real LPC, there "
+                    "is no \"&var\" reference syntax)");
             }
             return sscanfExpr;
         }
@@ -839,6 +888,14 @@ AstPtr Parser::parseUnary() {
         negExpr->operand = std::move(operand);
         return negExpr;
     }
+    if (checkText("~")) {
+        advance();
+        auto operand = parseUnary(); // right-associative, same as "!"/"-"
+        auto notExpr = std::make_unique<UnaryExpr>();
+        notExpr->op = UnaryOp::BitNot;
+        notExpr->operand = std::move(operand);
+        return notExpr;
+    }
     if (checkText("++") || checkText("--")) {
         bool isInc = checkText("++");
         advance();
@@ -908,9 +965,13 @@ AstPtr Parser::parseUnary() {
     BinOp compoundOp = BinOp::Add;
     bool sawAssignOp = checkText("=");
     if (!sawAssignOp) {
+        // The "|="/"&="/"^=" entries need Lexer::lexSymbol() to already
+        // tokenize each as one atomic Symbol -- see its own comment for
+        // the real corpus evidence (TMI-2's access.c) this pairs with.
         static const std::pair<const char*, BinOp> kCompoundOps[] = {
             {"+=", BinOp::Add}, {"-=", BinOp::Sub}, {"*=", BinOp::Mul},
             {"/=", BinOp::Div}, {"%=", BinOp::Mod},
+            {"|=", BinOp::BitOr}, {"&=", BinOp::BitAnd}, {"^=", BinOp::BitXor},
         };
         for (const auto& [opText, binOp] : kCompoundOps) {
             if (checkText(opText)) {
@@ -1365,8 +1426,10 @@ AstPtr Parser::parseForeachStatement() {
 // "case constExpr:" / "default:" labels interleaved with ordinary
 // statements, matching real C/LPC fallthrough switch (there is no
 // implicit break between cases -- see SwitchStmt's comment). Range case
-// labels ("case A..B:") are not implemented; nothing in this mudlib uses
-// them (confirmed by grep across the whole tree).
+// labels ("case A..B:", real grammar.y's own "L_CASE case_label L_RANGE
+// case_label ':'") are implemented; the open-ended forms ("case A..:",
+// "case ..B:") are not -- see CaseLabel's own comment for the real
+// corpus evidence and the still-unevidenced gap.
 AstPtr Parser::parseSwitchStatement() {
     expectText("switch", "switch statement");
     expectText("(", "switch statement subject");
@@ -1384,12 +1447,13 @@ AstPtr Parser::parseSwitchStatement() {
         if (checkText("case")) {
             advance();
             AstPtr value = parseExpr();
-            if (checkText("..")) {
-                throw NotImplementedError("switch \"case A..B:\" range labels");
-            }
-            expectText(":", "case label");
             auto label = std::make_unique<CaseLabel>();
             label->value = std::move(value);
+            if (checkText("..")) {
+                advance();
+                label->rangeEnd = parseExpr();
+            }
+            expectText(":", "case label");
             stmt->body.push_back(std::move(label));
             continue;
         }
@@ -1492,6 +1556,7 @@ AstPtr Parser::parseStatement() {
                 static const std::pair<const char*, BinOp> kCompoundOps[] = {
                     {"+=", BinOp::Add}, {"-=", BinOp::Sub}, {"*=", BinOp::Mul},
                     {"/=", BinOp::Div}, {"%=", BinOp::Mod},
+                    {"|=", BinOp::BitOr}, {"&=", BinOp::BitAnd}, {"^=", BinOp::BitXor},
                 };
                 for (const auto& [opText, binOp] : kCompoundOps) {
                     if (checkText(opText)) {
@@ -1753,6 +1818,32 @@ std::unique_ptr<Program> Parser::parseProgram() {
         if (checkText("inherit")) {
             parseInheritStatement(*program);
             continue;
+        }
+
+        // Real grammar.y's own inherit production is "type_modifier_list
+        // L_INHERIT string_con1 ';'" -- zero or more modifiers
+        // (private/static/public/protected/nomask/varargs/atomic) may
+        // precede "inherit" itself. Found live against a real third-party
+        // mudlib corpus (row 3.8's TMI-2 boot attempt): std/user/tsh.c's
+        // own real "private inherit STACK_ADT;" -- previously misparsed
+        // as an ordinary declaration below, "inherit" (a Keyword token)
+        // mistaken for the declaration's own type, then choking on the
+        // inherit path string where a declaration name was expected.
+        // Modifiers are discarded here exactly like parseDeclPrefix()
+        // already discards every modifier but "private" for an ordinary
+        // declaration -- this driver has no per-inherit visibility
+        // semantics to enforce.
+        {
+            size_t lookahead = 0;
+            while (peekAt(lookahead).type == TokenType::Keyword &&
+                   isModifierKeyword(peekAt(lookahead))) {
+                ++lookahead;
+            }
+            if (lookahead > 0 && peekAt(lookahead).text == "inherit") {
+                for (size_t i = 0; i < lookahead; ++i) advance();
+                parseInheritStatement(*program);
+                continue;
+            }
         }
 
         DeclPrefix prefix = parseDeclPrefix("top-level declaration");

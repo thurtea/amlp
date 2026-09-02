@@ -210,6 +210,12 @@ void CodeGen::emitAssignExpr(const AssignExpr& assign) {
             case BinOp::Mul: combineOp = OpCode::Mul; break;
             case BinOp::Div: combineOp = OpCode::Div; break;
             case BinOp::Mod: combineOp = OpCode::Mod; break;
+            // "|="/"&="/"^=" (Parser.cpp's own kCompoundOps, real corpus
+            // evidence in Lexer.cpp's lexSymbol() comment) reuse the same
+            // OpCode::BitOr/BitAnd/BitXor plain binary "|"/"&"/"^" already use.
+            case BinOp::BitOr: combineOp = OpCode::BitOr; break;
+            case BinOp::BitAnd: combineOp = OpCode::BitAnd; break;
+            case BinOp::BitXor: combineOp = OpCode::BitXor; break;
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
@@ -337,6 +343,9 @@ void CodeGen::emitExpr(const AstNode& expr) {
         if (un->op == UnaryOp::Not) {
             emitExpr(*un->operand);
             out_->code.push_back(Instruction{OpCode::Not, 0, 0});
+        } else if (un->op == UnaryOp::BitNot) {
+            emitExpr(*un->operand);
+            out_->code.push_back(Instruction{OpCode::BitNot, 0, 0});
         } else {
             // UnaryOp::Neg. Desugared into the existing Sub opcode
             // ("0 - operand") instead of a new dedicated opcode, reusing
@@ -545,6 +554,28 @@ void CodeGen::emitCallOtherExpr(const CallOtherExpr& callOther) {
 // pushed values because Instruction has no "list of (kind, slot) pairs"
 // operand shape and the number of vars is not fixed -- see VM.cpp's
 // OpCode::Sscanf handler for how it reads this table back out.
+//
+// An indexed output argument (sscanf.indexedTargets[i] non-null, e.g.
+// "arr[i]" -- see Ast.hpp's own SscanfExpr comment for the real TMI-2
+// corpus evidence) cannot point at a SscanfVarSlot table entry directly:
+// that table only ever names a fixed local-or-object-var slot, resolved
+// once at compile time, but an indexed target's own container and index
+// are themselves runtime values (e.g. the "i" in "arr[i]" is a loop
+// variable, not known until the match actually runs). Rather than
+// widening OpCode::Sscanf's own stack/table protocol to carry runtime
+// container+index operands as well -- a much larger, riskier change to
+// an already-working opcode -- this reuses the exact same "hidden temp
+// local, then a separate IndexAssign afterward" idiom
+// emitIndexAssignExpr() already established just above for an
+// unrelated but structurally identical problem (a computed value that
+// needs to end up written through an indexed lvalue): the match result
+// is written into an ordinary compiler-synthesized local exactly like
+// any other plain-variable output (OpCode::Sscanf itself needs no
+// changes at all), then, once every output has been written, the real
+// indexed targets are populated from those hidden locals via the same
+// real IndexAssign opcode ordinary "arr[i] = x" already uses -- so an
+// indexed sscanf output gets exactly real "arr[i] = <matched value>"
+// semantics, just deferred by one hidden local's worth of indirection.
 void CodeGen::emitSscanfExpr(const SscanfExpr& sscanf) {
     emitExpr(*sscanf.target);
     emitExpr(*sscanf.format);
@@ -552,13 +583,40 @@ void CodeGen::emitSscanfExpr(const SscanfExpr& sscanf) {
     out_->code.push_back(
         Instruction{OpCode::Sscanf, static_cast<int32_t>(sscanf.varNames.size()), 0});
 
-    for (const auto& varName : sscanf.varNames) {
-        ResolvedVar var = resolveVariable(varName);
-        // argCount doubles as the kind flag here (0 = local, 1 = object
-        // var) since this instruction is never dispatched through the
-        // normal switch -- OpCode::Sscanf's handler reads it directly.
-        int32_t kindFlag = (var.kind == VarKind::ObjectVar) ? 1 : 0;
-        out_->code.push_back(Instruction{OpCode::SscanfVarSlot, var.slot, kindFlag});
+    // (slot, indexed-target expr) pairs to flush into their real indexed
+    // lvalue once the Sscanf instruction + its inline var-slot table has
+    // been fully emitted (that table cannot be interleaved with other
+    // instructions).
+    std::vector<std::pair<int, const AstNode*>> pendingIndexedWrites;
+
+    for (size_t i = 0; i < sscanf.varNames.size(); ++i) {
+        int slot;
+        int32_t kindFlag;
+        if (sscanf.indexedTargets[i]) {
+            std::string tempName = "$sscanf_out#" + std::to_string(indexAssignCounter_++);
+            slot = declareLocal(tempName);
+            kindFlag = 0; // always a local -- see declareLocal() above
+            pendingIndexedWrites.emplace_back(slot, sscanf.indexedTargets[i].get());
+        } else {
+            ResolvedVar var = resolveVariable(sscanf.varNames[i]);
+            // argCount doubles as the kind flag here (0 = local, 1 =
+            // object var) since this instruction is never dispatched
+            // through the normal switch -- OpCode::Sscanf's handler
+            // reads it directly.
+            slot = var.slot;
+            kindFlag = (var.kind == VarKind::ObjectVar) ? 1 : 0;
+        }
+        out_->code.push_back(Instruction{OpCode::SscanfVarSlot, slot, kindFlag});
+    }
+
+    for (const auto& [tempSlot, targetNode] : pendingIndexedWrites) {
+        const auto& idx = static_cast<const IndexExpr&>(*targetNode);
+        emitExpr(*idx.target);
+        emitExpr(*idx.index);
+        int32_t flags = idx.mapColumn ? 0x4 : 0;
+        if (idx.mapColumn) emitExpr(*idx.mapColumn);
+        out_->code.push_back(Instruction{OpCode::PushLocal, tempSlot, 0});
+        out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});
     }
 }
 
@@ -613,6 +671,12 @@ void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
             case BinOp::Mul: combineOp = OpCode::Mul; break;
             case BinOp::Div: combineOp = OpCode::Div; break;
             case BinOp::Mod: combineOp = OpCode::Mod; break;
+            // "|="/"&="/"^=" (Parser.cpp's own kCompoundOps, real corpus
+            // evidence in Lexer.cpp's lexSymbol() comment) reuse the same
+            // OpCode::BitOr/BitAnd/BitXor plain binary "|"/"&"/"^" already use.
+            case BinOp::BitOr: combineOp = OpCode::BitOr; break;
+            case BinOp::BitAnd: combineOp = OpCode::BitAnd; break;
+            case BinOp::BitXor: combineOp = OpCode::BitXor; break;
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
@@ -657,6 +721,12 @@ void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
             case BinOp::Mul: combineOp = OpCode::Mul; break;
             case BinOp::Div: combineOp = OpCode::Div; break;
             case BinOp::Mod: combineOp = OpCode::Mod; break;
+            // "|="/"&="/"^=" (Parser.cpp's own kCompoundOps, real corpus
+            // evidence in Lexer.cpp's lexSymbol() comment) reuse the same
+            // OpCode::BitOr/BitAnd/BitXor plain binary "|"/"&"/"^" already use.
+            case BinOp::BitOr: combineOp = OpCode::BitOr; break;
+            case BinOp::BitAnd: combineOp = OpCode::BitAnd; break;
+            case BinOp::BitXor: combineOp = OpCode::BitXor; break;
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
@@ -908,6 +978,33 @@ void CodeGen::emitSwitchStmt(const SwitchStmt& stmt) {
         if (!label) continue;
         if (!label->value) {
             defaultBodyIndex = i;
+            continue;
+        }
+        if (label->rangeEnd) {
+            // "case low..high:" -- matches when low <= subject <= high.
+            // Built as the same short-circuit "(subject >= low) &&
+            // (subject <= high)" shape emitLogicalExpr()'s own AND branch
+            // uses (Dup the left result so the false branch keeps it as
+            // the whole expression's result without re-evaluating
+            // anything), just written directly against subjSlot instead
+            // of a synthesized BinaryExpr AST -- there is no source-level
+            // "subject" expression to build one around, only its already-
+            // materialized local slot. The final boolean this leaves on
+            // the stack then feeds the exact same "Not; JumpIfFalse"
+            // jump-to-body idiom the plain-value case just below uses.
+            out_->code.push_back(Instruction{OpCode::PushLocal, subjSlot, 0});
+            emitExpr(*label->value);
+            out_->code.push_back(Instruction{OpCode::Gte, 0, 0});
+            out_->code.push_back(Instruction{OpCode::Dup, 0, 0});
+            size_t lowFailedJumpIdx = emitJumpPlaceholder(OpCode::JumpIfFalse);
+            out_->code.push_back(Instruction{OpCode::Pop, 0, 0});
+            out_->code.push_back(Instruction{OpCode::PushLocal, subjSlot, 0});
+            emitExpr(*label->rangeEnd);
+            out_->code.push_back(Instruction{OpCode::Lte, 0, 0});
+            patchJumpToHere(lowFailedJumpIdx);
+            out_->code.push_back(Instruction{OpCode::Not, 0, 0});
+            size_t jumpIdx = emitJumpPlaceholder(OpCode::JumpIfFalse);
+            jumpsToIndex[i].push_back(jumpIdx);
             continue;
         }
         out_->code.push_back(Instruction{OpCode::PushLocal, subjSlot, 0});

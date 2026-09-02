@@ -4587,29 +4587,49 @@ void registerCoreEfuns() {
     //
     // string *deep_inherit_list(object default: this_object()) -- the
     // full transitive closure, real array.c's own recursive walk.
-    // Confirmed real, live-reachable: cmds/creator/_acheck.c/_wcheck.c/
-    // _roomcheck.c all do "member_array(\"std/armour.c\",
-    // deep_inherit_list(ob)) == -1" style sanity checks, which is also
-    // the real output *format* this driver's own normalization below is
-    // matched against: no leading slash, always ".c"-suffixed.
+    //
+    // Real output format, read directly from real array.c's own
+    // deep_inherit_list()/inherit_list() rather than inferred from any
+    // one mudlib's own usage: "ret->item[il].u.string =
+    // add_slash(pr->filename);" for every entry -- real add_slash()
+    // (interpret.c) unconditionally prepends '/', always. A prior
+    // version of this comment claimed "no leading slash" from a
+    // different corpus's own "member_array(\"std/armour.c\",
+    // deep_inherit_list(ob))"-style call sites -- that claim was never
+    // checked against the real driver source directly and was wrong;
+    // found live against a real THIRD mudlib corpus (row 3.8's TMI-2
+    // boot attempt): adm/simul_efun/overrides.c's own real security-gated
+    // "exec" simul_efun override does "member_array(\"/std/body.c\",
+    // deep_inherit_list(to_obj)) == -1" -- *with* a leading slash,
+    // matching real add_slash() exactly, not that other corpus's own
+    // convention. This driver's own prior "strip the leading slash"
+    // behavior meant this real, load-bearing security check could never
+    // find a match, always denying: every new character's own body
+    // object failed "exec()"'s own ownership handoff, so the connection
+    // never actually reached the created player object at all (confirmed
+    // live: "Error connecting to your body..." on every character
+    // creation, cascading into a real call_other-on-a-destructed-object
+    // crash moments later in adm/daemons/newuserd.c's own
+    // get_real_name()).
     //
     // Real filenames come from each ancestor CompiledProgram's own
     // canonical on-disk path; this driver's CompiledProgram carries no
     // such field of its own (only the *raw*, as-written "inherit ...;"
     // path text, CompiledProgram::inherits, parallel-indexed with the
     // already-resolved CompiledProgram::inheritedPrograms) -- so the
-    // best-effort normalization here is: strip a leading '/' if present,
-    // append ".c" if not already there. This matches every real call
-    // site's own comparison string exactly for a plain, unmacro'd
-    // "inherit \"std/armour\";"-style path, but is not a full path-
-    // resolution pass (relative "../" segments, include-dir search
-    // order) the way ObjectManager::compile()'s own file-loading
-    // normalization is -- flagged here rather than silently assumed
-    // identical.
+    // best-effort normalization here is: ensure exactly one leading '/'
+    // (stripping one first if already present, matching
+    // ObjectManager::normalizeFilename()'s own identical "ensure a
+    // leading slash" fix, not blindly prepending a second one onto an
+    // already-absolute "inherit \"/std/room\";"-style path), append ".c"
+    // if not already there. Not a full path-resolution pass (relative
+    // "../" segments, include-dir search order) the way
+    // ObjectManager::compile()'s own file-loading normalization is --
+    // flagged here rather than silently assumed identical.
     auto normalizeInheritPath = [](std::string path) -> std::string {
         if (!path.empty() && path.front() == '/') path.erase(0, 1);
         if (path.size() < 2 || path.substr(path.size() - 2) != ".c") path += ".c";
-        return path;
+        return "/" + path;
     };
     auto collectDeepInherits = [normalizeInheritPath](const CompiledProgram& prog, auto&& self,
                                                         std::vector<Value>& out) -> void {

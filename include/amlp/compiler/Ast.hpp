@@ -60,7 +60,14 @@ struct BinaryExpr : AstNode {
     AstPtr right;
 };
 
-enum class UnaryOp { Not, Neg };
+// BitNot: real LPC/C "~x", one's-complement bitwise NOT (grammar.y:
+// "'~' expr0", same "%right L_NOT '~'" precedence tier as unary "!").
+// Found live against a real third-party mudlib corpus (row 3.8's TMI-2
+// boot attempt): std/user/bitflags.c's own real bitmask-clearing idiom
+// ("flags &= ~SOME_FLAG"-shaped code), previously not even lexed --
+// Lexer::tokenize() had no case for a bare '~' at all, throwing
+// "unrecognized character '~'" outright.
+enum class UnaryOp { Not, Neg, BitNot };
 
 struct UnaryExpr : AstNode {
     UnaryOp op = UnaryOp::Not;
@@ -125,13 +132,27 @@ struct CallOtherExpr : AstNode {
 // grammar production (grammar.y's "sscanf:" rule uses "lvalue_list", not
 // a plain arg list) precisely because its trailing arguments are implicit
 // lvalues, not ordinary by-value expressions -- there is no "&var"
-// reference syntax in LPC's sscanf, unlike C's. Matching that, this stores
-// the output arguments as plain names to resolve to local/object-var
-// slots at codegen time, the same way AssignStmt already does.
+// reference syntax in LPC's sscanf, unlike C's. A real LPC lvalue is not
+// limited to a bare variable name, though -- confirmed live against a
+// real third-party mudlib corpus (row 3.8's TMI-2 boot attempt), not
+// assumed: TMI-2's own real, unmodified adm/obj/master/access.c has
+// "sscanf(lines[i], "(%s)%s", path, lines[i])", writing its second
+// output straight back into the very array element the source string was
+// read from, a real, valid indexed-lvalue output argument this driver
+// previously rejected outright (see Parser.cpp's own prior "must be a
+// plain variable name" error, now relaxed). varNames still covers the
+// plain-variable case exactly as before (empty string at position i
+// means indexedTargets[i] is used instead); indexedTargets is a parallel,
+// same-length vector, holding an IndexExpr (arr[i], map[k], or LDMud
+// map[k, n]) at any position whose output argument was an indexed
+// expression rather than a bare name, null everywhere else. See
+// CodeGen::emitSscanfExpr()'s own comment for why this needs a hidden
+// temp local rather than a change to OpCode::Sscanf itself.
 struct SscanfExpr : AstNode {
     AstPtr target;
     AstPtr format;
     std::vector<std::string> varNames;
+    std::vector<AstPtr> indexedTargets;
 };
 
 // "catch(expr)", real LPC's own control-flow construct for trapping a
@@ -459,11 +480,21 @@ struct ContinueStmt : AstNode {};
 // source order, exactly where it appeared, so fallthrough (no implicit
 // break between cases, matching real LPC/C) falls out naturally from
 // just emitting body statements in that same order. value == nullptr
-// means "default:". Range case labels ("case A..B:") are not
-// implemented -- not used anywhere in this mudlib -- and throw a clear
-// parse error rather than silently misparsing.
+// means "default:". rangeEnd, non-null, means a real LPC/FluffOS range
+// case label ("case A..B:", grammar.y's own "L_CASE case_label L_RANGE
+// case_label ':'") -- matches when subject is anywhere in [value,
+// rangeEnd] inclusive, not just equal to value. Found live against a
+// real third-party mudlib corpus (row 3.8's TMI-2 boot attempt):
+// std/user.c's own real "case 2..3:" / "case 4..6:" / ... ladder (a
+// level-tier lookup), previously rejected outright with a deliberate
+// "not implemented" error since nothing in this driver's own bundled
+// mudlib used the form -- see CodeGen::emitSwitchStmt() for the range
+// comparison codegen. The open-ended real grammar forms ("case A..:",
+// "case ..B:") are a separate, still-unevidenced gap -- neither appears
+// anywhere in that same TMI-2 corpus pass -- and stay unimplemented.
 struct CaseLabel : AstNode {
     AstPtr value;
+    AstPtr rangeEnd;
 };
 
 struct SwitchStmt : AstNode {

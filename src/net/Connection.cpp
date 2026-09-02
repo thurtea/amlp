@@ -18,7 +18,10 @@ constexpr unsigned char kWill = 251;
 constexpr unsigned char kSb = 250;
 constexpr unsigned char kSe = 240;
 constexpr unsigned char kTelOptEcho = 1;
+constexpr unsigned char kTelOptTtype = 24;
 constexpr unsigned char kTelOptNaws = 31;
+constexpr unsigned char kTelQualIs = 0;
+constexpr unsigned char kTelQualSend = 1;
 }  // namespace
 
 // Real new_user() (comm.c): the freshly allocated interactive_t's own
@@ -153,6 +156,18 @@ void Connection::requestWindowSize() {
     send(std::string(reinterpret_cast<char*>(req), sizeof(req)));
 }
 
+void Connection::requestTerminalType() {
+    // Real telnet_term_query[] (comm.c): IAC SB TTYPE SEND IAC SE.
+    unsigned char req[] = {kIac, kSb, kTelOptTtype, kTelQualSend, kIac, kSe};
+    send(std::string(reinterpret_cast<char*>(req), sizeof(req)));
+}
+
+void Connection::startRequestTerminalType() {
+    // Real telnet_do_ttype[] (comm.c): IAC DO TTYPE.
+    unsigned char req[] = {kIac, kDo, kTelOptTtype};
+    send(std::string(reinterpret_cast<char*>(req), sizeof(req)));
+}
+
 void Connection::processTelnetBytes(const std::string& raw, std::string& plainOut) {
     for (unsigned char b : raw) {
         switch (telnetState_) {
@@ -245,8 +260,21 @@ void Connection::handleNegotiation(TelnetState kind, unsigned char option) {
     // actively refused, matching the real default branches exactly
     // rather than staying silent (a silent non-response can leave a
     // strict telnet client's own negotiation state machine hanging).
+    // TTYPE is a real, separate real TS_WILL case, not a silent accept:
+    // "case TELOPT_TTYPE: add_binary_message(ip->ob, telnet_term_query,
+    // ...); break;" (comm.c:811-813) -- a client volunteering WILL TTYPE
+    // unprompted (this driver does not always send DO TTYPE first, e.g.
+    // a raw socketpair test harness with no Server::onNewConnection() run)
+    // is answered with the same SB TTYPE SEND probe immediately, not the
+    // bare silent accept ECHO/NAWS get. Before this, WILL TTYPE fell
+    // through to the default branch below and was wrongly refused with
+    // IAC DONT TTYPE, a real behavioral bug relative to comm.c.
     if (kind == TelnetState::Will) {
         if (option == kTelOptEcho || option == kTelOptNaws) return;
+        if (option == kTelOptTtype) {
+            requestTerminalType();
+            return;
+        }
         unsigned char resp[] = {kIac, kDont, option};
         send(std::string(reinterpret_cast<char*>(resp), sizeof(resp)));
     } else if (kind == TelnetState::Do) {
@@ -264,7 +292,27 @@ void Connection::handleSubnegotiation() {
     // TELOPT_NAWS: if (ip->sb_pos >= 5) { push_number(sb_buf[1]<<8 |
     // sb_buf[2]); push_number(sb_buf[3]<<8 | sb_buf[4]); ... }") --
     // RFC 1073's own big-endian 16-bit width then height, exactly.
-    if (sbBuffer_.empty() || static_cast<unsigned char>(sbBuffer_[0]) != kTelOptNaws) return;
+    if (sbBuffer_.empty()) return;
+    unsigned char sbOption = static_cast<unsigned char>(sbBuffer_[0]);
+
+    if (sbOption == kTelOptTtype) {
+        // Real "case TELOPT_TTYPE: if (!ip->sb_buf[1]) { copy_and_push_
+        // string(ip->sb_buf + 2); apply(APPLY_TERMINAL_TYPE, ...); }"
+        // (comm.c:1078-1083) -- sb_buf[1] is the TELQUAL byte, only a
+        // TELQUAL_IS(0) response (never a client echoing TELQUAL_SEND(1)
+        // back) carries an actual terminal-type string starting at index 2.
+        if (sbBuffer_.size() >= 2 && static_cast<unsigned char>(sbBuffer_[1]) == kTelQualIs) {
+            terminalType_ = sbBuffer_.substr(2);
+            // Real comm.c fires APPLY_TERMINAL_TYPE every time this
+            // branch runs, not just on a changed value -- matched here
+            // via the same one-shot-flag shape windowSizeUpdated_ below
+            // already uses for its own real "fires every time" apply.
+            terminalTypeUpdated_ = true;
+        }
+        return;
+    }
+
+    if (sbOption != kTelOptNaws) return;
     if (sbBuffer_.size() < 5) return;
     auto byteAt = [&](size_t i) { return static_cast<unsigned char>(sbBuffer_[i]); };
     terminalWidth_ = (byteAt(1) << 8) | byteAt(2);

@@ -103,8 +103,38 @@ public:
     // No idempotency guard in the real efun either -- every call resends.
     void requestWindowSize();
 
+    // Real f_request_term_type() (comm.c): "add_binary_message(command_giver,
+    // telnet_term_query, ...)" -- IAC SB TTYPE SEND IAC SE, asking the client
+    // for its (next) terminal-type string. Real FluffOS's own driver-level
+    // MTTS support is exactly this one efun plus terminal_type() below and
+    // nothing else: the multi-round "ask again, compare to the previous
+    // answer, stop once it repeats or a third round yields \"MTTS <n>\""
+    // convention (the actual Mud Terminal Type Standard) is genuinely
+    // mudlib-side in real FluffOS, driven by calling this efun repeatedly
+    // from the mudlib's own terminal_type() handler -- confirmed directly:
+    // grepped the whole vendored tree, there is no round-counting state, no
+    // "MTTS" string comparison, and no bitmask table anywhere in the driver
+    // itself. No idempotency guard in the real efun either.
+    void requestTerminalType();
+
+    // Real f_start_request_term_type() (comm.c): "add_binary_message(
+    // command_giver, telnet_do_ttype, ...)" -- a bare IAC DO TTYPE, kicking
+    // off negotiation for a connection that was not offered it automatically
+    // (or as an explicit mudlib-side restart). No idempotency guard, same
+    // as the real efun.
+    void startRequestTerminalType();
+
     int terminalWidth() const { return terminalWidth_; }
     int terminalHeight() const { return terminalHeight_; }
+
+    // Real APPLY_TERMINAL_TYPE's own argument: the raw terminal-type string
+    // handed to terminal_type(), unmodified. This driver-added query mirrors
+    // query_screen_width()/query_screen_height() below it in EfunTable.cpp
+    // (their own header comment: "not a port of the real apply-based
+    // mechanism", a driver-added pull-based convenience over the same
+    // real push-based data) -- not a real FluffOS efun target itself, just
+    // a queryable read of the same field the real apply already pushed.
+    const std::string& terminalType() const { return terminalType_; }
 
     // One-shot flag mirroring real comm.c's own "apply(APPLY_WINDOW_SIZE,
     // ip->ob, 2, ORIGIN_DRIVER)" firing every time a NAWS subnegotiation
@@ -119,6 +149,16 @@ public:
     bool takeWindowSizeUpdate() {
         bool had = windowSizeUpdated_;
         windowSizeUpdated_ = false;
+        return had;
+    }
+
+    // Same one-shot shape as takeWindowSizeUpdate() just above, for real
+    // comm.c's own "apply(APPLY_TERMINAL_TYPE, ip->ob, 1, ORIGIN_DRIVER)",
+    // fired every time an SB TTYPE IS subnegotiation is actually parsed
+    // (handleSubnegotiation()), consumed by Server::handleConnection().
+    bool takeTerminalTypeUpdate() {
+        bool had = terminalTypeUpdated_;
+        terminalTypeUpdated_ = false;
         return had;
     }
 
@@ -206,6 +246,8 @@ private:
     int terminalWidth_ = 0;
     int terminalHeight_ = 0;
     bool windowSizeUpdated_ = false;
+    std::string terminalType_;
+    bool terminalTypeUpdated_ = false;
 };
 
 } // namespace amlp

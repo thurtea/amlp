@@ -9,6 +9,169 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-02 (a further session, same day): row 3.3 vs row 3.4 scoped
+and compared, TELOPT_TTYPE negotiation built (row 3.4's first slice).
+With the uid/security cluster (rows 3.1/3.2) closed, this session
+scoped both remaining-named Phase 3 candidates against real source
+before writing any code, picked the smaller and safer of the two, and
+built it. 839 tests passing (up from 833). Row 3.4 now `[ ]
+(partial)`; row 3.3 unchanged (not picked up, see its own finding
+below).**
+
+**Scoping row 3.3 (generational GC).** `src/gc/instruct.md`'s own
+premise -- "replace the current shared_ptr-everywhere memory model with
+a generational garbage collector" -- was checked against real source
+directly rather than trusted, and does not hold up. Real FluffOS 2.9:
+grepped the whole vendored tree for anything GC-shaped
+(`mark_and_sweep`, `garbage_collect`, a `"gc"` func_spec entry); the one
+hit, `reclaim.c`, is not a garbage collector at all -- its own header
+comment says so plainly ("loops through all variables in all objects
+looking for the possibility of freeing up destructed objects"), and its
+body (`check_svalue()`/`gc_mapping()`) only nulls out lingering
+`T_OBJECT` references to already-destructed objects, a periodic
+scrubber layered on top of what is otherwise a plain reference-counted
+driver (`object.h`'s own `ob->ref`, `array.h`'s own `array->ref` --
+exactly the strategy `shared_ptr` already gives this driver today).
+Real LDMud does have a genuine collector, `temp/ldmud/src/gcollect.c`,
+confirmed by reading it directly -- but it is a diagnostic/leak-
+recovery mark-and-sweep pass triggered by an explicit
+`garbage_collection()` efun or a memory-pressure threshold, layered on
+top of still-refcounted memory, not a continuously-running generational
+collector that replaces refcounting. **Finding:** row 3.3's own real
+first slice, if picked up, is porting LDMud's leak-detection/-recovery
+mechanism onto the existing `shared_ptr` model, not the large from-
+scratch generational rewrite `src/gc/instruct.md` describes (still
+explicitly, by the ROADMAP's own words, "the single most invasive
+change in the roadmap" even under this narrower framing, since it
+still touches the object cache, `InteractiveRegistry`, `Scheduler`,
+and `Server` all at once per that same instruct.md). That rescoping is
+its own real investigation and was not done this session -- flagging
+it plainly rather than starting an invasive change on an unverified
+premise.
+
+**Scoping row 3.4 (telnet options + GMCP/MSDP/MSSP/MTTS/MXP).** Read
+real `comm.c` directly for each of the five named protocols rather than
+assuming the row title's own bundling reflects real driver parity.
+GMCP, MSDP, MSSP: zero real source anywhere in the vendored FluffOS 2.9
+(`ds2.08`) tree -- grepped case-insensitively across every `.c`/`.h`
+file and every `packages/` file, nothing; these are later FluffOS
+additions or third-party protocol extensions that postdate this
+project's vendored snapshot, not a porting target at all. MXP: real
+source exists and is small (`comm.c`'s own `TELOPT_MXP` handling,
+`APPLY_MXP_ENABLE`/`APPLY_MXP_TAG`, `f_has_mxp()`), a plausible future
+slice, not picked up this session. TTYPE/MTTS: real source exists and
+is the smallest, safest, most self-contained real target available
+anywhere in this Phase 3 cluster -- confirmed by reading `comm.c`'s
+`new_user()`, `TS_WILL`, `TS_SB`, and the two real efun bodies
+(`f_request_term_type()`/`f_start_request_term_type()`) directly.
+Already flagged as a known gap by this driver's own prior code
+(`Server.cpp`'s own comment: "real new_user() also sends IAC DO TTYPE
+and IAC DO MXP here, neither of which anything in this driver
+processes yet"), touches only `src/net`, and carries no VM/memory-
+model risk whatsoever -- the clear smaller-and-safer choice against row
+3.3's now-confirmed large, still-unscoped invasiveness. Picked.
+
+**Real source, read directly.** `temp/reference/fluffos-2.9-ds2.08/
+comm.c:1693-1704` (`new_user()`: sends `IAC DO TTYPE` before `IAC DO
+NAWS` before `IAC DO MXP`, unprompted, at connection setup -- this
+driver previously sent only the NAWS byte sequence, confirmed by
+reading `Server.cpp`'s own prior code, not just its comment).
+`comm.c:808-838` (`TS_WILL`'s own switch: `TELOPT_TTYPE` answers with
+the real `telnet_term_query[]` probe, `IAC SB TTYPE SEND IAC SE` -- and
+this driver's own prior `handleNegotiation()` had a real, previously-
+unfixed bug here: WILL TTYPE fell through to the default branch and was
+wrongly refused with `IAC DONT TTYPE`, confirmed by reading the prior
+code directly before touching it, not assumed from the row's own
+"gap" framing). `comm.c:1078-1083` (`TS_SB`'s own `TELOPT_TTYPE` case:
+a `TELQUAL_IS(0)` response's payload, from index 2 onward, is handed to
+the mudlib via `apply(APPLY_TERMINAL_TYPE, ip->ob, 1, ORIGIN_DRIVER)`;
+any other TELQUAL byte -- a client echoing `TELQUAL_SEND(1)` back,
+say -- carries no string and is silently ignored). `comm.c:2894-2904`
+(`f_request_term_type()`: resends the `telnet_term_query[]` probe;
+`f_start_request_term_type()`: resends the bare `telnet_do_ttype[]`,
+`IAC DO TTYPE`). `applies.h:30` confirms the real apply name,
+`terminal_type`. `telnet.h:85,120-121` confirms the real option/qualifier
+byte values: `TELOPT_TTYPE = 24`, `TELQUAL_IS = 0`, `TELQUAL_SEND = 1`.
+
+**Real finding that reshaped this row's own scope.** Real FluffOS's
+entire driver-level MTTS mechanism, confirmed by reading `comm.c` in
+full rather than assuming the row title's own five-protocol bundling
+implies five roughly-equal driver-side features, is exactly the three
+primitives above (`terminal_type()` apply, `request_term_type()`,
+`start_request_term_type()`) -- there is no round-counting state, no
+previous-answer comparison, and no bitmask table anywhere in the real
+driver. The actual Mud Terminal Type Standard's own multi-round
+convention (call `request_term_type()` again, compare the new
+`terminal_type()` value against the last one, stop once it repeats or
+a third round yields a client-sent `"MTTS <bitmask>"` string) is
+genuinely mudlib-side in real FluffOS -- the mudlib's own
+`terminal_type()` handler drives the whole loop itself. `src/proto/
+instruct.md`'s own `MttsHandler` design (a driver-side `query_client_
+flags()` efun parsing the bitmask internally) does not match this real
+architecture -- noted here rather than built, the same "real source
+first, flag what has none plainly" discipline row 3.2's `call_other`
+capability-grant finding already established for this Phase 3 area.
+
+**Built.** `Connection::requestTerminalType()`/`startRequestTerminalType()`
+(`Connection.cpp`, mirroring `requestWindowSize()`'s own existing real-
+citation shape exactly), `handleNegotiation()`'s new `WILL TTYPE`
+branch (fixing the DONT-refusal bug above -- a client volunteering WILL
+TTYPE unprompted, e.g. outside this driver's own `Server::
+onNewConnection()` DO-TTYPE-first flow, now gets the real SB TTYPE SEND
+probe instead of a wrong refusal), `handleSubnegotiation()`'s new
+`TELOPT_TTYPE` case (`terminalType_`/`terminalTypeUpdated_`, the same
+one-shot-flag shape `terminalWidth_`/`windowSizeUpdated_` already use,
+including the real "fires every time, not only on a changed value"
+behavior), `Server::onNewConnection()`'s corrected send order (DO TTYPE
+now sent before DO NAWS, matching real `new_user()` exactly; DO MXP
+still not sent, MXP stays fully out of this slice), `Server::
+handleConnection()`'s new `terminal_type()` apply-firing block
+(mirroring the existing `window_size()` block's own shape exactly), and
+three efuns in `EfunTable.cpp`: `request_term_type()`,
+`start_request_term_type()` (both real, matching the two real
+`f_request_term_type()`/`f_start_request_term_type()` bodies), and
+`query_terminal_type(object)` (a driver-added pull-based convenience
+over the same real push-based data, explicitly not a real FluffOS
+efun -- grepped `func_spec.c`/`efun_defs.c`/`applies_table.c` directly,
+zero hits -- the same precedent `query_screen_width()`/
+`query_screen_height()` already set for NAWS).
+
+**6 new regression tests (839 total, up from 833):**
+`testTelnetWillTtypeIsAnsweredWithSbTtypeSendProbeNotRefused` (the real
+bug fix itself -- WILL TTYPE now gets the probe, not a DONT refusal),
+`testTtypeSubnegotiationUpdatesTerminalTypeAndFlagOnce` (SB TTYPE IS
+parsing plus the one-shot flag's consume-once contract, mirroring
+`testWindowSizeUpdateFlagSetOnNawsAndConsumedOnce`'s own shape),
+`testTtypeSubnegotiationWithNonIsQualByteIsIgnored` (the real `!ip->
+sb_buf[1]` TELQUAL guard specifically, not folded into the IS-parsing
+test), `testRequestTermTypeSendsIacSbTtypeSendAndIsNoOpWithoutInteractiveCommandGiver`
+and `testStartRequestTermTypeSendsIacDoTtypeAndIsNoOpWithoutInteractiveCommandGiver`
+(both new efuns' real byte sequences and their silent no-op without an
+interactive command_giver, mirroring `testRequestTermSizeSends...`'s
+own established shape), `testQueryTerminalTypeReturnsNegotiatedValueAndThrowsWhenNotInteractive`
+(the driver-added convenience's value read plus its not-interactive
+throw, mirroring `testQueryScreenWidthAndHeightReturnNegotiatedValues`).
+Full clean rebuild, full suite re-run, 839 passing, zero regressions
+among the pre-existing 833. Live re-boot of the bundled `mudlib/`
+(`./build/amlp etc/driver.cfg`, 5 seconds): stayed silent and running
+the whole time, no compile errors, no crash.
+
+**Row 3.4 marked `[ ] (partial)`.** Real driver-level TTYPE/MTTS
+negotiation is done; MXP (real source exists, not yet ported), GMCP/
+MSDP/MSSP (zero real source in the vendored tree, would be external-
+spec work rather than a port), and the MTTS bitmask-decoding
+convenience `src/proto/instruct.md` originally wanted (deliberately not
+built, per the finding above -- real architecture puts that decode
+entirely on the mudlib side) all remain open in this same row.
+
+`ROADMAP.md` row 3.4 updated in place; row 3.3 untouched (a finding
+recorded in its own row 3.4 cell and here, not a row 3.3 edit, since
+nothing was built or ruled out for row 3.3 itself, only rescoped by
+finding).
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-09-02: `legal_path()` `..`/`#` traversal check, closing row 3.2
 (ROADMAP rows 3.1 / 3.2). The concrete next cut the prior session's
 row 3.2 re-scoping named: `checkValidPath()`'s own comment flagged real

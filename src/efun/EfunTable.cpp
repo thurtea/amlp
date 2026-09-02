@@ -7786,6 +7786,72 @@ void registerCoreEfuns() {
         return Value{};
     });
 
+    // void request_term_type() -- real comm.c's own f_request_term_type():
+    // "add_binary_message(command_giver, telnet_term_query, ...)", a bare
+    // IAC SB TTYPE SEND IAC SE. Row 3.4's own first slice: this, together
+    // with terminal_type() (the real APPLY_TERMINAL_TYPE, fired from
+    // Server::handleConnection()) and start_request_term_type() just below,
+    // is the *entire* real driver-level MTTS mechanism -- confirmed by
+    // reading comm.c directly, not assumed: there is no round-counting
+    // state, no comparison against a previous answer, and no "MTTS <n>"
+    // bitmask table anywhere in the real driver. The actual Mud Terminal
+    // Type Standard multi-round convention (ask again via this efun,
+    // compare to the last terminal_type() value, stop once it repeats or a
+    // third round yields "MTTS <bitmask>") is genuinely mudlib-side in real
+    // FluffOS, not a driver gap -- so it is deliberately not built as a
+    // driver efun here (see this row's own ROADMAP.md cell for the
+    // rescoping this finding drove). Same silent no-interactive-command-
+    // giver no-op as request_term_size() just above, matching real
+    // f_request_term_type()'s own implicit "command_giver->interactive"
+    // write target.
+    t.registerEfun("request_term_type", [](VM& vm, std::vector<Value>&) -> Value {
+        auto giver = resolveCommandGiver(vm);
+        if (!giver) return Value{};
+        if (Connection* conn = InteractiveRegistry::find(giver)) {
+            conn->requestTerminalType();
+        }
+        return Value{};
+    });
+
+    // void start_request_term_type() -- real comm.c's own
+    // f_start_request_term_type(): "add_binary_message(command_giver,
+    // telnet_do_ttype, ...)", a bare IAC DO TTYPE. Distinct from
+    // request_term_type() above exactly as real code keeps them two
+    // separate efuns: this kicks off negotiation itself (real new_user()
+    // already does so unprompted for every telnet connection --
+    // Server::onNewConnection() mirrors that directly -- so the ordinary
+    // case never needs this efun at all); request_term_type() asks for the
+    // next value once negotiation is already under way.
+    t.registerEfun("start_request_term_type", [](VM& vm, std::vector<Value>&) -> Value {
+        auto giver = resolveCommandGiver(vm);
+        if (!giver) return Value{};
+        if (Connection* conn = InteractiveRegistry::find(giver)) {
+            conn->startRequestTerminalType();
+        }
+        return Value{};
+    });
+
+    // string query_terminal_type(object ob) -- not a real FluffOS efun,
+    // confirmed by grepping func_spec.c/efun_defs.c/applies_table.c
+    // directly, zero hits, exactly like query_screen_width()/
+    // query_screen_height() above (see their own header comment): real
+    // FluffOS's own terminal-type delivery is push-based only
+    // (terminal_type(), fired from Server::handleConnection() the moment
+    // an SB TTYPE IS response is parsed). A driver-added pull-based
+    // convenience reading the same Connection::terminalType() field that
+    // real mechanism already fills, empty string until the first response
+    // arrives. Same query-by-object pattern as query_screen_width/height,
+    // not query_ip_number()'s current-connection-only shape.
+    t.registerEfun("query_terminal_type", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("query_terminal_type: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        Connection* conn = ob ? InteractiveRegistry::find(ob) : nullptr;
+        if (!conn) throw LpcRuntimeError("query_terminal_type: ob is not interactive");
+        return Value(conn->terminalType());
+    });
+
     // string terminal_colour(string str, mapping colours, void|int
     // max_colors, void|int indent) -- Phase 0.8's own item 4 (net/
     // instruct.md). Real signature confirmed against efun_defs.c ground

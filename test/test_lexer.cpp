@@ -7050,6 +7050,47 @@ static void testQueryScreenWidthAndHeightReturnNegotiatedValues() {
     std::cout << "testQueryScreenWidthAndHeightReturnNegotiatedValues OK\n";
 }
 
+static void testQueryTerminalTypeReturnsNegotiatedValueAndThrowsWhenNotInteractive() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qtttest.c",
+        "mixed probe(object ob) { return query_terminal_type(ob); }\n");
+    auto ob = harness.objects.cloneObject("/qtttest");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    std::string raw;
+    raw += '\xff'; raw += '\xfa'; raw += '\x18';  // IAC SB TTYPE
+    raw += static_cast<char>(0);                  // TELQUAL_IS
+    raw += "XTERM";
+    raw += '\xff'; raw += '\xf0';                 // IAC SE
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {amlp::Value(ob)});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "XTERM");
+
+    // Not a real FluffOS efun -- see its own header comment -- but must
+    // still throw the same "ob is not interactive" way query_screen_width
+    // does for a non-interactive object, not silently return junk.
+    auto plain = harness.objects.cloneObject("/qtttest");
+    assert(plain != nullptr);
+    bool threw = false;
+    try {
+        harness.vm.callFunction(plain, "probe", {amlp::Value(plain)});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testQueryTerminalTypeReturnsNegotiatedValueAndThrowsWhenNotInteractive OK\n";
+}
+
 static void testInputToNoEchoFlagSendsIacWillEchoImmediately() {
     ObjectVarHarness harness;
     harness.writeFile("/noechotest.c",
@@ -7178,6 +7219,83 @@ static void testWindowSizeUpdateFlagNotSetByPlainDataLines() {
 // triggers are fully covered by the Connection-level tests above; only the
 // one-line call site in Server.cpp itself is unverified by a regression
 // test.
+
+// --- TELOPT_TTYPE negotiation (row 3.4's first slice) --------------------
+// Real comm.c's own TS_WILL case TELOPT_TTYPE (:811-813): answered with
+// the SB TTYPE SEND probe, not the ECHO/NAWS silent accept, and not the
+// default branch's DONT refusal either -- confirmed as a genuine pre-
+// existing bug relative to comm.c (WILL TTYPE previously fell through to
+// that default DONT branch) before this slice.
+
+static void testTelnetWillTtypeIsAnsweredWithSbTtypeSendProbeNotRefused() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    std::string raw;
+    raw += '\xff'; raw += '\xfb'; raw += '\x18';  // IAC WILL TTYPE(24)
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    // Real telnet_term_query[]: IAC SB TTYPE SEND IAC SE.
+    unsigned char expected[] = {255, 250, 24, 1, 255, 240};
+    std::string reply = readAvailable(fds[1]);
+    assert(reply.size() == sizeof(expected));
+    assert(std::memcmp(reply.data(), expected, sizeof(expected)) == 0);
+
+    std::cout << "testTelnetWillTtypeIsAnsweredWithSbTtypeSendProbeNotRefused OK\n";
+}
+
+static void testTtypeSubnegotiationUpdatesTerminalTypeAndFlagOnce() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    assert(conn.terminalType().empty());
+    assert(conn.takeTerminalTypeUpdate() == false);
+
+    // IAC SB TTYPE IS "ANSI" IAC SE -- real "case TELOPT_TTYPE: if
+    // (!ip->sb_buf[1]) { copy_and_push_string(ip->sb_buf + 2); ... }"
+    // (comm.c:1078-1083), sb_buf[1] == TELQUAL_IS(0).
+    std::string raw;
+    raw += '\xff'; raw += '\xfa'; raw += '\x18';  // IAC SB TTYPE
+    raw += static_cast<char>(0);                  // TELQUAL_IS
+    raw += "ANSI";
+    raw += '\xff'; raw += '\xf0';                 // IAC SE
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    assert(conn.terminalType() == "ANSI");
+    // Same one-shot contract as takeWindowSizeUpdate(): consumed once.
+    assert(conn.takeTerminalTypeUpdate() == true);
+    assert(conn.takeTerminalTypeUpdate() == false);
+
+    std::cout << "testTtypeSubnegotiationUpdatesTerminalTypeAndFlagOnce OK\n";
+}
+
+static void testTtypeSubnegotiationWithNonIsQualByteIsIgnored() {
+    // Real code's own "if (!ip->sb_buf[1])" guard: a TELQUAL byte other
+    // than IS(0) (a malformed or unexpected client echo of SEND(1) back,
+    // say) carries no terminal-type string and must not update anything.
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    std::string raw;
+    raw += '\xff'; raw += '\xfa'; raw += '\x18';  // IAC SB TTYPE
+    raw += static_cast<char>(1);                  // TELQUAL_SEND, not IS
+    raw += "ANSI";
+    raw += '\xff'; raw += '\xf0';                 // IAC SE
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    assert(conn.terminalType().empty());
+    assert(conn.takeTerminalTypeUpdate() == false);
+
+    std::cout << "testTtypeSubnegotiationWithNonIsQualByteIsIgnored OK\n";
+}
 
 // --- terminal_colour() (Phase 0.8, net/instruct.md item 4) --------------
 // Algorithm grounded against real daemon/terminal.c's no_colours() and
@@ -20044,6 +20162,68 @@ static void testRequestTermSizeSendsIacDoNawsAndIsNoOpWithoutInteractiveCommandG
     std::cout << "testRequestTermSizeSendsIacDoNawsAndIsNoOpWithoutInteractiveCommandGiver OK\n";
 }
 
+// request_term_type() / start_request_term_type(): real comm.c's own
+// f_request_term_type()/f_start_request_term_type(), same silent-no-op-
+// without-an-interactive-command-giver shape as request_term_size() just
+// above.
+static void testRequestTermTypeSendsIacSbTtypeSendAndIsNoOpWithoutInteractiveCommandGiver() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rtt_probe.c", "void probe() { request_term_type(); }\n");
+    auto probe = harness.objects.cloneObject("/rtt_probe");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(probe, "probe", {});
+    amlp::OutputContext::set(nullptr);
+
+    unsigned char expected[] = {255, 250, 24, 1, 255, 240}; // IAC SB TTYPE SEND IAC SE
+    char buf[16];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n == static_cast<ssize_t>(sizeof(expected)));
+    assert(std::memcmp(buf, expected, sizeof(expected)) == 0);
+    ::close(fds[1]);
+
+    auto plain = harness.objects.cloneObject("/rtt_probe");
+    assert(plain != nullptr);
+    harness.vm.callFunction(plain, "probe", {}); // no interactive command_giver -- silent no-op
+
+    std::cout << "testRequestTermTypeSendsIacSbTtypeSendAndIsNoOpWithoutInteractiveCommandGiver OK\n";
+}
+
+static void testStartRequestTermTypeSendsIacDoTtypeAndIsNoOpWithoutInteractiveCommandGiver() {
+    ObjectVarHarness harness;
+    harness.writeFile("/srtt_probe.c", "void probe() { start_request_term_type(); }\n");
+    auto probe = harness.objects.cloneObject("/srtt_probe");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(probe, "probe", {});
+    amlp::OutputContext::set(nullptr);
+
+    unsigned char expected[] = {255, 253, 24}; // IAC DO TTYPE
+    char buf[16];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n == static_cast<ssize_t>(sizeof(expected)));
+    assert(std::memcmp(buf, expected, sizeof(expected)) == 0);
+    ::close(fds[1]);
+
+    auto plain = harness.objects.cloneObject("/srtt_probe");
+    assert(plain != nullptr);
+    harness.vm.callFunction(plain, "probe", {}); // no interactive command_giver -- silent no-op
+
+    std::cout << "testStartRequestTermTypeSendsIacDoTtypeAndIsNoOpWithoutInteractiveCommandGiver OK\n";
+}
+
 // pluralize(): a mechanical port of packages/contrib.c's real ~440-line
 // C body, verified against a representative slice covering every stage
 // of the real algorithm (default rule, PLURAL_SAME, several chop/suffix
@@ -28062,10 +28242,14 @@ int main() {
     testNawsSubnegotiationUpdatesTerminalWidthAndHeight();
     testNawsSubnegotiationSplitAcrossTwoReadsStillParsesCorrectly();
     testQueryScreenWidthAndHeightReturnNegotiatedValues();
+    testQueryTerminalTypeReturnsNegotiatedValueAndThrowsWhenNotInteractive();
     testInputToNoEchoFlagSendsIacWillEchoImmediately();
     testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives();
     testWindowSizeUpdateFlagSetOnNawsAndConsumedOnce();
     testWindowSizeUpdateFlagNotSetByPlainDataLines();
+    testTelnetWillTtypeIsAnsweredWithSbTtypeSendProbeNotRefused();
+    testTtypeSubnegotiationUpdatesTerminalTypeAndFlagOnce();
+    testTtypeSubnegotiationWithNonIsQualByteIsIgnored();
     testTerminalColourSubstitutesRecognizedTokensWithMaxColorsOn();
     testTerminalColourStripsRecognizedTokensWithMaxColorsOff();
     testTerminalColourLeavesUnrecognizedTokensAndPlainTextAsIs();
@@ -28431,6 +28615,8 @@ int main() {
     testNamedLivingsListsOnlyLivingNamedObjectsWithCommandsEnabledRespectingHidden();
     testQueryNotifyFailPeeksPendingMessageWithoutConsumingIt();
     testRequestTermSizeSendsIacDoNawsAndIsNoOpWithoutInteractiveCommandGiver();
+    testRequestTermTypeSendsIacSbTtypeSendAndIsNoOpWithoutInteractiveCommandGiver();
+    testStartRequestTermTypeSendsIacDoTtypeAndIsNoOpWithoutInteractiveCommandGiver();
     testPluralizeMatchesRealExceptionTableGeneralRulesAndOfClauseAcrossVariousInputs();
     testUniqueMappingGroupsByCallbackResultInFirstAppearanceOrderForClosureAndStringForms();
     testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKeysReturningCount();

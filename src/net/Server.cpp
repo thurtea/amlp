@@ -134,12 +134,15 @@ void Server::onNewConnection(int clientFd) {
 
     auto conn = std::make_shared<Connection>(clientFd);
 
-    // Real new_user() (comm.c): "Ask them for their window size" fires
-    // right at connection setup, unprompted, before master->connect()
-    // even runs ("add_binary_message(ob, telnet_do_naws, ...)"). This
-    // driver sends only the NAWS request (Phase 0.8's own scope); real
-    // new_user() also sends IAC DO TTYPE and IAC DO MXP here, neither of
-    // which anything in this driver processes yet.
+    // Real new_user() (comm.c): "if (external_port[which].kind ==
+    // PORT_TELNET) { add_binary_message(ob, telnet_do_ttype, ...);
+    // add_binary_message(ob, telnet_do_naws, ...); ...
+    // add_binary_message(ob, telnet_do_mxp, ...); }" fires right at
+    // connection setup, unprompted, before master->connect() even runs --
+    // TTYPE first, then NAWS, in that exact real order (row 3.4's own
+    // slice: TTYPE negotiation, matched here; MXP stays unsent, this
+    // driver does not process a client's WILL MXP response yet).
+    conn->send(std::string("\xff\xfd\x18", 3));  // IAC DO TTYPE (255 253 24)
     conn->send(std::string("\xff\xfd\x1f", 3));  // IAC DO NAWS (255 253 31)
 
     OutputContext::set(conn.get());
@@ -490,6 +493,22 @@ void Server::handleConnection(Connection& conn) {
         } catch (const std::exception& e) {
             std::cerr << "[net] connection fd=" << conn.fd()
                        << " window_size() failed: " << e.what() << "\n";
+        }
+        OutputContext::set(nullptr);
+    }
+
+    // Real comm.c: "apply(APPLY_TERMINAL_TYPE, ip->ob, 1, ORIGIN_DRIVER)"
+    // fires on whichever object is currently bound the moment an SB TTYPE
+    // IS response is parsed -- same shape as the window_size block just
+    // above, independent of whether any text line was also completed in
+    // this same poll.
+    if (conn.takeTerminalTypeUpdate() && obj) {
+        OutputContext::set(&conn);
+        try {
+            vm_.callFunction(obj, "terminal_type", {Value(conn.terminalType())});
+        } catch (const std::exception& e) {
+            std::cerr << "[net] connection fd=" << conn.fd()
+                       << " terminal_type() failed: " << e.what() << "\n";
         }
         OutputContext::set(nullptr);
     }

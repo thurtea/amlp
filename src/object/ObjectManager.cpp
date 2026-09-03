@@ -520,6 +520,86 @@ std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const st
     return out.str();
 }
 
+// Real FluffOS's own driver-internal "efun_defined(name)" (distinct
+// from the standard cpp "defined(name)", which real system cpp already
+// evaluates correctly on its own, so left untouched here): a real,
+// hand-rolled preprocessor construct usable inside a real "#if"/"#elif"
+// to conditionally compile mudlib code based on whether a given
+// optional efun is actually compiled into the real driver -- confirmed
+// directly against Dead Souls 3.8.2's own bundled fluffos-2.23-ds03/
+// lex.c:3040 ("if (strcmp(yytext, \"defined\") == 0 || strcmp(yytext,
+// \"efun_defined\") == 0) { ... if (efund) { ihe = lookup_ident(yytext);
+// flag = (ihe && ihe->dn.efun_num != -1); } ... }"), not assumed. This
+// driver shells out to real, unmodified system cpp, which has no
+// knowledge of this driver-specific extension at all -- real corpus:
+// Dead Souls 3.8.2's own secure/sefun/sefun.c (its own real "#if
+// efun_defined(query_charmode)"), lib/editor.c, and cmds/players/env.c
+// all use it, and system cpp's own real "#if" constant-expression
+// evaluator trips over the bare, unexpanded "efun_defined" identifier
+// (a real cpp "#if" defaults *any* undefined bare identifier to 0, real
+// C99 6.10.1p4) immediately followed by "(", producing "0(query_charmode)"
+// -- system cpp's own real "missing binary operator before token '('"
+// diagnostic, blocking secure/sefun/sefun.c from compiling at all.
+// Fixed by rewriting "efun_defined(name)" to a literal "1" or "0" before
+// system cpp ever sees it, using the real driver's own actual efun
+// table (via efunExists, injected from main.cpp -- see
+// ObjectManager::setEfunExistsChecker()'s own comment for why this
+// cannot simply call EfunTable directly from here) -- matching real
+// semantics exactly, not guessing which optional efuns this driver
+// happens to have. Scoped to only "#if"/"#elif" lines specifically,
+// matching the one real grammatical position this construct actually
+// occupies, rather than a blanket text substitution anywhere the bare
+// word "efun_defined" might appear.
+std::string rewriteEfunDefined(const std::string& source,
+                                const std::function<bool(const std::string&)>& efunExists) {
+    std::istringstream in(source);
+    std::ostringstream out;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t hashPos = line.find_first_not_of(" \t");
+        if (hashPos != std::string::npos && line[hashPos] == '#') {
+            size_t kwStart = line.find_first_not_of(" \t", hashPos + 1);
+            size_t kwEnd = kwStart;
+            while (kwEnd != std::string::npos && kwEnd < line.size() &&
+                   std::isalpha(static_cast<unsigned char>(line[kwEnd]))) {
+                ++kwEnd;
+            }
+            bool isIfOrElif = kwStart != std::string::npos &&
+                (line.compare(kwStart, kwEnd - kwStart, "if") == 0 ||
+                 line.compare(kwStart, kwEnd - kwStart, "elif") == 0);
+            if (isIfOrElif) {
+                size_t searchFrom = kwEnd;
+                size_t callPos;
+                while ((callPos = line.find("efun_defined", searchFrom)) != std::string::npos) {
+                    size_t nameStart = line.find_first_not_of(" \t", callPos + 12);
+                    if (nameStart == std::string::npos || line[nameStart] != '(') {
+                        searchFrom = callPos + 12;
+                        continue;
+                    }
+                    nameStart = line.find_first_not_of(" \t", nameStart + 1);
+                    size_t nameEnd = nameStart;
+                    while (nameEnd != std::string::npos && nameEnd < line.size() &&
+                           (std::isalnum(static_cast<unsigned char>(line[nameEnd])) || line[nameEnd] == '_')) {
+                        ++nameEnd;
+                    }
+                    size_t closeParen = line.find_first_not_of(" \t", nameEnd);
+                    if (nameStart == std::string::npos || nameEnd == nameStart ||
+                        closeParen == std::string::npos || line[closeParen] != ')') {
+                        searchFrom = callPos + 12;
+                        continue;
+                    }
+                    std::string efunName = line.substr(nameStart, nameEnd - nameStart);
+                    std::string replacement = efunExists(efunName) ? "1" : "0";
+                    line.replace(callPos, closeParen + 1 - callPos, replacement);
+                    searchFrom = callPos + replacement.size();
+                }
+            }
+        }
+        out << line << "\n";
+    }
+    return out.str();
+}
+
 // ROADMAP.md row 1.2/1.3's own scoping note: real system cpp (see
 // runPreprocessor's own module comment below) hard-errors on any line
 // whose first non-whitespace character is '#' and does not match a real
@@ -651,7 +731,8 @@ struct StagedSource {
 StagedSource stageSourceForPreprocessing(const std::string& originalPath,
                                           const std::string& mudlibRoot,
                                           const std::string& globalIncludeFile,
-                                          const std::vector<std::string>& includeDirs) {
+                                          const std::vector<std::string>& includeDirs,
+                                          const std::function<bool(const std::string&)>& efunExists) {
     StagedSource result;
 
     std::ifstream f(originalPath);
@@ -712,6 +793,7 @@ StagedSource stageSourceForPreprocessing(const std::string& originalPath,
     std::string rewritten = prefix + "# 1 \"" + originalPath + "\"\n" +
         rewriteAbsoluteIncludesRecursive(maskHashQuote(buf.str()), mudlibRoot, includeDirs, originalSourceDir,
                                           activeIncludes, macroDefs, 0);
+    rewritten = rewriteEfunDefined(rewritten, efunExists);
 
     char tmpPathTemplate[] = "/tmp/amlp_src_XXXXXX";
     int fd = mkstemp(tmpPathTemplate);
@@ -962,7 +1044,8 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
     std::vector<std::string> includeDirs = splitIncludeDirs(config_.includeDir(), config_.mudlibRoot());
 
     StagedSource staged =
-        stageSourceForPreprocessing(path, config_.mudlibRoot(), config_.globalIncludeFile(), includeDirs);
+        stageSourceForPreprocessing(path, config_.mudlibRoot(), config_.globalIncludeFile(), includeDirs,
+                                     efunExistsChecker_);
     if (!staged.ok) {
         std::cerr << "[object] " << staged.errorMessage << "\n";
         return nullptr;

@@ -543,6 +543,15 @@ private:
     std::vector<std::shared_ptr<LpcObject>> objectChangeStack_;
     // See commandGiver()/pushCommandGiver()/popCommandGiver().
     std::vector<std::shared_ptr<LpcObject>> commandGiverStack_;
+    // OpCode::TimeExpressionStart/TimeExpressionEnd (Ast.hpp's
+    // TimeExpressionExpr, "time_expression { <body> }"): one timestamp
+    // per still-active (possibly nested) time_expression, innermost
+    // last. A dedicated stack, not the ordinary LPC value stack real
+    // FluffOS itself parks its own two timer values on (interpret.c's
+    // F_TIME_EXPRESSION/F_END_TIME_EXPRESSION) -- avoids any dependency
+    // on the body's own bytecode leaving the LPC stack exactly as it
+    // found it; correctness here never has to reason about that.
+    std::vector<std::chrono::steady_clock::time_point> timeExpressionStack_;
     // See currentVerb(); pushed/popped alongside dispatchCommand()'s own
     // handler calls, a separate stack from commandGiverStack_ since a
     // command() efun call (implemented in EfunTable.cpp, reusing this

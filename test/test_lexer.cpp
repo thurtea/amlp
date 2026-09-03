@@ -3721,6 +3721,76 @@ static void testBitOrAndBitXorVmExecutionOnInts() {
     std::cout << "testBitOrAndBitXorVmExecutionOnInts OK\n";
 }
 
+// "<<"/">>", real C-family bitwise left/right shift (Ast.hpp's
+// BinOp::Shl/Shr, Bytecode.hpp's OpCode::Shl/Shr). Real
+// fluffos-2.23-ds03/grammar.y.pre's own precedence table places these
+// strictly between relational ("%left L_ORDER '<'", looser) and
+// additive ("%left '+' '-'", tighter) -- confirmed by direct reading.
+// Found live against a real third-party mudlib corpus (Dead Souls
+// 3.8.2's own boot attempt): secure/daemon/master.c's own real "((1 <<
+// 10) | (1 << 0))" flag-combining idiom, one of 226 real plain "<<"/
+// ">>" call sites across the corpus.
+static void testShiftOperatorsVmExecutionOnInts() {
+    amlp::Value leftShift = runProbe("return 1 << 4;\n");
+    assert(std::holds_alternative<int64_t>(leftShift.data));
+    assert(std::get<int64_t>(leftShift.data) == 16);
+
+    amlp::Value rightShift = runProbe("return 80 >> 2;\n");
+    assert(std::holds_alternative<int64_t>(rightShift.data));
+    assert(std::get<int64_t>(rightShift.data) == 20);
+
+    // Real corpus shape verbatim (secure/daemon/master.c's own real
+    // eventPrint() flag-combining call): two shifted flags combined
+    // with plain "|".
+    amlp::Value combined = runProbe("return (1 << 10) | (1 << 0);\n");
+    assert(std::holds_alternative<int64_t>(combined.data));
+    assert(std::get<int64_t>(combined.data) == 1025);
+
+    std::cout << "testShiftOperatorsVmExecutionOnInts OK\n";
+}
+
+// Real precedence, not just that the operators parse in isolation:
+// shift must bind tighter than relational (so "1 << 2 < 8" reads as
+// "(1 << 2) < 8", not "1 << (2 < 8)") and looser than additive (so
+// "1 << 1 + 1" reads as "1 << (1 + 1)", not "(1 << 1) + 1") --
+// confirmed against the same real grammar.y.pre precedence table cited
+// above, not assumed to match plain C by convention alone.
+static void testShiftOperatorPrecedenceBetweenRelationalAndAdditive() {
+    amlp::Value relational = runProbe("return (1 << 2 < 8);\n"); // (4) < 8
+    assert(std::holds_alternative<int64_t>(relational.data));
+    assert(std::get<int64_t>(relational.data) == 1);
+
+    amlp::Value additive = runProbe("return 1 << 1 + 1;\n"); // 1 << (1+1) == 4
+    assert(std::holds_alternative<int64_t>(additive.data));
+    assert(std::get<int64_t>(additive.data) == 4);
+
+    std::cout << "testShiftOperatorPrecedenceBetweenRelationalAndAdditive OK\n";
+}
+
+// "<<="/">>=" compound assignment, real corpus evidence:
+// secure/sefun/astar.c's own real "i <<= 1;"/"v >>= 1;" (2 real call
+// sites, the same real binary heap index-doubling/halving idiom this
+// astar pathfinding implementation uses throughout).
+static void testCompoundShiftAssignmentVmExecutionOnInts() {
+    amlp::Value leftShiftEq = runProbe(
+        "int i;\n"
+        "i = 3;\n"
+        "i <<= 2;\n"
+        "return i;\n");
+    assert(std::holds_alternative<int64_t>(leftShiftEq.data));
+    assert(std::get<int64_t>(leftShiftEq.data) == 12);
+
+    amlp::Value rightShiftEq = runProbe(
+        "int v;\n"
+        "v = 40;\n"
+        "v >>= 1;\n"
+        "return v;\n");
+    assert(std::holds_alternative<int64_t>(rightShiftEq.data));
+    assert(std::get<int64_t>(rightShiftEq.data) == 20);
+
+    std::cout << "testCompoundShiftAssignmentVmExecutionOnInts OK\n";
+}
+
 // --- catch(expr) ---------------------------------------------------------
 // Real LPC's own control-flow construct for trapping a runtime error, not
 // a function call (see Ast.hpp's CatchExpr comment; confirmed directly
@@ -3905,6 +3975,49 @@ static void testCatchInlineInsideIfConditionMatchesMasterConnectShape() {
     assert(std::get<int64_t>(successResult.data) == 7); // ob correctly assigned, marker() reachable
 
     std::cout << "testCatchInlineInsideIfConditionMatchesMasterConnectShape OK\n";
+}
+
+// "time_expression { <body> }" -- real fluffos-2.23-ds03's own
+// benchmarking expression (see Ast.hpp's TimeExpressionExpr for the full
+// real-source citation). Real corpus shape verbatim (secure/daemon/
+// master.c's own real GetPerformanceScore()): "ret = time_expression {
+// while(count) { count--; } };".
+static void testTimeExpressionRunsBodyOnceAndEvaluatesToRealElapsedMicroseconds() {
+    ObjectVarHarness harness;
+    harness.writeFile("/time_expr_probe.c",
+        "int ran;\n"
+        "void create() { ran = 0; }\n"
+        "int probe_side_effect() {\n"
+        "    int result;\n"
+        "    result = time_expression { ran = ran + 1; };\n"
+        "    return ran * 1000000 + (result >= 0);\n"
+        "}\n"
+        "int probe_busy_longer_than_trivial() {\n"
+        "    int trivial, busy, count;\n"
+        "    trivial = time_expression { };\n"
+        "    count = 100000;\n"
+        "    busy = time_expression {\n"
+        "        while (count) { count = count - 1; }\n"
+        "    };\n"
+        "    return busy >= trivial;\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/time_expr_probe");
+    assert(obj != nullptr);
+
+    // The body actually ran exactly once (ran == 1), and the result is a
+    // real, non-negative elapsed-microseconds value.
+    amlp::Value sideEffect = harness.vm.callFunction(obj, "probe_side_effect", {});
+    assert(std::holds_alternative<int64_t>(sideEffect.data));
+    assert(std::get<int64_t>(sideEffect.data) == 1000001); // ran==1, result>=0 true
+
+    // A body doing real, measurable work takes at least as long as a
+    // trivial (empty) one -- confirms this is a real timing measurement,
+    // not a stub always returning the same value.
+    amlp::Value busyLonger = harness.vm.callFunction(obj, "probe_busy_longer_than_trivial", {});
+    assert(std::holds_alternative<int64_t>(busyLonger.data));
+    assert(std::get<int64_t>(busyLonger.data) == 1);
+
+    std::cout << "testTimeExpressionRunsBodyOnceAndEvaluatesToRealElapsedMicroseconds OK\n";
 }
 
 // --- throw() -----------------------------------------------------------
@@ -4358,6 +4471,64 @@ static void testWriteFileThenReadFileRoundTripsWithNoLeadingSlashPath() {
 // cover the actual new behavior: deny, path rewrite, and the real
 // per-dialect argument shape.
 
+// Real FluffOS's own actual boot order (confirmed directly against the
+// vendored 2.9 reference's own real main.c: "init_simul_efun(SIMUL_EFUN);
+// init_master();", main.c:311-319) loads the simul_efun object *before*
+// the master object, specifically so a real master's own create() can
+// safely call a real simul_efun -- this driver previously did the
+// reverse (main.cpp's own boot sequence), so master's own create()
+// always saw a still-unset simul_efun object, regardless of which
+// mudlib was used. Found live against a real third-party mudlib corpus
+// (Dead Souls 3.8.2's own boot attempt): secure/daemon/master.c's own
+// real create() calls file_exists() (a real, genuine simul_efun,
+// secure/sefun/files.c), which failed outright ("undefined function or
+// efun: file_exists") until main.cpp's own load order was corrected to
+// match real FluffOS's. This test exercises the same real dependency
+// directly at the ObjectManager level (main.cpp itself has no unit-test
+// path in this suite), proving both that the fix works in the correct
+// order and that the *order* is what matters, not just "load both
+// eventually": the identical master content genuinely fails when
+// loaded before the simul_efun object, the same real symptom this
+// session's own live boot attempt hit.
+static void testMasterObjectCreateCanCallASimulEfunOnlyWhenSimulEfunLoadsFirst() {
+    {
+        ObjectVarHarness harness;
+        harness.writeFile("/simul_efun.c",
+            "int real_file_exists(string s) { return sizeof(s) > 0; }\n");
+        harness.writeFile("/unused.c",
+            "int ready;\n"
+            "void create() { ready = real_file_exists(\"/probe.c\"); }\n"
+            "int query_ready() { return ready; }\n");
+
+        assert(harness.objects.loadSimulEfunObject());
+        assert(harness.objects.loadMasterObject());
+
+        amlp::Value ready = harness.vm.callFunction(
+            harness.objects.masterObject(), "query_ready", {});
+        assert(std::holds_alternative<int64_t>(ready.data));
+        assert(std::get<int64_t>(ready.data) == 1);
+    }
+
+    {
+        // Identical content, wrong order: the simul_efun object is
+        // never loaded at all before master's own create() runs --
+        // reproduces the real original bug exactly, confirming the
+        // fix above is genuinely about *order*, not merely "both
+        // eventually get loaded somehow".
+        ObjectVarHarness harness;
+        harness.writeFile("/simul_efun.c",
+            "int real_file_exists(string s) { return sizeof(s) > 0; }\n");
+        harness.writeFile("/unused.c",
+            "int ready;\n"
+            "void create() { ready = real_file_exists(\"/probe.c\"); }\n"
+            "int query_ready() { return ready; }\n");
+
+        assert(!harness.objects.loadMasterObject());
+    }
+
+    std::cout << "testMasterObjectCreateCanCallASimulEfunOnlyWhenSimulEfunLoadsFirst OK\n";
+}
+
 static void testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero() {
     ObjectVarHarness harness;
     harness.writeFile("/unused.c",
@@ -4789,6 +4960,58 @@ static void testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot() {
     assert(std::get<int64_t>(result.data) == 99);
 
     std::cout << "testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot OK\n";
+}
+
+// Real FluffOS's own driver-internal "#if efun_defined(name)"/"#elif
+// efun_defined(name)" (distinct from the standard cpp "defined(name)"),
+// confirmed directly against Dead Souls 3.8.2's own bundled
+// fluffos-2.23-ds03/lex.c:3040. This driver shells out to real,
+// unmodified system cpp, which has no knowledge of this driver-specific
+// construct at all -- system cpp's own real "#if" constant-expression
+// evaluator defaults the bare, unexpanded "efun_defined" identifier to
+// 0 (real C99 6.10.1p4), immediately followed by "(", producing a real
+// "missing binary operator before token '('" error. Real corpus: Dead
+// Souls 3.8.2's own secure/sefun/sefun.c's real "#if
+// efun_defined(query_charmode)" blocked that file (this mudlib's own
+// configured simul_efun file) from compiling at all. Exercises both
+// real outcomes: a genuinely-registered efun name compiles the guarded
+// branch in, an unregistered one compiles the "#else" branch instead --
+// proving this is a real, live query against the injected checker, not
+// a stub that always answers one way.
+static void testEfunDefinedInIfDirectiveResolvesAgainstTheInjectedEfunChecker() {
+    ObjectVarHarness harness;
+    harness.objects.setEfunExistsChecker([](const std::string& name) {
+        return name == "a_real_registered_efun";
+    });
+
+    harness.writeFile("/efun_defined_probe.c",
+        "int probe() {\n"
+        "#if efun_defined(a_real_registered_efun)\n"
+        "    return 1;\n"
+        "#else\n"
+        "    return 0;\n"
+        "#endif\n"
+        "}\n"
+        "int probe_missing() {\n"
+        "#if efun_defined(some_totally_made_up_efun_name)\n"
+        "    return 1;\n"
+        "#else\n"
+        "    return 0;\n"
+        "#endif\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/efun_defined_probe");
+    assert(obj != nullptr);
+
+    amlp::Value registered = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(registered.data));
+    assert(std::get<int64_t>(registered.data) == 1);
+
+    amlp::Value missing = harness.vm.callFunction(obj, "probe_missing", {});
+    assert(std::holds_alternative<int64_t>(missing.data));
+    assert(std::get<int64_t>(missing.data) == 0);
+
+    std::cout << "testEfunDefinedInIfDirectiveResolvesAgainstTheInjectedEfunChecker OK\n";
 }
 
 // Found live against the same real Dead Souls 3.8.2 boot attempt, a
@@ -9551,6 +9774,82 @@ static void testNestedForeachLoopsDoNotCollideVmExecution() {
     std::cout << "testNestedForeachLoopsDoNotCollideVmExecution OK\n";
 }
 
+// Real fluffos-2.23-ds03's own "decl_block: block | for | foreach ;"
+// (grammar.y.pre), real statement's own "decl_block { $$ = $1.node;
+// pop_n_locals($1.num); }" -- a foreach's own declared loop variable is
+// real, genuine block scope, popped again once the loop ends, matching
+// an ordinary "{ ... }". Found live against a real third-party mudlib
+// corpus (Dead Souls 3.8.2's own boot attempt): secure/daemon/master.c's
+// own real access-config parser has two sequential (sibling, not
+// nested) "foreach(string element in ...)" loops in the same function,
+// previously rejected outright ("codegen: variable \"element\" already
+// declared in this scope") since the loop variable leaked into the
+// enclosing function scope instead of being cleaned up when its own
+// loop ended.
+static void testSiblingForeachLoopsReusingTheSameLoopVariableNameVmExecution() {
+    amlp::Value result = runProbe(
+        "mixed *first, *second;\n"
+        "int total;\n"
+        "first = ({ 1, 2, 3 });\n"
+        "second = ({ 10, 20 });\n"
+        "total = 0;\n"
+        "foreach (int element in first) {\n"
+        "    total = total + element;\n"
+        "}\n"
+        "foreach (int element in second) {\n"
+        "    total = total + element;\n"
+        "}\n"
+        "return total;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 36); // (1+2+3) + (10+20)
+
+    std::cout << "testSiblingForeachLoopsReusingTheSameLoopVariableNameVmExecution OK\n";
+}
+
+// Same real citation as the foreach case just above, the for-loop half:
+// a for-loop's own init-clause-declared variable is real, genuine block
+// scope too, not just foreach's. Previously the identical bug affected
+// both constructs (emitForStmt() never opened a scope for stmt.init's
+// own declared variable either), just not yet hit by any real corpus
+// evidence for the for-loop half specifically until this same session's
+// investigation found and fixed both together.
+static void testSiblingForLoopsReusingTheSameInitDeclaredVariableNameVmExecution() {
+    amlp::Value result = runProbe(
+        "int total;\n"
+        "total = 0;\n"
+        "for (int i = 0; i < 3; i = i + 1) {\n"
+        "    total = total + i;\n"
+        "}\n"
+        "for (int i = 0; i < 5; i = i + 1) {\n"
+        "    total = total + i;\n"
+        "}\n"
+        "return total;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 13); // (0+1+2) + (0+1+2+3+4)
+
+    std::cout << "testSiblingForLoopsReusingTheSameInitDeclaredVariableNameVmExecution OK\n";
+}
+
+// Confirms the fix is real block scoping, not just "no longer throws on
+// redeclaration": the loop variable must be genuinely gone afterward,
+// the same as any other block-scoped local, not merely made reusable.
+static void testForeachLoopVariableIsUnresolvableAfterTheLoopEnds() {
+    bool threw = false;
+    try {
+        runProbe(
+            "mixed *arr;\n"
+            "arr = ({ 1, 2 });\n"
+            "foreach (int element in arr) {\n"
+            "}\n"
+            "return element;\n");
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testForeachLoopVariableIsUnresolvableAfterTheLoopEnds OK\n";
+}
+
 // "array" is not reserved (see Lexer.cpp's kKeywords comment): real code
 // uses it as a plain identifier (secure/SimulEfun/exclude_array.c's own
 // "mixed *array" parameter).
@@ -13259,6 +13558,164 @@ static void testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTim
     std::cout << "testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime OK\n";
 }
 
+// Real modern FluffOS's own "function(<params>) { <body> }" anonymous-
+// function expression (Ast.hpp's AnonFunctionExpr, ROADMAP.md row
+// 3.10's own named blocker, scoped in full before any code was written
+// -- see this session's own prior scoping report and STATUS.md entry
+// for the complete real-source derivation against fluffos-2.23-ds03).
+// Real corpus: Dead Souls 3.8.2's own real secure/daemon/master.c
+// "filter(explode(file, \"\\n\"), function(string line) { ... })".
+//
+// A real, named parameter (not "$1") reachable by name inside a real
+// statement-block body with real control flow (if/return), unlike
+// "(: :)"'s own comma-expression-only body just above -- confirms both
+// halves of what distinguishes this form from the existing closure
+// literal, not just that the syntax parses.
+static void testAnonFunctionExprWithNamedParamAndRealBlockBodyVmExecution() {
+    amlp::Value result = runProbe(
+        "mixed f;\n"
+        "f = function(int n) {\n"
+        "    if (n < 0) {\n"
+        "        return -1;\n"
+        "    }\n"
+        "    return n * 2;\n"
+        "};\n"
+        "return funcall(f, 5) * 100 + funcall(f, -3);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 999); // 10*100 + (-1)
+
+    std::cout << "testAnonFunctionExprWithNamedParamAndRealBlockBodyVmExecution OK\n";
+}
+
+// Real corpus shape (secure/daemon/master.c's own real filter() call,
+// see this test's own header comment above): a real predicate function
+// literal passed directly as a callback argument, not stored in a local
+// first, and called by the *callee* (filter_array's own real per-
+// element invocation), not by the constructing code itself.
+static void testAnonFunctionExprAsFilterArrayPredicateVmExecution() {
+    amlp::Value result = runProbe(
+        "mixed *nums;\n"
+        "nums = filter(({ 1, 2, 3, 4, 5, 6 }), function(int x) {\n"
+        "    return x % 2 == 0;\n"
+        "});\n"
+        "return sizeof(nums) * 100 + nums[0] * 10 + nums[1];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 324); // ({2,4,6}), sizeof 3
+
+    std::cout << "testAnonFunctionExprAsFilterArrayPredicateVmExecution OK\n";
+}
+
+// Real corpus shape (lib/body.c's own real "evaluate(function(){ Dying
+// = 0; });"): a zero-parameter anonymous function that reads and writes
+// the *owning object's* own object variable -- real FluffOS's own
+// function(){} has no local-variable capture at all (see
+// AnonFunctionExpr's own citation), but object variables live on the
+// object, not a call frame, and are unaffected by that restriction,
+// exactly like "(: :)" already established.
+static void testAnonFunctionExprReadsAndWritesOwningObjectsOwnObjectVariableVmExecution() {
+    ObjectVarHarness harness;
+    harness.writeFile("/anonfn_objvar_probe.c",
+        "int counter;\n"
+        "void create() { counter = 10; }\n"
+        "int probe() {\n"
+        "    mixed f;\n"
+        "    f = function() { counter = counter + 1; };\n"
+        "    evaluate(f);\n"
+        "    evaluate(f);\n"
+        "    return counter;\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/anonfn_objvar_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 12);
+
+    std::cout << "testAnonFunctionExprReadsAndWritesOwningObjectsOwnObjectVariableVmExecution OK\n";
+}
+
+// Real corpus shape (lib/persist.c's own real "call_out(function(object
+// p){...}, 1, prev)"): enclosing state reaches the closure by being
+// threaded through as an ordinary extra call-time argument -- not
+// captured -- landing in the closure's own real named parameter exactly
+// like any other function call's argument-to-parameter binding. This is
+// the real mechanism this driver's own existing VM::callClosure()
+// (extraArgs merged in generically, no change needed) already provides
+// for "(: :)"'s own boundArgs; here it is exercised via funcall()'s own
+// ordinary extra-argument passing instead, proving the same real
+// mechanism a real call_out() would use to thread "prev" through also
+// works for this closure kind with zero further driver changes.
+static void testAnonFunctionExprReceivesEnclosingStateOnlyViaExplicitCallArgumentVmExecution() {
+    amlp::Value result = runProbe(
+        "int prev;\n"
+        "prev = 77;\n"
+        "mixed f;\n"
+        "f = function(int p) { return p + 1; };\n"
+        "return funcall(f, prev);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 78);
+
+    std::cout << "testAnonFunctionExprReceivesEnclosingStateOnlyViaExplicitCallArgumentVmExecution OK\n";
+}
+
+// Confirms the real, deliberate design constraint directly, not just its
+// absence of symptoms: real fluffos-2.23-ds03's own compiler.c
+// "deactivate_current_locals()" makes an enclosing local's own name
+// genuinely unresolvable while compiling a "function(){}" body (see
+// AnonFunctionExpr's own citation for the full three-way real-source
+// confirmation) -- this driver's own CodeGen::resolveVariable() throws
+// "codegen: undeclared variable" for exactly the same reason (neither
+// locals_ nor objectVars_ has an entry for it, the enclosing function's
+// own locals_ having been reset to empty before this body compiles),
+// matching real behavior exactly rather than silently resolving to
+// something else. "n" here is a genuine local in the enclosing probe(),
+// never an object variable, so this is not the already-covered "object
+// variable happens to share the name" case.
+static void testAnonFunctionExprCannotReferenceEnclosingFunctionsOwnLocal() {
+    bool threw = false;
+    try {
+        runProbe(
+            "int n;\n"
+            "n = 5;\n"
+            "mixed f;\n"
+            "f = function() { return n; };\n"
+            "return funcall(f);\n");
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testAnonFunctionExprCannotReferenceEnclosingFunctionsOwnLocal OK\n";
+}
+
+// Two different closure kinds nested inside each other, both directions
+// -- exercises CodeGen's own alternating pendingLambdas_/
+// pendingAnonFuncs_ drain loop (CodeGen.cpp's generate(), and
+// CodeGen.hpp's own PendingAnonFunc comment for why it alternates
+// rather than draining each list only once): compiling one kind's body
+// can itself queue the *other* kind, which a single non-alternating
+// pass over each list would miss entirely.
+static void testAnonFunctionExprAndInlineLambdaNestInsideEachOtherVmExecution() {
+    amlp::Value outerAnonInnerLambda = runProbe(
+        "mixed f;\n"
+        "f = function(int x) {\n"
+        "    mixed g;\n"
+        "    g = (: $1 + 1 :);\n"
+        "    return funcall(g, x) * 10;\n"
+        "};\n"
+        "return funcall(f, 4);\n");
+    assert(std::holds_alternative<int64_t>(outerAnonInnerLambda.data));
+    assert(std::get<int64_t>(outerAnonInnerLambda.data) == 50); // (4+1)*10
+
+    amlp::Value outerLambdaInnerAnon = runProbe(
+        "mixed g;\n"
+        "g = (: funcall(function(int y) { return y * 2; }, $1) :);\n"
+        "return funcall(g, 6);\n");
+    assert(std::holds_alternative<int64_t>(outerLambdaInnerAnon.data));
+    assert(std::get<int64_t>(outerLambdaInnerAnon.data) == 12);
+
+    std::cout << "testAnonFunctionExprAndInlineLambdaNestInsideEachOtherVmExecution OK\n";
+}
+
 // "$N" inside a "(: ... :)" lambda body -- real lex.c's own L_PARAMETER
 // token, an implicit reference to the closure's own Nth call-time
 // argument. See Ast.hpp's LambdaParamExpr comment for the full citation:
@@ -13337,6 +13794,116 @@ static void testDollarParamOutsideLambdaBodyThrowsParseError() {
     }
     assert(threw);
     std::cout << "testDollarParamOutsideLambdaBodyThrowsParseError OK\n";
+}
+
+static void testDollarParenOutsideLambdaBodyThrowsParseError() {
+    // Same real "illegal outside of function pointer" condition as
+    // testDollarParamOutsideLambdaBodyThrowsParseError just above,
+    // for the "$(expr)" bound-value form instead of a bare "$N" (see
+    // Ast.hpp's InlineLambdaExpr::boundValueExprs comment and Parser.cpp's
+    // own "$(" handling): a bare "$(x)" in ordinary code, never inside a
+    // "(: ... :)", is equally illegal.
+    std::string src = "int probe() {\n    int x;\n    return $(x);\n}\n";
+    bool threw = false;
+    try {
+        amlp::Lexer lexer(src);
+        amlp::Parser parser(lexer.tokenize());
+        parser.parseProgram();
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("illegal outside of function pointer") != std::string::npos);
+    }
+    assert(threw);
+    std::cout << "testDollarParenOutsideLambdaBodyThrowsParseError OK\n";
+}
+
+static void testDollarParenBoundValueCapturesEnclosingScopeAtConstructionTimeVmExecution() {
+    // Real LPC's own "$(expr)" bound-variable form (see Ast.hpp's
+    // InlineLambdaExpr::boundValueExprs comment for the full
+    // fluffos-2.23-ds03 real-source citation: grammar.y.pre's own
+    // "'$' '(' comma_expr ')'" production and icode.c's own
+    // current_num_values offsetting). Confirms three things at once:
+    // "$(target)" is evaluated once, at construction time (target's
+    // *current* value, 5, not whatever it later becomes, 99, by the
+    // time the closure is actually called); it lands in a real bound-
+    // argument slot ahead of the closure's own explicit "$1"; and that
+    // explicit "$1" (this closure's own real call-time argument) is
+    // still correctly offset past it, matching real icode.c's own
+    // "which = expr->v.number + current_num_values" exactly.
+    ObjectVarHarness harness;
+    harness.writeFile("/dollarparen_probe.c",
+        "int target;\n"
+        "void create() { target = 0; }\n"
+        "int probe() {\n"
+        "    mixed f;\n"
+        "    target = 5;\n"
+        "    f = (: $(target) == $1 :);\n"
+        "    target = 99;\n"
+        "    return evaluate(f, 5) * 10 + evaluate(f, 99);\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/dollarparen_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    // evaluate(f, 5): captured target (5, at construction time) == 5 -> 1.
+    // evaluate(f, 99): captured target (still 5, not the later 99) == 99 -> 0.
+    assert(std::get<int64_t>(result.data) == 10);
+
+    std::cout << "testDollarParenBoundValueCapturesEnclosingScopeAtConstructionTimeVmExecution OK\n";
+}
+
+static void testDollarParenMultipleBoundValuesAssignedSequentialSlotsInEncounterOrderVmExecution() {
+    // Confirms multiple "$(expr)" bindings within one closure body each
+    // get their own real, distinct slot in encounter order (real
+    // icode.c's own "current_function_context->values_list->kind++"),
+    // not aliased onto the same slot or onto each other.
+    ObjectVarHarness harness;
+    harness.writeFile("/dollarparen_multi_probe.c",
+        "int probe() {\n"
+        "    int a, b;\n"
+        "    mixed f;\n"
+        "    a = 3;\n"
+        "    b = 7;\n"
+        "    f = (: $(a) + $(b) * 100 :);\n"
+        "    return evaluate(f);\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/dollarparen_multi_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 703);
+
+    std::cout << "testDollarParenMultipleBoundValuesAssignedSequentialSlotsInEncounterOrderVmExecution OK\n";
+}
+
+static void testDollarParenBoundValueCapturesEnclosingFunctionsOwnLocalUsedAsFilterPredicateVmExecution() {
+    // Real corpus shape (Dead Souls 3.8.2's own lib/exits.c/lib/door.c
+    // and similar): "filter(arr, (: $1 != $(exclude) :))" -- an explicit
+    // "$N" call-time argument (each array element filter() passes in)
+    // combined with a "$(expr)" value bound from the *enclosing
+    // function's own local variable* -- something a bare "(: :)" body
+    // itself could never reach directly (real grammar's "Illegal to use
+    // local variable in functional"), but "$(expr)" is compiled at the
+    // literal's own construction site, in the enclosing function's own
+    // scope, precisely so it can.
+    ObjectVarHarness harness;
+    harness.writeFile("/dollarparen_filter_probe.c",
+        "int probe() {\n"
+        "    int exclude;\n"
+        "    mixed *arr, *result;\n"
+        "    exclude = 3;\n"
+        "    arr = ({ 1, 2, 3, 4, 5 });\n"
+        "    result = filter(arr, (: $1 != $(exclude) :));\n"
+        "    return sizeof(result);\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/dollarparen_filter_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 4);
+
+    std::cout << "testDollarParenBoundValueCapturesEnclosingFunctionsOwnLocalUsedAsFilterPredicateVmExecution OK\n";
 }
 
 // ---------------------------------------------------------------------
@@ -18279,6 +18846,38 @@ static void testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative() {
     assert(threw);
 
     std::cout << "testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative OK\n";
+}
+
+// Real index 23 (__MAX_EVAL_COST__, Dead Souls 3.8.2's own bundled
+// fluffos-2.23-ds03/secure/include/runtime_config.h: "CFG_INT(8)",
+// BASE_CONFIG_INT 15, so 8+15=23) -- real rc.c's own get_config_item()
+// reads this from config_int[], itself loaded directly from the real
+// config file's own "maximum evaluation cost" setting, the exact same
+// real value this driver's own Config::maxEvalCost() already tracks,
+// not a fabricated statistic. Found live against a real third-party
+// mudlib corpus (Dead Souls 3.8.2's own boot attempt): secure/daemon/
+// master.c's own real create() does "eval_threshold =
+// (get_config(__MAX_EVAL_COST__) / 1000000) + 1;", the required master
+// object failing to load without it. An index this driver still has no
+// real source for (e.g. 1, a real but unimplemented string-kind entry)
+// keeps throwing, exactly as before this fix.
+static void testGetConfigReturnsMaxEvalCostForIndexTwentyThree() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> args{ amlp::Value(int64_t{23}) };
+    amlp::Value result = amlp::EfunTable::instance().call("get_config", harness.vm, args);
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == harness.config.maxEvalCost());
+
+    std::vector<amlp::Value> unimplementedArgs{ amlp::Value(int64_t{1}) };
+    bool threw = false;
+    try {
+        amlp::EfunTable::instance().call("get_config", harness.vm, unimplementedArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testGetConfigReturnsMaxEvalCostForIndexTwentyThree OK\n";
 }
 
 static void testQueryLoadAverageReturnsAStringInRealFormat() {
@@ -28881,6 +29480,9 @@ int main() {
     testBitAndVmExecutionOnInts();
     testBitAndVmExecutionOnArraysIsIntersection();
     testBitOrAndBitXorVmExecutionOnInts();
+    testShiftOperatorsVmExecutionOnInts();
+    testShiftOperatorPrecedenceBetweenRelationalAndAdditive();
+    testCompoundShiftAssignmentVmExecutionOnInts();
     testCatchEvaluatesToErrorMessageStringWhenGuardedExprThrows();
     testCatchEvaluatesToZeroAndDiscardsGuardedExprValueOnSuccess();
     testExecutionContinuesNormallyAfterCatchTrapsAnError();
@@ -28888,6 +29490,7 @@ int main() {
     testCatchLogsTrappedErrorToStderrByDefault();
     testCatchTrapsErrorThrownInsideCalledFunctionWithNoCatchOfItsOwn();
     testCatchInlineInsideIfConditionMatchesMasterConnectShape();
+    testTimeExpressionRunsBodyOnceAndEvaluatesToRealElapsedMicroseconds();
     testThrowIntIsCaughtVerbatimByCatch();
     testThrowStringIsCaughtVerbatimByCatch();
     testThrowArrayValueIsCaughtVerbatimByCatch();
@@ -28909,6 +29512,7 @@ int main() {
     testReadFileReturnsFileContentAndFalsyForMissingFile();
     testWriteFileThenReadFileRoundTrips();
     testWriteFileThenReadFileRoundTripsWithNoLeadingSlashPath();
+    testMasterObjectCreateCanCallASimulEfunOnlyWhenSimulEfunLoadsFirst();
     testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero();
     testValidWriteRewritesPathWhenMasterReturnsAString();
     testValidWriteReceivesRealArgumentShapePerDialect();
@@ -28922,6 +29526,7 @@ int main() {
     testAbsoluteIncludePathResolvesAgainstMudlibRoot();
     testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves();
     testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot();
+    testEfunDefinedInIfDirectiveResolvesAgainstTheInjectedEfunChecker();
     testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody();
     testRecursiveIncludeResolvesARelativeQuotedIncludeAgainstItsOwnIncludingFilesDirectory();
     testRecursiveIncludeResolvesAnAngleBracketIncludeReachedTransitively();
@@ -29075,6 +29680,9 @@ int main() {
     testForeachOverMappingTwoVarGivesKeyValuePairsVmExecution();
     testBreakAndContinueInsideForeachVmExecution();
     testNestedForeachLoopsDoNotCollideVmExecution();
+    testSiblingForeachLoopsReusingTheSameLoopVariableNameVmExecution();
+    testSiblingForLoopsReusingTheSameInitDeclaredVariableNameVmExecution();
+    testForeachLoopVariableIsUnresolvableAfterTheLoopEnds();
     testArrayUsableAsParameterNameNotReservedAsType();
     testTrailingVarargsEllipsisParsesAndIsDiscarded();
     testOpenEndedRangeIndexVmExecution();
@@ -29201,10 +29809,20 @@ int main() {
     testInlineLambdaWithCallExpressionFirstOperandParsesAsInlineLambdaExpr();
     testInlineLambdaBareStringConstantParsesAsInlineLambdaExpr();
     testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime();
+    testAnonFunctionExprWithNamedParamAndRealBlockBodyVmExecution();
+    testAnonFunctionExprAsFilterArrayPredicateVmExecution();
+    testAnonFunctionExprReadsAndWritesOwningObjectsOwnObjectVariableVmExecution();
+    testAnonFunctionExprReceivesEnclosingStateOnlyViaExplicitCallArgumentVmExecution();
+    testAnonFunctionExprCannotReferenceEnclosingFunctionsOwnLocal();
+    testAnonFunctionExprAndInlineLambdaNestInsideEachOtherVmExecution();
     testDollarLambdaParamBindsClosuresOwnFirstCallTimeArgument();
     testDollarLambdaParamMultipleParametersBindPositionally();
     testDollarLambdaParamFilterMatchesRealEventsDShape();
     testDollarParamOutsideLambdaBodyThrowsParseError();
+    testDollarParenOutsideLambdaBodyThrowsParseError();
+    testDollarParenBoundValueCapturesEnclosingScopeAtConstructionTimeVmExecution();
+    testDollarParenMultipleBoundValuesAssignedSequentialSlotsInEncounterOrderVmExecution();
+    testDollarParenBoundValueCapturesEnclosingFunctionsOwnLocalUsedAsFilterPredicateVmExecution();
     testFunctionPointerCallThroughParsesToForcedEvaluateCall();
     testFunctionPointerCallThroughOnIndexedTargetParses();
     testFunctionPointerCallThroughVmExecutionCallsClosure();
@@ -29361,6 +29979,7 @@ int main() {
     testCpCopiesFileContentAndReturnsTruthy();
     testInheritsMatchesTransitiveChainInBothDirections();
     testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative();
+    testGetConfigReturnsMaxEvalCostForIndexTwentyThree();
     testQueryLoadAverageReturnsAStringInRealFormat();
     testSayBroadcastsToRoomSiblingsButNotOriginItself();
     testSayAvoidArgumentExcludesSpecifiedTarget();

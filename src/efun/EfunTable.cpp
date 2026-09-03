@@ -11639,18 +11639,35 @@ void registerCoreEfuns() {
     // "#define MUD_NAME CONFIG_STR(__MUD_NAME__)" plus get_config_item()'s
     // own "num < BASE_CONFIG_INT" string branch, base index 0) is
     // implemented, matching this row's own real, tested call site
-    // (get_config(0) == MUD_NAME). Every other index -- including any
-    // negative index, real get_config_item()'s own explicit "num < 0"
-    // failure branch -- throws a clear error rather than fabricating
-    // driver-internal statistics this codebase has no real source for,
-    // the same architecture-mismatch category as mud_status()/
-    // cache_stats() above.
+    // (get_config(0) == MUD_NAME).
+    //
+    // Index 23 (real __MAX_EVAL_COST__, Dead Souls 3.8.2's own bundled
+    // fluffos-2.23-ds03/secure/include/runtime_config.h: "#define
+    // __MAX_EVAL_COST__ CFG_INT(8)", CFG_INT(x) = x + BASE_CONFIG_INT,
+    // BASE_CONFIG_INT = BASE_CONFIG_STR(0) + 15 = 15, so 8 + 15 = 23)
+    // added the same way: real rc.c's own get_config_item() reads this
+    // straight out of config_int[], itself loaded directly from the
+    // real config file's own "maximum evaluation cost : %d" line
+    // (rc.c's own real scan_config_line() call) -- the exact same real
+    // setting this driver's own Config::maxEvalCost() already tracks
+    // (etc/driver_*.cfg's own "max_eval_cost:" key), not a fabricated
+    // statistic this driver has no source for at all, unlike
+    // mud_status()/cache_stats()'s own genuine architecture mismatch.
+    // Found live against a real third-party mudlib corpus (Dead Souls
+    // 3.8.2's own boot attempt): secure/daemon/master.c's own real
+    // create() does "eval_threshold = (get_config(__MAX_EVAL_COST__) /
+    // 1000000) + 1;", the required master object failing to load
+    // without it. Every other index -- including any negative index,
+    // real get_config_item()'s own explicit "num < 0" failure branch --
+    // still throws a clear error rather than fabricating a value this
+    // codebase has no real source for, same as before.
     t.registerEfun("get_config", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("get_config: expected an int argument");
         }
         int64_t what = std::get<int64_t>(args[0].data);
         if (what == 0) return Value(vm.mudName());
+        if (what == 23) return Value(static_cast<int64_t>(vm.config().maxEvalCost()));
         throw LpcRuntimeError("get_config: unsupported or invalid config index");
     });
 

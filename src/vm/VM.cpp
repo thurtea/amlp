@@ -1874,6 +1874,40 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 break;
             }
 
+            // Real C-family bitwise left/right shift, int-only (real
+            // eoperators.c's own f_lsh()/f_rsh(), real trees.c's own
+            // constant-folding case: "case F_LSH: l->v.number <<=
+            // r->v.number; break;" -- a plain, unguarded C shift on the
+            // real underlying "long", no extra bounds/overflow handling
+            // of its own beyond what the host C compiler already does,
+            // matched here exactly rather than adding validation real
+            // FluffOS itself does not have). Found live against a real
+            // third-party mudlib corpus (Dead Souls 3.8.2's own boot
+            // attempt): secure/daemon/master.c's own real "((1 << 10) |
+            // (1 << 0))" flag-combining idiom -- see Lexer.cpp's own
+            // citation for the full corpus count.
+            case OpCode::Shl:
+            case OpCode::Shr: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("Shl/Shr: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+
+                if (!std::holds_alternative<int64_t>(lhs.data) ||
+                    !std::holds_alternative<int64_t>(rhs.data)) {
+                    throw LpcRuntimeError(
+                        std::string(instr.op == OpCode::Shl ? "Shl" : "Shr") +
+                        ": operands must both be ints");
+                }
+                int64_t result = (instr.op == OpCode::Shl)
+                    ? (std::get<int64_t>(lhs.data) << std::get<int64_t>(rhs.data))
+                    : (std::get<int64_t>(lhs.data) >> std::get<int64_t>(rhs.data));
+                localStack.emplace_back(Value(result));
+                ++ip;
+                break;
+            }
+
             // Real interpret.c's own F_COMPL: "if (sp->type != T_NUMBER)
             // error(\"Bad argument to ~\n\"); sp->u.number =
             // ~sp->u.number;" -- a direct C bitwise complement, int-only.
@@ -1959,6 +1993,31 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 }
                 catchFrames.pop_back();
                 localStack.emplace_back(Value(static_cast<int64_t>(0)));
+                ++ip;
+                break;
+            }
+
+            // See VM.hpp's timeExpressionStack_ comment and Bytecode.hpp's
+            // own TimeExpressionStart/TimeExpressionEnd comment for the
+            // full runtime picture.
+            case OpCode::TimeExpressionStart: {
+                timeExpressionStack_.push_back(std::chrono::steady_clock::now());
+                ++ip;
+                break;
+            }
+
+            case OpCode::TimeExpressionEnd: {
+                // CodeGen always emits a matching TimeExpressionStart
+                // before any TimeExpressionEnd, so an empty stack here
+                // would be a codegen bug, not a real runtime condition.
+                if (timeExpressionStack_.empty()) {
+                    throw LpcRuntimeError("TimeExpressionEnd: no active time_expression");
+                }
+                auto start = timeExpressionStack_.back();
+                timeExpressionStack_.pop_back();
+                auto elapsedUsec = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                localStack.emplace_back(Value(static_cast<int64_t>(elapsedUsec)));
                 ++ip;
                 break;
             }

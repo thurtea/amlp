@@ -42,6 +42,7 @@ private:
     void emitLogicalExpr(const BinaryExpr& bin);
     void emitTernaryExpr(const TernaryExpr& tern);
     void emitCatchExpr(const CatchExpr& catchExpr);
+    void emitTimeExpressionExpr(const TimeExpressionExpr& timeExpr);
     void emitAssignExpr(const AssignExpr& assign);
     void emitIndexAssignExpr(const IndexAssignExpr& assign);
     void emitIncDecExpr(const IncDecExpr& incDec);
@@ -145,6 +146,47 @@ private:
     std::vector<PendingLambda> pendingLambdas_;
     int nextLambdaId_ = 0;
     void emitPendingLambdas();
+
+    // Real "$(expr)" offsetting (see Ast.hpp's LambdaParamExpr::
+    // isBoundValue comment and icode.c's own current_num_values): set by
+    // emitPendingLambdas() right before compiling each pending lambda's
+    // own bodyExprs, to that lambda's own InlineLambdaExpr::
+    // boundValueExprs.size() -- the number of slots its own "$(expr)"
+    // bindings already occupy (0..K-1), so every ordinary "$N" reference
+    // encountered while compiling that same body can be shifted past
+    // them (K..K+paramCount-1). Read only inside the LambdaParamExpr
+    // emitExpr() case; a nested "(: :)" lambda's own body is never
+    // compiled here (it only gets queued into pendingLambdas_, see
+    // InlineLambdaExpr's own emitExpr() case), so this is never stale by
+    // the time it is actually read.
+    size_t currentLambdaBoundValueCount_ = 0;
+
+    // Same deferred-compilation shape as PendingLambda just above, for
+    // real "function(<params>) { <body> }" anonymous-function literals
+    // (Ast.hpp's AnonFunctionExpr) instead -- a genuinely different
+    // compilation path (real named parameters via declareLocal(), a
+    // real Block body via emitBlock(), not InlineLambdaExpr's own
+    // paramCount/bodyExprs shape), so kept as its own parallel list
+    // rather than folded into PendingLambda itself. A separate queue,
+    // not a variant sharing one, since the two bodies are compiled
+    // through genuinely different logic (declareLocal()+emitBlock() vs.
+    // the $N-slot-reservation+comma-expression loop) -- see
+    // emitPendingAnonFuncs()'s own comment. generate()'s own top-level
+    // loop drains both this and pendingLambdas_ in alternation until
+    // both are empty, since a body compiled while draining either one
+    // can itself queue more of either kind (a "(: :)" nested inside a
+    // "function(){}" body, or vice versa) -- no real corpus evidence
+    // either nesting actually occurs in any vendored mudlib, but this
+    // costs nothing extra to get right regardless, the same "handle a
+    // lambda body queuing more lambdas" defensiveness
+    // emitPendingLambdas() already has for its own single kind.
+    struct PendingAnonFunc {
+        std::string name;
+        const AnonFunctionExpr* expr = nullptr;
+    };
+    std::vector<PendingAnonFunc> pendingAnonFuncs_;
+    int nextAnonFuncId_ = 0;
+    void emitPendingAnonFuncs();
 };
 
 } // namespace amlp

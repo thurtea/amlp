@@ -48,6 +48,20 @@ enum class OpCode : uint8_t {
     // needs it, only the plain-int flags-bitmask shape).
     BitOr,
     BitXor,
+    // "<<"/">>": real C-family bitwise left/right shift, int-only (real
+    // interpret.c's own F_LSH/F_RSH, real eoperators.c's own f_lsh()/
+    // f_rsh() both gate on "CHECK_TYPES(..., T_NUMBER, ...)" for each
+    // operand, confirmed directly -- see Ast.hpp's BinOp::Shl/Shr
+    // comment for the real corpus evidence this driver previously had
+    // no plain "<<"/">>" binary operator at all). VM.cpp's own error
+    // message on a type mismatch follows this driver's own established
+    // BitAnd/BitOr/BitXor convention (a driver-authored "Shl/Shr:
+    // operands must both be ints" message), not real bad_argument()'s
+    // own dynamic multi-line "Bad argument N to ... Expected: ...
+    // Got: ..." format, which is not a fixed string worth literally
+    // replicating here.
+    Shl,
+    Shr,
     // Unary "~": one's-complement bitwise NOT, int-only (real
     // interpret.c's own F_COMPL: "if (sp->type != T_NUMBER) error(\"Bad
     // argument to ~\n\"); sp->u.number = ~sp->u.number;" -- see Ast.hpp's
@@ -146,6 +160,23 @@ enum class OpCode : uint8_t {
     // trees.c) -- catch(expr) never evaluates to expr's own value, only
     // to 0 or the error message.
     PopCatchFrame,
+    // "time_expression { <body> }" (see Ast.hpp's TimeExpressionExpr
+    // comment for the full real-source citation and corpus evidence).
+    // Unlike PushCatchFrame/PopCatchFrame's own jump-target bracketing,
+    // these carry no operand at all: TimeExpressionStart records a
+    // timestamp on VM's own dedicated timeExpressionStack_ (not the
+    // ordinary LPC value stack -- avoids any dependency on the body's
+    // own bytecode being perfectly stack-neutral, unlike real FluffOS's
+    // own approach of parking the two timer values *underneath* the
+    // body's own execution on its single shared stack), the body's own
+    // already-compiled bytecode runs immediately after, in place (not
+    // deferred/hoisted the way a closure literal's body is -- this is
+    // an ordinary, immediate expression, never a first-class value), and
+    // TimeExpressionEnd pops that timestamp, computes the real elapsed
+    // microseconds, and pushes it as a plain int -- the whole
+    // construct's own result.
+    TimeExpressionStart,
+    TimeExpressionEnd,
     Return,
     Pop,
     Dup,

@@ -19,6 +19,38 @@ public:
 
     void setVM(VM* vm) { vm_ = vm; }
 
+    // Real FluffOS's own driver-internal "efun_defined(name)" (distinct
+    // from the standard cpp "defined(name)", which real system cpp
+    // already handles correctly on its own): a real, hand-rolled
+    // preprocessor construct (fluffos-2.23-ds03's own lex.c:3040, "if
+    // (strcmp(yytext, \"defined\") == 0 || strcmp(yytext,
+    // \"efun_defined\") == 0)") usable inside a real "#if"/"#elif" to
+    // conditionally compile mudlib code based on whether a given optional
+    // efun is actually compiled into the real driver -- real semantics:
+    // "ihe->dn.efun_num != -1" against the real driver's own efun table.
+    // This driver shells out to real, unmodified system cpp (see
+    // ObjectManager.cpp's own runPreprocessor() module comment), which
+    // has no knowledge of this driver-specific extension at all, so
+    // "efun_defined(name)" must be rewritten to a literal "1"/"0" before
+    // system cpp ever sees it -- exactly the same "system cpp cannot
+    // resolve this, so this driver's own pre-pass must" discipline
+    // rewriteAbsoluteIncludesRecursive() already established for a
+    // mudlib-root-relative absolute include. That rewrite needs to ask
+    // "does *this* driver actually implement efun X", i.e. EfunTable, but
+    // this whole object library cannot link against efun at all (efun
+    // already depends on object -- see src/efun/CMakeLists.txt -- so the
+    // reverse dependency would be a real link cycle), so the answer is
+    // injected here as a plain callback instead, wired from main.cpp
+    // (which already links both, no cycle) right after
+    // registerCoreEfuns() populates the real table. Defaults to "nothing
+    // is a known efun" when never set (e.g. this driver's own test
+    // harnesses, none of which exercise this real corpus construct) --
+    // real, correct behavior for that case too: with no checker wired
+    // in, nothing can honestly be confirmed available.
+    void setEfunExistsChecker(std::function<bool(const std::string&)> checker) {
+        efunExistsChecker_ = std::move(checker);
+    }
+
     bool loadMasterObject();
     std::shared_ptr<LpcObject> masterObject() const { return master_; }
 
@@ -248,6 +280,11 @@ private:
 
     Config& config_;
     VM* vm_ = nullptr;
+    // See setEfunExistsChecker()'s own comment. Defaults to "nothing is
+    // a known efun" until main.cpp wires the real EfunTable-backed one
+    // in.
+    std::function<bool(const std::string&)> efunExistsChecker_ =
+        [](const std::string&) { return false; };
     UidModel uidModel_;
     std::shared_ptr<LpcObject> master_;
     std::shared_ptr<LpcObject> simulEfunObject_;

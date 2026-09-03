@@ -77,6 +77,13 @@ int main(int argc, char** argv) {
     amlp::ObjectManager objectManager(config);
     amlp::VM vm(objectManager, config);
     objectManager.setVM(&vm);
+    // See ObjectManager::setEfunExistsChecker()'s own comment: this is
+    // the one place that can safely see both EfunTable (already
+    // populated by registerCoreEfuns() above) and ObjectManager without
+    // creating a link cycle between the object and efun libraries.
+    objectManager.setEfunExistsChecker([](const std::string& name) {
+        return amlp::EfunTable::instance().exists(name);
+    });
 
     amlp::Scheduler scheduler(vm);
     vm.setScheduler(&scheduler);
@@ -86,6 +93,41 @@ int main(int argc, char** argv) {
     std::cout << "  mudlib_root = " << config.mudlibRoot() << "\n";
     std::cout << "  master_file = " << config.masterFile() << "\n";
     std::cout << "  port        = " << config.port() << "\n";
+
+    // Real FluffOS's own actual boot order, confirmed directly against
+    // the vendored 2.9 reference's own real main.c (not assumed):
+    // "save_context(&econ); if (SETJMP(econ.context)) { debug_message(
+    // \"The simul_efun (%s) and master (%s) objects must be loadable.
+    // \n\", SIMUL_EFUN, MASTER_FILE); exit(-1); } else { init_simul_efun
+    // (SIMUL_EFUN); init_master(); }" (main.c:311-319) -- simul_efun
+    // loads *first*, master second, the reverse of this driver's own
+    // prior order. Real LDMud takes a different, lazy approach instead
+    // (assert_simul_efun_object(), src/simul_efun.c, called on-demand
+    // from interpret.c at an actual simul_efun call site, not eagerly at
+    // boot at all -- the master-then-inaugurate_master ordering the
+    // comment on applyInaugurateMaster() below cites, real LDMud
+    // src/main.c:661-687, is about LDMud's own master/inaugurate_master
+    // sequence specifically, not a claim that simul_efun must load after
+    // master there too), but loading simul_efun eagerly, before master,
+    // is still fully compatible with that lazy real semantics -- nothing
+    // about "load it lazily on first use" is violated by a driver that
+    // simply chooses to have it already available whenever that first
+    // use happens to come. Found live necessary for FluffOS specifically
+    // against a real third-party mudlib corpus (Dead Souls 3.8.2's own
+    // boot attempt): secure/daemon/master.c's own real create() calls
+    // file_exists() (a real, genuine simul_efun, secure/sefun/files.c),
+    // and this driver's own prior master-first order meant
+    // objects_.simulEfunObject() was always still null at that point,
+    // for every single mudlib, not just this one -- "undefined function
+    // or efun: file_exists" every time, regardless of dialect.
+    if (!config.simulEfunFile().empty()) {
+        if (objectManager.loadSimulEfunObject()) {
+            std::cout << "Simul_efun object loaded: " << config.simulEfunFile() << "\n";
+        } else {
+            std::cerr << "Warning: failed to load simul_efun object "
+                       << config.simulEfunFile() << " (continuing without it)\n";
+        }
+    }
 
     if (!objectManager.loadMasterObject()) {
         std::cerr << "Failed to load master object: " << config.masterFile() << "\n";
@@ -114,26 +156,17 @@ int main(int argc, char** argv) {
     // and the actual reason set_driver_hook()/H_MOVE_OBJECT0 dispatch
     // (built over the last two sessions) is reachable at all from a real
     // mud simply coming online, not just by hand. Placed here, right
-    // after the master UID query and before the simul_efun load,
-    // matching real main.c's own exact real ordering (main.c:661-663
-    // runs before assert_simul_efun_object() at main.c:687). A no-op
-    // under FluffOS/DGD (no equivalent apply exists there at all).
+    // after the master UID query, matching real LDMud's own exact real
+    // ordering (main.c:661-663 runs before assert_simul_efun_object() at
+    // main.c:687 -- LDMud's own master-then-simul_efun relative order,
+    // unaffected by moving *this driver's own* simul_efun load earlier;
+    // see the real FluffOS citation above this function's own simul_efun
+    // load for why that move was needed). A no-op under FluffOS/DGD (no
+    // equivalent apply exists there at all).
     if (auto inaugurateApply = bootApi->inaugurateMasterApply()) {
         std::cout << "  master " << *inaugurateApply << "(0) ...\n";
     }
     amlp::applyInaugurateMaster(vm, *bootApi);
-
-    // Non-fatal: an unconfigured or currently-uncompilable simul_efun
-    // file should not block the rest of the driver from booting (see
-    // ObjectManager::loadSimulEfunObject()'s comment).
-    if (!config.simulEfunFile().empty()) {
-        if (objectManager.loadSimulEfunObject()) {
-            std::cout << "Simul_efun object loaded: " << config.simulEfunFile() << "\n";
-        } else {
-            std::cerr << "Warning: failed to load simul_efun object "
-                       << config.simulEfunFile() << " (continuing without it)\n";
-        }
-    }
 
     if (!server.listen()) {
         std::cerr << "Failed to start network listener on port " << config.port() << "\n";

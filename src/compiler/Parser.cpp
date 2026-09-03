@@ -265,6 +265,41 @@ AstPtr Parser::parsePrimary() {
         return sym;
     }
 
+    // "$(expr)" -- real LPC's own bound-variable-capture form, legal
+    // only inside a "(: ... :)" body (see Ast.hpp's InlineLambdaExpr::
+    // boundValueExprs and LambdaParamExpr's own comment for the full
+    // real-source grounding: fluffos-2.23-ds03's own grammar.y.pre
+    // "'$' '(' comma_expr ')'" production and icode.c's own
+    // current_num_values offsetting). Lexer::lexLambdaParam() now
+    // returns a bare "$" Symbol token whenever a digit does not
+    // immediately follow (matching real lex.c's own "if (!isdigit(c =
+    // *outp++)) { outp--; return '$'; }" exactly, deferring validity to
+    // the Parser same as real LPC does), so this is the one place that
+    // decides what a bare "$" actually means: real grammar's only
+    // production consuming a bare "'$'" token is this one, immediately
+    // followed by "(". Only a single expr is parsed here, not a full
+    // comma_expr (real grammar's own "comma_expr" production) -- every
+    // real "$(expr)" site found across this repo's own vendored mudlib
+    // corpora (Dead Souls 3.8.2 included) uses exactly one expression
+    // inside the parens, never a comma-separated sequence, so a bare
+    // parseExpr() already covers every real, confirmed use.
+    if (checkText("$") && peekAt(1).text == "(") {
+        if (lambdaBoundValuesStack_.empty()) {
+            throw LpcRuntimeError(
+                "$(...) illegal outside of function pointer");
+        }
+        advance(); // $
+        advance(); // (
+        AstPtr valueExpr = parseExpr();
+        expectText(")", "$(...) bound value");
+        int slot = static_cast<int>(lambdaBoundValuesStack_.back().size());
+        lambdaBoundValuesStack_.back().push_back(std::move(valueExpr));
+        auto param = std::make_unique<LambdaParamExpr>();
+        param->index = slot;
+        param->isBoundValue = true;
+        return param;
+    }
+
     if (checkText("(") && peekAt(1).text == "[") {
         advance(); // (
         advance(); // [
@@ -439,6 +474,9 @@ AstPtr Parser::parsePrimary() {
         // inside it belongs to *this* lambda, not an outer one it might
         // be nested inside (see lambdaParamMaxStack_'s own comment).
         lambdaParamMaxStack_.push_back(0);
+        // Same, for this lambda's own "$(expr)" bound values (see
+        // lambdaBoundValuesStack_'s own comment).
+        lambdaBoundValuesStack_.emplace_back();
         for (;;) {
             lambda->bodyExprs.push_back(parseExpr());
             if (checkText(",")) {
@@ -449,9 +487,36 @@ AstPtr Parser::parsePrimary() {
         }
         lambda->paramCount = lambdaParamMaxStack_.back();
         lambdaParamMaxStack_.pop_back();
+        lambda->boundValueExprs = std::move(lambdaBoundValuesStack_.back());
+        lambdaBoundValuesStack_.pop_back();
         expectText(":", "closure literal");
         expectText(")", "closure literal");
         return lambda;
+    }
+
+    // "function(<params>) { <body> }" -- real modern FluffOS's own
+    // anonymous-function *expression* (see Ast.hpp's AnonFunctionExpr
+    // for the full real-source citation: fluffos-2.23-ds03's own
+    // "expr0: ... | L_BASIC_TYPE '(' argument ')' block", gated on the
+    // L_BASIC_TYPE token being specifically TYPE_FUNCTION). "function"
+    // is already an ordinary type keyword this driver recognizes
+    // elsewhere (a parameter/return type, e.g. Dead Souls' own real
+    // "mixed apply_unguarded(function f)"); this is the one place that
+    // decides whether a "function" token starts a real anonymous-
+    // function literal instead -- only when immediately followed by
+    // "(" does it, matching the real grammar's own shape exactly and
+    // leaving every other use of "function" as an ordinary type token
+    // completely unaffected (those never reach parsePrimary() at all,
+    // parsed instead by parseDeclPrefix()/parseParamList() in their own
+    // type-position contexts).
+    if (check(TokenType::Keyword) && peek().text == "function" && peekAt(1).text == "(") {
+        advance(); // function
+        advance(); // (
+        auto anonFn = std::make_unique<AnonFunctionExpr>();
+        anonFn->params = parseParamList();
+        expectText(")", "anonymous function parameters");
+        anonFn->body = parseBlock();
+        return anonFn;
     }
 
     // "(*fp)(args...)" -- call-through-a-function-pointer-value syntax
@@ -626,6 +691,21 @@ AstPtr Parser::parsePrimary() {
             auto catchExpr = std::make_unique<CatchExpr>();
             catchExpr->guarded = std::move(guarded);
             return catchExpr;
+        }
+
+        // "time_expression { <body> }" -- real fluffos-2.23-ds03's own
+        // benchmarking expression (see Ast.hpp's TimeExpressionExpr for
+        // the full real-source citation and corpus evidence). Real
+        // grammar shares the identical "expr_or_block" nonterminal
+        // catch(expr) does just above ("block | '(' comma_expr ')'"),
+        // and is recognized the same not-a-reserved-keyword way; only
+        // the block form is implemented, the mirror image of catch's
+        // own "only the parenthesized form" choice -- all 4 real corpus
+        // call sites use "{ ... }", none use "( ... )".
+        if (name == "time_expression" && checkText("{")) {
+            auto timeExpr = std::make_unique<TimeExpressionExpr>();
+            timeExpr->body = parseBlock();
+            return timeExpr;
         }
 
         if (!checkText("(")) {
@@ -835,7 +915,7 @@ AstPtr Parser::parsePostfix() {
 }
 
 AstPtr Parser::parseComparison() {
-    AstPtr left = parseAdditive();
+    AstPtr left = parseShift();
 
     while (checkText("<") || checkText("<=") || checkText(">") || checkText(">=")) {
         std::string opText = advance().text;
@@ -843,6 +923,34 @@ AstPtr Parser::parseComparison() {
                  : (opText == "<=") ? BinOp::Lte
                  : (opText == ">") ? BinOp::Gt
                  : BinOp::Gte;
+
+        auto right = parseShift();
+        auto bin = std::make_unique<BinaryExpr>();
+        bin->op = op;
+        bin->left = std::move(left);
+        bin->right = std::move(right);
+        left = std::move(bin);
+    }
+
+    return left;
+}
+
+// "<<"/">>" (real C-family bitwise left/right shift). Real
+// fluffos-2.23-ds03/grammar.y.pre's own precedence table places these
+// ("%left L_LSH L_RSH") strictly between relational ("%left L_ORDER
+// '<'", looser) and additive ("%left '+' '-'", tighter) -- confirmed by
+// direct reading, not assumed to match plain C. Found live against a
+// real third-party mudlib corpus (Dead Souls 3.8.2's own boot attempt):
+// secure/daemon/master.c's own real "((1 << 10) | (1 << 0))"
+// flag-combining idiom, one of 226 real plain "<<"/">>" call sites
+// across the corpus (see Lexer.cpp's own citation for the full count
+// and the 2 real compound "<<="/">>=" sites).
+AstPtr Parser::parseShift() {
+    AstPtr left = parseAdditive();
+
+    while (checkText("<<") || checkText(">>")) {
+        std::string opText = advance().text;
+        BinOp op = (opText == "<<") ? BinOp::Shl : BinOp::Shr;
 
         auto right = parseAdditive();
         auto bin = std::make_unique<BinaryExpr>();
@@ -1017,6 +1125,7 @@ AstPtr Parser::parseUnary() {
             {"+=", BinOp::Add}, {"-=", BinOp::Sub}, {"*=", BinOp::Mul},
             {"/=", BinOp::Div}, {"%=", BinOp::Mod},
             {"|=", BinOp::BitOr}, {"&=", BinOp::BitAnd}, {"^=", BinOp::BitXor},
+            {"<<=", BinOp::Shl}, {">>=", BinOp::Shr},
         };
         for (const auto& [opText, binOp] : kCompoundOps) {
             if (checkText(opText)) {
@@ -1638,6 +1747,7 @@ AstPtr Parser::parseStatement() {
                     {"+=", BinOp::Add}, {"-=", BinOp::Sub}, {"*=", BinOp::Mul},
                     {"/=", BinOp::Div}, {"%=", BinOp::Mod},
                     {"|=", BinOp::BitOr}, {"&=", BinOp::BitAnd}, {"^=", BinOp::BitXor},
+                    {"<<=", BinOp::Shl}, {">>=", BinOp::Shr},
                 };
                 for (const auto& [opText, binOp] : kCompoundOps) {
                     if (checkText(opText)) {

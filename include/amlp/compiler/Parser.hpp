@@ -87,6 +87,7 @@ private:
     AstPtr parseBitAnd();
     AstPtr parseEquality();
     AstPtr parseComparison();
+    AstPtr parseShift();
     AstPtr parseAdditive();
     AstPtr parseMultiplicative();
     AstPtr parseUnary();
@@ -106,6 +107,17 @@ private:
     // inside a lambda body", the real "$var illegal outside of function
     // pointer" condition -- see parsePrimary()'s own "$N" handling.
     std::vector<int> lambdaParamMaxStack_;
+
+    // Parallel to lambdaParamMaxStack_ above, one entry per "(: ... :)"
+    // body currently being parsed: the real "$(expr)" bound-value
+    // expressions encountered so far within that lambda specifically, in
+    // encounter order (see Ast.hpp's InlineLambdaExpr::boundValueExprs
+    // for the full real-source citation). Each "expr" inside a "$(expr)"
+    // is itself parsed and pushed here immediately, then this lambda's
+    // whole accumulated vector is moved into InlineLambdaExpr::
+    // boundValueExprs once its body finishes parsing -- see parsePrimary()'s
+    // own "(: :)" handling and its own "$(" handling.
+    std::vector<std::vector<AstPtr>> lambdaBoundValuesStack_;
 };
 
 } // namespace amlp

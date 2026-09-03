@@ -184,11 +184,19 @@ Token Lexer::lexNumber() {
 Token Lexer::lexLambdaParam() {
     int startLine = line_;
     advance(); // '$'
+    // Real lex.c's own '$' case (fluffos-2.23-ds03): "if (!isdigit(c =
+    // *outp++)) { outp--; return '$'; }" -- a bare, single-character '$'
+    // token, unconditionally, whenever a digit does not immediately
+    // follow (never a lexer-level error). Real grammar.y.pre's own
+    // "'$' '(' comma_expr ')'" is the one production that ever consumes
+    // this bare token (Ast.hpp's InlineLambdaExpr::boundValueExprs --
+    // real, bound-at-construction-time closure values, e.g. "(:
+    // eventCast($(spell), $1) :)"); anything else following a bare '$'
+    // is a genuine parse-time error, not a lexical one, so this returns
+    // the token uninterpreted and lets Parser.cpp decide, matching real
+    // lex.c's own division of labor exactly.
     if (!std::isdigit(static_cast<unsigned char>(peek()))) {
-        throw LpcRuntimeError(
-            "lexer: '$' must be followed by a digit (\"$N\") at line " +
-            std::to_string(startLine) +
-            " -- the \"$(expr)\" bound-variable form is not implemented");
+        return Token{TokenType::Symbol, "$", startLine};
     }
     std::string text = "$";
     while (!atEnd() && std::isdigit(static_cast<unsigned char>(peek()))) {
@@ -356,10 +364,7 @@ Token Lexer::lexSymbol() {
     // third-party mudlib corpus (row 3.8's TMI-2 boot attempt):
     // adm/obj/master/access.c's own "access[path][name] |= WRITE;",
     // a real, common LPC permission-bitmask idiom -- corpus-wide, TMI-2
-    // alone has 30 "|=", 6 "&=", 2 "^=" real call sites. Shift operators
-    // ("<<"/">>"/"<<="/">>=") are a separate, unevidenced gap (zero real
-    // hits anywhere in that same corpus, and this driver has no plain
-    // "<<"/">>" binary operator at all yet either) -- not added here.
+    // alone has 30 "|=", 6 "&=", 2 "^=" real call sites.
     if ((c == '|' || c == '&' || c == '^') && peek() == '=') {
         advance();
         return Token{TokenType::Symbol, std::string(1, c) + "=", startLine};
@@ -371,6 +376,37 @@ Token Lexer::lexSymbol() {
     if (c == '!' && peek() == '=') {
         advance();
         return Token{TokenType::Symbol, "!=", startLine};
+    }
+    // Shift operators ("<<"/">>", real C-family bitwise left/right
+    // shift, and their compound-assignment forms "<<="/">>=") -- row
+    // 3.8's own TMI-2 pass explicitly left these unimplemented ("a
+    // separate, unevidenced gap"), and this driver had no plain "<<"/
+    // ">>" binary operator at all before now. Found live against a
+    // real third-party mudlib corpus (Dead Souls 3.8.2's own boot
+    // attempt): secure/daemon/master.c's own real "((1 << 10) | (1 <<
+    // 0))" flag-combining idiom alone blocked this driver's own
+    // required master object from compiling at all; a corpus-wide scan
+    // found 226 real plain "<<"/">>" call sites and 2 real compound
+    // ones (secure/sefun/astar.c's own "i <<= 1;"/"v >>= 1;"), so both
+    // forms are real, not speculative. "<<=" must be checked before a
+    // bare "<<" (and "<" alone) or the greedy two-char match would
+    // leave a stray "=" behind for the next token -- same three-step
+    // lookahead shape "..."/".." already uses just below.
+    if (c == '<' && peek() == '<') {
+        advance();
+        if (peek() == '=') {
+            advance();
+            return Token{TokenType::Symbol, "<<=", startLine};
+        }
+        return Token{TokenType::Symbol, "<<", startLine};
+    }
+    if (c == '>' && peek() == '>') {
+        advance();
+        if (peek() == '=') {
+            advance();
+            return Token{TokenType::Symbol, ">>=", startLine};
+        }
+        return Token{TokenType::Symbol, ">>", startLine};
     }
     if (c == '<' && peek() == '=') {
         advance();

@@ -9,15 +9,173 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
-**2026-09-03 (a further session, same day): the row 3.10 architectural
-gap (the include-rewrite pass only recursing into two special-cased
-entry points) is closed. 2 further real driver bugs found and fixed
-with real citations, real fixes, and real regression tests (857
-tests, up from 851, zero regressions). Boot now progresses fully past
-the whole cpp/preprocessing layer, into pure parser territory, and is
-newly blocked on a real, different, and genuinely larger closure-
-literal language feature -- named plainly and stopped at, per this
-session's own explicit instruction not to force past it.**
+**2026-09-03 (a further session, continuing further): the row 3.10
+`function(params) { body }` anonymous-function feature is built, per
+this session's own prior scoping report and explicit go-ahead. 7
+further real driver bugs found and fixed with real citations, real
+fixes, and real regression tests while continuing the same boot
+attempt (877 tests total, up from 857, zero regressions at every
+step). Boot now progresses deep into `secure/sefun/sefun.c`'s own
+transitively-spliced content and is newly blocked on real LPC's own
+`...` array/call spread operator -- a genuinely new VM primitive, not
+a narrow fix -- named plainly and stopped at, per the standing
+instruction not to force past a real architectural blocker.**
+
+Implemented exactly as scoped in the immediately preceding session's
+report (not re-derived here; see that report below for the full real-
+source citations this rests on): `AnonFunctionExpr` (`Ast.hpp`), real
+named parameters via `declareLocal()`, a real `Block` body via
+`emitBlock()`, no lexical capture (confirmed real FluffOS behavior,
+three independent source confirmations, not this driver's own
+shortcut). Compiles through a new `CodeGen::PendingAnonFunc`/
+`emitPendingAnonFuncs()` deferred-compile path, structurally parallel
+to the existing `PendingLambda`/`emitPendingLambdas()` one for `(: :)`
+but genuinely distinct code (real parameters + a real statement block,
+not `$N`-slot reservation + a comma-expression loop). `generate()`'s
+own top-level per-function loop now drains both pending lists in
+alternation until both are empty, since compiling one kind's body can
+queue more of either kind.
+
+Re-attempting the Dead Souls boot after this landed found 7 further
+real, narrow bugs, each fixed the same rigor as every prior row 3.10
+fix (real citation, real fix, real regression test, full build+test
+after each):
+
+5. Real `<<`/`>>`/`<<=`/`>>=` shift operators were entirely
+   unimplemented end to end (Lexer never tokenized them, Parser had no
+   precedence level for them, CodeGen/VM had no opcodes). Added
+   `BinOp::Shl`/`Shr`, `Parser::parseShift()` at the real precedence
+   `fluffos-2.23-ds03/grammar.y.pre`'s own table puts it (`%left
+   L_ORDER '<'` then `%left L_LSH L_RSH` then `%left '+' '-'` --
+   between relational and additive), and `OpCode::Shl`/`Shr` in
+   VM.cpp (plain C `<<`/`>>` on `int64_t`, unguarded, matching real
+   FluffOS's own unguarded `l->v.number <<= r->v.number`).
+
+6. `time_expression { body }` was entirely unimplemented. Added
+   `TimeExpressionExpr` (`Ast.hpp`), `OpCode::TimeExpressionStart`/
+   `TimeExpressionEnd` (VM.cpp, `std::chrono::steady_clock`, real
+   elapsed microseconds pushed as the expression's own value).
+
+7. `emitForStmt()`/`emitForeachStmt()` never pushed their own
+   `localScopeStack_` scope around their own declared loop variable,
+   so it leaked into the enclosing function's scope permanently
+   instead of being popped at loop end (real grammar's own
+   `decl_block: block | for | foreach; ... pop_n_locals($1.num)`).
+   Found live: two sibling `foreach`/`for` loops in the same function
+   reusing the same loop-variable name collided. Fixed by wrapping
+   both emitters in a scope push/pop matching the real grammar's own
+   shape.
+
+8. `get_config()` was missing real index 23 (`__MAX_EVAL_COST__` =
+   `CFG_INT(8)` = `8 + BASE_CONFIG_INT(15)` = 23, confirmed against
+   real `runtime_config.h`/`rc.c`, loaded from Dead Souls' own real
+   "maximum evaluation cost" config line). Needed by
+   `secure/daemon/master.c`.
+
+9. This driver's own boot order in `main.cpp` loaded the master object
+   before the simul_efun object -- the reverse of real FluffOS's own
+   actual order, confirmed directly against real
+   `fluffos-2.9-ds2.08/main.c:311-319`: `init_simul_efun(SIMUL_EFUN);
+   init_master();`, simul_efun first. An existing comment on this same
+   code had cited real LDMud's own `main.c:661-687` as if it justified
+   FluffOS's own order, but that citation is genuinely about a
+   different dialect's own different, lazy on-demand
+   `assert_simul_efun_object()` semantics (confirmed against
+   `temp/ldmud/src/main.c`/`simul_efun.c`) -- accurate for LDMud
+   specifically, misapplied here to justify the wrong order for
+   FluffOS. Fixed by reordering (simul_efun loads first, matching real
+   FluffOS), and confirmed the fix does not violate LDMud's own lazy
+   semantics either (eager pre-loading does not contradict "load on
+   first use"). Dead Souls' own real `secure/daemon/master.c::create()`
+   calls `file_exists()`, a real simul_efun (`secure/sefun/files.c`),
+   so this blocked every mudlib under the old order, not just this
+   one.
+
+10. Real `efun_defined(name)` inside a `#if`/`#elif` preprocessor line
+    was entirely unresolved (real cpp itself understands this as an
+    internal builtin; this driver shells out to system `cpp`, which
+    does not). Added `rewriteEfunDefined()` (`ObjectManager.cpp`),
+    mirroring real `lex.c:3040`'s own `defined`/`efun_defined`
+    handling shape, replacing each occurrence with a literal `"1"`/
+    `"0"` before staging for cpp, resolved against the same
+    `efunExistsChecker_` callback the recursive-include work already
+    wired through (`ObjectManager`/`EfunTable`, no new link-cycle risk).
+
+11. Real LPC's own `$(expr)` bound-variable closure-capture form
+    (`grammar.y.pre`'s own `'$' '(' comma_expr ')'` production, inside
+    a `(: ... :)` body) was entirely unimplemented -- confirmed live,
+    pervasive, and reachable: `secure/sefun/events.c`'s own
+    `SetAttack(targets, (: eventCast($(spell), $(arg), $(targets)) :),
+    ...)`, plus real uses across `body.c`/`door.c`/`exits.c`/
+    `living.c`/`magic.c`/`firearm.c` and more. Reverse-engineered its
+    real semantics directly from `fluffos-2.23-ds03`'s own `icode.c`
+    (`current_num_values`, lines 41/533-544/761-767) rather than
+    guessing: each `$(expr)` occurrence gets its own sequential 0-based
+    slot in encounter order, evaluated once at the closure literal's
+    own *construction* site (the enclosing function's current scope,
+    not the closure body's own later, separate scope), and any
+    explicit `$N` elsewhere in the same body is offset by the total
+    `$(expr)` count for that closure (`which = expr->v.number +
+    current_num_values`). This reuses the identical mechanism this
+    driver's own `ClosureLiteralExpr::boundArgs` already has (bound
+    values merged ahead of call-time `extraArgs` in
+    `VM::callClosure()`, via `PushClosure`'s own argCount-based
+    bundling) rather than needing anything architecturally new --
+    assessed in-session as comparable in scope to fixes 5-10 above,
+    not to `function(){}`'s own genuine architectural novelty, so
+    implemented directly within this same boot-attempt chain rather
+    than triggering a separate scope-then-wait cycle. `Lexer.cpp`'s
+    `lexLambdaParam()` now returns a bare `$` `Symbol` token (matching
+    real `lex.c`'s own exact `'` case) instead of throwing when no
+    digit follows, deferring the "must be followed by `(`" validity
+    check to the Parser, exactly as real LPC does. `InlineLambdaExpr`
+    gained `boundValueExprs` (`Ast.hpp`); `LambdaParamExpr` gained
+    `isBoundValue` to distinguish a bound-value's own final slot from
+    an ordinary `$N` still needing the offset; `CodeGen` gained
+    `currentLambdaBoundValueCount_`, set by `emitPendingLambdas()`
+    right before compiling each pending lambda's own body, read only
+    by the `LambdaParamExpr` `emitExpr()` case. 4 new regression tests
+    (construction-time-not-call-time capture with a mixed `$(expr)`/
+    `$N` offset check, multiple `$(expr)` bindings getting distinct
+    sequential slots, a real corpus shape combining `$1` with a
+    `$(expr)` bound from the enclosing function's own *local*
+    variable used as a `filter()` predicate, and the "illegal outside
+    of function pointer" parse error).
+
+Full build and test after every one of the 7 fixes above: 877 tests
+total (873 after fix 10, 877 after the 4 new tests for fix 11), zero
+regressions at any step.
+
+Re-attempting the boot after fix 11 progresses past `sefun.c`'s own
+top-of-file prototype header and deep into its own transitively-
+spliced content (`secure/sefun/events.c`, spliced in via `sefun.c`'s
+own `#include "/secure/sefun/events.c"`) before hitting a new, real,
+and genuinely different blocker: `exclude = ({ exclude..., targets
+});` (and, two lines later, `exclude = ({ exclude..., targets... });`)
+-- real LPC's own `...` array/call spread operator. Confirmed directly
+against `fluffos-2.23-ds03/grammar.y.pre`: `expr_list_node: expr0 |
+expr0 L_DOT_DOT_DOT`, the shared production behind *both*
+`L_ARRAY_OPEN expr_list '}' ')'` (an array literal) and
+`function_call`'s own `expr_list` argument list -- so `...` after
+*any* element of either an array literal or a call's argument list
+(not only the last one) means "expand this array value's own elements
+in place at runtime." This driver implements none of that: the only
+existing `...` handling at all is the unrelated *parameter-
+declaration* varargs form (`mixed args...` in a function signature,
+`Parser.cpp`'s own `checkText("...")` in `parseParamList()`, backing
+real `argument: argument_list L_DOT_DOT_DOT`, a structurally different
+grammar production). `CodeGen`'s own `MakeArray` and `Call` opcodes
+both take a single compile-time-fixed element/argument count baked
+directly into the instruction's own operand (`emitExpr()`'s
+`ArrayLiteralExpr` case: `Instruction{OpCode::MakeArray, 0,
+elements.size()}`; `emitCallExpr()` similarly for `Call`'s own
+argCount) -- a real spread element makes that count only knowable at
+run time, for either use site, needing a genuinely new VM primitive
+(runtime variable-arity array/call construction), not a token-level
+parser fix reusing something that already exists. Named here and
+stopped at rather than forced through, per this project's own standing
+instruction not to force past a real architectural blocker. No further
+attempt made this session past this point.
 
 Scoped first, as asked, before touching anything. **Where the
 recursion stopped:** `rewriteAbsoluteIncludesRecursive()`

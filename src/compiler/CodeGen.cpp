@@ -104,6 +104,8 @@ void CodeGen::emitBinaryExpr(const BinaryExpr& bin) {
         case BinOp::BitAnd: op = OpCode::BitAnd; break;
         case BinOp::BitOr:  op = OpCode::BitOr;  break;
         case BinOp::BitXor: op = OpCode::BitXor; break;
+        case BinOp::Shl: op = OpCode::Shl; break;
+        case BinOp::Shr: op = OpCode::Shr; break;
         default: throw LpcRuntimeError("codegen: unknown BinOp");
     }
     out_->code.push_back(Instruction{op, 0, 0});
@@ -186,6 +188,20 @@ void CodeGen::emitCatchExpr(const CatchExpr& catchExpr) {
     patchJumpToHere(catchFrameIdx);
 }
 
+// "time_expression { <body> }" (see Ast.hpp's TimeExpressionExpr and
+// Bytecode.hpp's TimeExpressionStart/TimeExpressionEnd comments for the
+// full real-source citation and runtime mechanism). Unlike catch(expr)
+// just above, there is no jump-target patching at all: the body always
+// runs, unconditionally, exactly once, in place -- compiled inline via
+// the same emitBlock() an ordinary function body/if/while already use,
+// not deferred/hoisted the way a closure literal's own body is (this is
+// an ordinary, immediate expression, never a first-class value).
+void CodeGen::emitTimeExpressionExpr(const TimeExpressionExpr& timeExpr) {
+    out_->code.push_back(Instruction{OpCode::TimeExpressionStart, 0, 0});
+    emitBlock(*timeExpr.body);
+    out_->code.push_back(Instruction{OpCode::TimeExpressionEnd, 0, 0});
+}
+
 // Assignment used as an expression must leave the assigned value on the
 // stack (its own value, matching real LPC's "x = (y = 5)" reading 5 into
 // x too), unlike emitAssignStmt()'s statement form which just stores and
@@ -216,6 +232,11 @@ void CodeGen::emitAssignExpr(const AssignExpr& assign) {
             case BinOp::BitOr: combineOp = OpCode::BitOr; break;
             case BinOp::BitAnd: combineOp = OpCode::BitAnd; break;
             case BinOp::BitXor: combineOp = OpCode::BitXor; break;
+            // "<<="/">>=" (Parser.cpp's own kCompoundOps, real corpus
+            // evidence in Lexer.cpp's own "<<"/">>" citation) reuse the
+            // same OpCode::Shl/Shr plain binary "<<"/">>" already use.
+            case BinOp::Shl: combineOp = OpCode::Shl; break;
+            case BinOp::Shr: combineOp = OpCode::Shr; break;
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
@@ -412,6 +433,10 @@ void CodeGen::emitExpr(const AstNode& expr) {
         emitCatchExpr(*catchExpr);
         return;
     }
+    if (auto* timeExpr = dynamic_cast<const TimeExpressionExpr*>(&expr)) {
+        emitTimeExpressionExpr(*timeExpr);
+        return;
+    }
     if (auto* idx = dynamic_cast<const IndexExpr*>(&expr)) {
         emitExpr(*idx->target);
         emitExpr(*idx->index);
@@ -458,10 +483,37 @@ void CodeGen::emitExpr(const AstNode& expr) {
         // ordinary function's declared params would occupy -- so this is
         // exactly the same instruction shape emitVarExpr's own
         // VarKind::Local case uses, just without needing a name lookup.
-        out_->code.push_back(Instruction{OpCode::PushLocal, param->index, 0});
+        //
+        // A real "$(expr)" bound value (isBoundValue) already names its
+        // own final slot directly (0..K-1, the lowest slots, see
+        // Ast.hpp's own comment); an ordinary "$N" needs its slot shifted
+        // past however many "$(expr)" bindings this same lambda has --
+        // see currentLambdaBoundValueCount_'s own comment for exactly
+        // where that count comes from.
+        int slot = param->index;
+        if (!param->isBoundValue) {
+            slot += static_cast<int>(currentLambdaBoundValueCount_);
+        }
+        out_->code.push_back(Instruction{OpCode::PushLocal, slot, 0});
         return;
     }
     if (auto* lambda = dynamic_cast<const InlineLambdaExpr*>(&expr)) {
+        // Real "$(expr)" bound values (Ast.hpp's InlineLambdaExpr::
+        // boundValueExprs): emitted here, at the closure literal's own
+        // construction site, in the *enclosing* function's current
+        // scope -- before the lambda's own body is queued below for its
+        // own later, separate compile in a fresh scope -- exactly
+        // matching real grammar.y.pre's own "current_function_context =
+        // ...->parent" switch while compiling each "$(expr)". Bundled
+        // into the Closure's own boundArgs via the identical PushClosure
+        // argCount mechanism ClosureLiteralExpr's own explicit bound-arg
+        // list already uses just above (VM.cpp's own PushClosure case
+        // pops argCount values off the stack into Closure::boundArgs) --
+        // "$(expr)" is real LPC's own syntactic sugar for the same
+        // underlying mechanism.
+        for (const auto& valueExpr : lambda->boundValueExprs) {
+            emitExpr(*valueExpr);
+        }
         // See CodeGen.hpp's PendingLambda comment: the body is compiled
         // later, at the enclosing function's own boundary, not here.
         // "$" can never start (or appear in) a real LPC identifier, so
@@ -470,6 +522,25 @@ void CodeGen::emitExpr(const AstNode& expr) {
         // through the Closure value's own stored functionName.
         std::string name = "$lambda#" + std::to_string(nextLambdaId_++);
         pendingLambdas_.push_back(PendingLambda{name, lambda});
+        int nameIdx = internString(name);
+        out_->code.push_back(Instruction{
+            OpCode::PushClosure, nameIdx,
+            static_cast<int32_t>(lambda->boundValueExprs.size())});
+        return;
+    }
+    if (auto* anonFn = dynamic_cast<const AnonFunctionExpr*>(&expr)) {
+        // See CodeGen.hpp's PendingAnonFunc comment: the body is
+        // compiled later, at the enclosing function's own boundary, not
+        // here -- exactly the same deferred shape as InlineLambdaExpr
+        // just above, reusing the identical PushClosure emission (a
+        // real "function(){}" anonymous function is a Closure value the
+        // same as any other kind, resolved by VM::callClosure() through
+        // the same synthesized-name lookup, no VM change needed at
+        // all). "$" can never start a real LPC identifier, so this name
+        // can never collide with anything user code could reference
+        // directly.
+        std::string name = "$anonfunc#" + std::to_string(nextAnonFuncId_++);
+        pendingAnonFuncs_.push_back(PendingAnonFunc{name, anonFn});
         int nameIdx = internString(name);
         out_->code.push_back(Instruction{OpCode::PushClosure, nameIdx, 0});
         return;
@@ -677,6 +748,11 @@ void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
             case BinOp::BitOr: combineOp = OpCode::BitOr; break;
             case BinOp::BitAnd: combineOp = OpCode::BitAnd; break;
             case BinOp::BitXor: combineOp = OpCode::BitXor; break;
+            // "<<="/">>=" (Parser.cpp's own kCompoundOps, real corpus
+            // evidence in Lexer.cpp's own "<<"/">>" citation) reuse the
+            // same OpCode::Shl/Shr plain binary "<<"/">>" already use.
+            case BinOp::Shl: combineOp = OpCode::Shl; break;
+            case BinOp::Shr: combineOp = OpCode::Shr; break;
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
@@ -727,6 +803,11 @@ void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
             case BinOp::BitOr: combineOp = OpCode::BitOr; break;
             case BinOp::BitAnd: combineOp = OpCode::BitAnd; break;
             case BinOp::BitXor: combineOp = OpCode::BitXor; break;
+            // "<<="/">>=" (Parser.cpp's own kCompoundOps, real corpus
+            // evidence in Lexer.cpp's own "<<"/">>" citation) reuse the
+            // same OpCode::Shl/Shr plain binary "<<"/">>" already use.
+            case BinOp::Shl: combineOp = OpCode::Shl; break;
+            case BinOp::Shr: combineOp = OpCode::Shr; break;
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
@@ -817,7 +898,28 @@ void CodeGen::emitDoWhileStmt(const DoWhileStmt& stmt) {
 // results -- unused -- are explicitly popped, matching how emitStatement's
 // ExprStmt case pops a plain expression statement's value. An absent
 // condition (real LPC's "for (;;)") always takes the loop, matching C.
+// Real fluffos-2.23-ds03's own "decl_block: block | for | foreach ;"
+// (grammar.y.pre), and real statement's own "decl_block { $$ = $1.node;
+// pop_n_locals($1.num); }" -- confirmed directly, not assumed: a
+// for-loop's own init-clause-declared variable ("for (int i = 0; ...)")
+// is real, genuine block scope, popped again once the whole loop ends,
+// the identical real semantics an ordinary "{ ... }" already has. This
+// whole function's own body is wrapped in one localScopeStack_ push/pop
+// (the same mechanism emitBlock() already uses for an ordinary block)
+// so stmt.init's own declared variable(s) are recorded and cleaned up
+// correctly -- previously emitVarDeclStmt() ran with no enclosing scope
+// of its own to record against at all here (only emitBlock()'s callers
+// open one), so "int i" leaked into the *enclosing* function scope
+// permanently, uncleaned, for the rest of the function. Found live
+// against a real third-party mudlib corpus (Dead Souls 3.8.2's own boot
+// attempt) via the identical bug in emitForeachStmt() just below (a
+// real "foreach(string element in ...)" repeated in two sibling,
+// non-nested loops in the same function, secure/daemon/master.c's own
+// real access-config parser) -- fixed here too on the same real-grammar
+// citation, not just the one construct that happened to be hit first.
 void CodeGen::emitForStmt(const ForStmt& stmt) {
+    localScopeStack_.emplace_back();
+
     if (stmt.init) {
         if (auto* varDecl = dynamic_cast<const VarDeclStmt*>(stmt.init.get())) {
             emitVarDeclStmt(*varDecl);
@@ -865,6 +967,11 @@ void CodeGen::emitForStmt(const ForStmt& stmt) {
         patchJumpToHere(jumpIfFalseIdx);
     }
     for (size_t idx : ctx.breakJumps) patchJumpToHere(idx);
+
+    for (const auto& name : localScopeStack_.back()) {
+        locals_.erase(name);
+    }
+    localScopeStack_.pop_back();
 }
 
 // Desugars entirely into the existing opcode set plus one small runtime
@@ -875,7 +982,28 @@ void CodeGen::emitForStmt(const ForStmt& stmt) {
 // normalized array each iteration -- structurally identical to a
 // desugared "for (i = 0; i < sizeof(iter); i++)", reusing loopStack_ for
 // break/continue exactly like emitForStmt() does.
+//
+// Real fluffos-2.23-ds03's own "decl_block: block | for | foreach ;"
+// (grammar.y.pre), real statement's own "decl_block { $$ = $1.node;
+// pop_n_locals($1.num); }" -- confirmed directly, not assumed: a
+// foreach's own declared loop variable(s) are real, genuine block
+// scope, popped again once the whole loop ends, the identical real
+// semantics an ordinary "{ ... }" already has (see emitForStmt()'s own
+// matching comment for the for-loop half of this same real citation).
+// This whole function's own body is wrapped in one localScopeStack_
+// push/pop so every declareLocal() call it makes (the three hidden
+// bookkeeping locals below, and the real, user-visible loop variable(s)
+// declared further down) is recorded and cleaned up correctly --
+// previously none of them were, so a second, sibling (not nested)
+// foreach later in the same function reusing the same loop-variable
+// name failed outright with "already declared in this scope". Found
+// live against a real third-party mudlib corpus (Dead Souls 3.8.2's own
+// boot attempt): secure/daemon/master.c's own real access-config parser
+// has two sequential "foreach(string element in ...)" loops in the same
+// function, real, valid LPC that this bug rejected entirely.
 void CodeGen::emitForeachStmt(const ForeachStmt& stmt) {
+    localScopeStack_.emplace_back();
+
     int id = foreachCounter_++;
     std::string origName = "$foreach_orig_" + std::to_string(id);
     std::string iterName = "$foreach_iter_" + std::to_string(id);
@@ -944,6 +1072,11 @@ void CodeGen::emitForeachStmt(const ForeachStmt& stmt) {
     out_->code.push_back(Instruction{OpCode::Jump, static_cast<int32_t>(loopTop), 0});
     patchJumpToHere(jumpIfFalseIdx);
     for (size_t idx : ctx.breakJumps) patchJumpToHere(idx);
+
+    for (const auto& name : localScopeStack_.back()) {
+        locals_.erase(name);
+    }
+    localScopeStack_.pop_back();
 }
 
 // A dispatch-then-fallthrough shape, evaluated in two passes over
@@ -1338,11 +1471,20 @@ CompiledProgram CodeGen::generate(const Program& program,
         entry.numLocals = static_cast<uint8_t>(nextLocalSlot_);
         result.functions.push_back(entry);
 
-        // Any InlineLambdaExpr this function's own body queued (see
-        // CodeGen.hpp's PendingLambda comment) compiles right here, after
-        // this function's Return, so its bytecode lands at its own
-        // distinct offset rather than inside the function above.
-        emitPendingLambdas();
+        // Any InlineLambdaExpr ("(: :)") or AnonFunctionExpr
+        // ("function(){}") this function's own body queued (see
+        // CodeGen.hpp's own PendingLambda/PendingAnonFunc comments)
+        // compiles right here, after this function's Return, so each
+        // one's bytecode lands at its own distinct offset rather than
+        // inside the function above. Alternated, not called once each,
+        // since compiling one kind's body can itself queue more of the
+        // *other* kind (a "(: :)" nested inside a "function(){}" body,
+        // or vice versa) -- draining until both are empty catches that,
+        // one single pass of each would not.
+        while (!pendingLambdas_.empty() || !pendingAnonFuncs_.empty()) {
+            emitPendingLambdas();
+            emitPendingAnonFuncs();
+        }
     }
 
     out_ = nullptr;
@@ -1368,14 +1510,17 @@ void CodeGen::emitPendingLambdas() {
         ++i;
 
         locals_.clear();
-        // Reserves slots 0..paramCount-1 up front for "$1".."$N" (see
-        // LambdaParamExpr's own PushLocal emission just above) -- real
-        // LPC comma-expr lambda bodies are expression-only, so there is
-        // no "int x;" declaration inside one that could otherwise want
-        // slot 0 for itself; any locals a nested lambda declares get its
-        // own separate slot space in its own later iteration of this
-        // same loop instead.
-        nextLocalSlot_ = pending.expr->paramCount;
+        // Reserves slots 0..K-1 for this lambda's own "$(expr)" bound
+        // values, then K..K+paramCount-1 for "$1".."$N" (see
+        // LambdaParamExpr's own PushLocal emission just above, and
+        // currentLambdaBoundValueCount_'s own comment for why the split
+        // is exactly there) -- real LPC comma-expr lambda bodies are
+        // expression-only, so there is no "int x;" declaration inside
+        // one that could otherwise want a slot of its own; any locals a
+        // nested lambda declares get its own separate slot space in its
+        // own later iteration of this same loop instead.
+        currentLambdaBoundValueCount_ = pending.expr->boundValueExprs.size();
+        nextLocalSlot_ = static_cast<int>(currentLambdaBoundValueCount_) + pending.expr->paramCount;
         localScopeStack_.clear();
         loopStack_.clear();
         foreachCounter_ = 0;
@@ -1385,6 +1530,12 @@ void CodeGen::emitPendingLambdas() {
         FunctionEntry entry;
         entry.name = pending.name;
         entry.entryPoint = static_cast<uint32_t>(out_->code.size());
+        // Real *call-time* arity only (what a caller's own extraArgs
+        // must supply) -- the "$(expr)" bound values are not something a
+        // caller ever passes, they arrive already bundled into
+        // Closure::boundArgs (see VM.cpp's own callClosure()), so they
+        // are deliberately excluded here, matching real LPC's own
+        // "arity" concept for a bound closure.
         entry.numArgs = static_cast<uint8_t>(pending.expr->paramCount);
 
         const auto& bodyExprs = pending.expr->bodyExprs;
@@ -1400,6 +1551,59 @@ void CodeGen::emitPendingLambdas() {
         out_->functions.push_back(entry);
     }
     pendingLambdas_.clear();
+}
+
+// See CodeGen.hpp's PendingAnonFunc comment for why this exists instead
+// of emitting a "function(){}" literal's body in place. Each entry
+// compiles exactly like an ordinary top-level function in generate()'s
+// own loop above (own locals_ scope, real named parameters declared via
+// declareLocal(), a real Block body compiled via emitBlock(), ends in
+// Return, own FunctionEntry) -- confirmed this is the real, faithful
+// shape by reading fluffos-2.23-ds03's own source directly before
+// writing this (this session's own prior scoping report): real
+// anonymous functions never capture the enclosing function's own
+// locals at all, so there is nothing special left to do here beyond
+// what an ordinary function's own compilation already does; unlike
+// emitPendingLambdas()'s own comma-expression body just above, a real
+// statement Block already ends itself via whatever explicit "return"
+// statements it contains (or falls through to this function's own
+// trailing Return for an implicit void return), needing no synthesized
+// "last expression's value becomes the return value" handling at all.
+// Index-based, not range-for, and copying each entry by value before
+// compiling, for the identical reason emitPendingLambdas() already
+// does: compiling one anon function's body can itself queue more
+// entries (into this list or pendingLambdas_, a "(: :)" or another
+// "function(){}" nested inside it), invalidating a live reference/
+// iterator into a vector that might reallocate.
+void CodeGen::emitPendingAnonFuncs() {
+    size_t i = 0;
+    while (i < pendingAnonFuncs_.size()) {
+        PendingAnonFunc pending = pendingAnonFuncs_[i];
+        ++i;
+
+        locals_.clear();
+        nextLocalSlot_ = 0;
+        localScopeStack_.clear();
+        loopStack_.clear();
+        foreachCounter_ = 0;
+        switchCounter_ = 0;
+        indexAssignCounter_ = 0;
+        for (const auto& param : pending.expr->params) {
+            declareLocal(param.name);
+        }
+
+        FunctionEntry entry;
+        entry.name = pending.name;
+        entry.entryPoint = static_cast<uint32_t>(out_->code.size());
+        entry.numArgs = static_cast<uint8_t>(pending.expr->params.size());
+
+        emitBlock(*pending.expr->body);
+        out_->code.push_back(Instruction{OpCode::Return, 0, 0});
+
+        entry.numLocals = static_cast<uint8_t>(nextLocalSlot_);
+        out_->functions.push_back(entry);
+    }
+    pendingAnonFuncs_.clear();
 }
 
 } // namespace amlp

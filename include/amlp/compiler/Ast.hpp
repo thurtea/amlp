@@ -52,7 +52,7 @@ struct VarRefExpr : AstNode {
 // array.c's f_or() -- but nothing this driver runs yet needs that, only
 // the plain-int flags-bitmask shape -- secure/std/login.c's own
 // "input_to(\"get_password\", 1 | 2)").
-enum class BinOp { Eq, Neq, Lt, Lte, Gt, Gte, Add, Or, And, Sub, Mul, Div, Mod, BitAnd, BitOr, BitXor };
+enum class BinOp { Eq, Neq, Lt, Lte, Gt, Gte, Add, Or, And, Sub, Mul, Div, Mod, BitAnd, BitOr, BitXor, Shl, Shr };
 
 struct BinaryExpr : AstNode {
     BinOp op;
@@ -227,6 +227,34 @@ struct InlineLambdaExpr : AstNode {
     // emitPendingLambdas() to size the compiled function's own
     // numArgs/numLocals so a caller's arguments land in the right slots.
     int paramCount = 0;
+    // Real LPC's own "$(expr)" bound-variable form (grammar.y.pre's own
+    // "'$' '(' comma_expr ')'", distinct from a plain "$N" -- see
+    // LambdaParamExpr's own comment for the full real-source citation
+    // and why this driver now implements it too). Each entry is one
+    // "$(expr)" occurrence's own captured expression, in the order
+    // encountered while parsing this lambda's body (Parser's own
+    // lambdaBoundValuesStack_) -- real semantics: expr is evaluated once,
+    // at the *enclosing* function's own current scope, the moment this
+    // "(: :)" literal itself is constructed (not each time the closure
+    // is later called), and its value is bound ahead of any real
+    // call-time argument -- exactly the same real semantics, and this
+    // driver's own existing mechanism (Closure::boundArgs,
+    // CodeGen::emitExpr()'s own ClosureLiteralExpr case, VM::
+    // callClosure()'s own "boundArgs then extraArgs" merge order), the
+    // explicit bound-arg-list form "(: name, arg1, arg2 :)" already has
+    // -- "$(expr)" is real LPC's own syntactic sugar for the identical
+    // mechanism, spelled inline at first use instead of pre-declared in
+    // a leading list. Compiled at the literal's own construction site
+    // (CodeGen::emitExpr()'s own InlineLambdaExpr case), immediately,
+    // in the *caller's* current locals_/objectVars_ scope -- before this
+    // lambda's own body is queued for its later, separate, deferred
+    // compile (emitPendingLambdas(), a fresh, empty locals_ scope) --
+    // giving real access to the enclosing function's own locals, which
+    // the body itself (compiled later, in that fresh scope) cannot
+    // reach directly, matching real grammar.y.pre's own "current_
+    // function_context = current_function_context->parent" switch while
+    // parsing "expr" specifically.
+    std::vector<AstPtr> boundValueExprs;
 };
 
 // "$N" (e.g. "$1", "$2") inside a "(: ... :)" body -- real lex.c's own
@@ -240,21 +268,45 @@ struct InlineLambdaExpr : AstNode {
 // lighting, so failing to parse this one file at all (this driver's
 // lexer previously treated a bare "$" as an unrecognized character and
 // threw) broke every one of those simul_efuns' own real call sites the
-// instant EVENTS_D was ever loaded. Only the bare "$N" form is
-// implemented, not real LPC's "$(expr)" bound-variable-capture form --
-// confirmed by a full mudlib sweep that the only other real files using
-// either form (daemon/intermud.c, daemon/services/who.c,
-// daemon/services/auth.c) are unreachable, gated behind
-// "#ifndef __PACKAGE_SOCKETS__ #error ..." (this driver implements no
-// raw-socket package), and secure/daemon/chat.c's own "$(ch)" site was
-// already confirmed unreachable in an earlier session (not wired to
-// CHAT_D, only reachable through the same dead __PACKAGE_SOCKETS__-gated
-// path via daemon/services/channel.c).
+// instant EVENTS_D was ever loaded.
+//
+// Real LPC's "$(expr)" bound-variable-capture form (real grammar.y.pre's
+// own "'$' '(' comma_expr ')'") is now also implemented (this same node
+// kind doubles for both a "$N" reference and a "$(expr)" occurrence's
+// own reference to its assigned slot, told apart by isBoundValue below)
+// -- an earlier session's own "not implemented, no reachable real use"
+// scoping note here is now stale and superseded: Dead Souls 3.8.2's own
+// real corpus (this driver's own row 3.10 boot attempt) uses it
+// pervasively and reachably -- lib/body.c, lib/door.c, lib/exits.c,
+// lib/living.c, lib/magic.c, and more (e.g. lib/firearm.c's own real
+// "(: answers_to($(target), $1) :)").
+//
+// Real semantics (confirmed directly against fluffos-2.23-ds03's own
+// icode.c:533-544, "case NODE_PARAMETER: { int which = expr->v.number +
+// current_num_values; ... }", where current_num_values is set to the
+// real total count of this same closure's own "$(expr)" bindings just
+// before its body is walked, icode.c:761-767): every "$(expr)" binding
+// occupies a real closure-call-frame slot, in encounter order, starting
+// at 0 -- exactly the same slots Closure::boundArgs already occupy at
+// runtime (VM::callClosure()'s own "boundArgs then extraArgs" merge) --
+// and any *explicit* "$N" elsewhere in the same body is offset by the
+// real total "$(expr)" count for that closure, so the programmer's own
+// "$1" still means "the closure's own first real call-time argument"
+// regardless of how many "$(expr)" bindings appear alongside it. This
+// offset is only knowable once the whole body has been parsed (this
+// driver's own InlineLambdaExpr::boundValueExprs is only complete then),
+// so it is applied at CodeGen time, not parse time -- see CodeGen.cpp's
+// own emitPendingLambdas() for exactly where.
 struct LambdaParamExpr : AstNode {
-    // 0-indexed local slot ("$1" -> 0, "$2" -> 1, ...), already converted
-    // from the 1-indexed source form by the time this node exists (see
-    // Parser.cpp's own "$N" handling).
+    // For an ordinary "$N" (isBoundValue false): 0-indexed real
+    // call-time-argument slot ("$1" -> 0, "$2" -> 1, ...), *before* the
+    // enclosing closure's own "$(expr)" count is added at CodeGen time.
+    // For a "$(expr)" occurrence's own reference (isBoundValue true):
+    // the real, final 0-indexed slot directly (its own position in
+    // InlineLambdaExpr::boundValueExprs), needing no further offset at
+    // all, since bound values always occupy the lowest slots already.
     int index = 0;
+    bool isBoundValue = false;
 };
 
 struct ExprStmt : AstNode {
@@ -426,6 +478,36 @@ struct Block : AstNode {
     bool isRealScope = true;
 };
 
+// "time_expression { <body> }" -- real fluffos-2.23-ds03's own
+// benchmarking expression (confirmed directly against that real source,
+// not assumed): "grammar.y.pre: time_expression: L_TIME_EXPRESSION ...
+// expr_or_block { CREATE_TIME_EXPRESSION($$, $3); }", "expr_or_block:
+// block | '(' comma_expr ')'". Real corpus (Dead Souls 3.8.2's own boot
+// attempt): all 4 real call sites (secure/daemon/master.c and
+// secure/obj/weirder.c) use the real block form, never the parenthesized-
+// expression alternative, so only the block form is implemented here --
+// the same narrow-by-evidence choice this driver's own existing
+// CatchExpr already made for the identical "expr_or_block" grammar
+// nonterminal (see its own comment: "nothing in this mudlib uses that
+// [block] form", the mirror-image gap of this one).
+//
+// Real semantics (interpret.c's own F_TIME_EXPRESSION/F_END_TIME_
+// EXPRESSION, confirmed directly): records the current time, runs the
+// body once for its own side effects (its own value, if it evaluated to
+// one internally, is not the result), and evaluates to the real elapsed
+// microseconds as a plain int. See CodeGen::emitExpr()'s own
+// TimeExpressionExpr case for how this compiles (inline, not deferred/
+// hoisted like a closure literal -- this is an ordinary, immediate
+// expression, not a first-class value) and VM.cpp's own
+// TimeExpressionStart/TimeExpressionEnd opcodes for the runtime timing
+// mechanism (a real std::chrono::steady_clock interval, not literally
+// mirroring real get_usec_clock()'s own gettimeofday()-based
+// implementation, since only the observable elapsed-microseconds result
+// matters here, not the underlying clock source).
+struct TimeExpressionExpr : AstNode {
+    std::unique_ptr<Block> body;
+};
+
 struct IfStmt : AstNode {
     AstPtr condition;
     std::unique_ptr<Block> thenBranch;
@@ -522,6 +604,72 @@ struct FunctionDecl : AstNode {
     std::string returnType;
     bool returnTypeIsArray = false;
     std::string name;
+    std::vector<Param> params;
+    std::unique_ptr<Block> body;
+};
+
+// Real modern FluffOS's own "function(<params>) { <body> }" anonymous-
+// function *expression* (row 3.10's own named blocker, ROADMAP.md,
+// scoped in full in this session's own prior scoping report before any
+// code was written): confirmed directly against Dead Souls 3.8.2's own
+// bundled fluffos-2.23-ds03/grammar.y.pre, "expr0: ... | L_BASIC_TYPE
+// '(' argument ')' block" gated on the L_BASIC_TYPE token being
+// specifically TYPE_FUNCTION, building a real NODE_ANON_FUNC. A real,
+// named parameter list (the identical "argument" grammar an ordinary
+// function definition's own parameters already use) plus a real,
+// full statement-block body, evaluating to a callable closure value.
+//
+// Deliberately holds real Param/Block, not InlineLambdaExpr's own
+// paramCount/bodyExprs shape ("(: comma_expr :)", a structurally
+// different, older closure form): real "(: :)" bodies are a single
+// comma-expression addressed only by positional "$1"/"$2" references,
+// while this form's body is exactly as rich as an ordinary function's
+// own (if/while/for/local declarations/multiple statements/explicit
+// return), with real, named parameters.
+//
+// No lexical capture of the enclosing function's own locals -- this is
+// not a simplification or a deferred follow-on, it is real FluffOS's
+// own actual behavior, confirmed three independent ways directly
+// against fluffos-2.23-ds03's real source before writing anything
+// here, not assumed: (1) icode.c's own NODE_ANON_FUNC codegen and
+// eoperators.c's own f_function_constructor()/FP_ANONYMOUS case never
+// touch the evaluation stack for anything but the anon-func's own
+// literal byte operands (num_arg/num_local/length), unlike FP_
+// FUNCTIONAL's own sibling case which explicitly binds stack values
+// via its own "args" parameter; (2) function.c's own
+// make_functional_funp() stores only a program pointer, a byte offset,
+// num_arg, and num_local on the resulting funptr_t -- there is no
+// slot anywhere in funptr_hdr_t/functional_t for a captured value, and
+// function.c's own call_function_pointer() FP_FUNCTIONAL case (the
+// same runtime kind both this form and "(: :)" actually share --
+// FP_ANONYMOUS is purely f_function_constructor()'s own byte-decoding
+// tag, never the funptr's own stored type) calls setup_variables()
+// with a fresh, isolated frame sized only for the closure's own
+// num_arg+num_local, nothing shared with the enclosing call's own
+// frame; (3) compiler.c's own deactivate_current_locals(), called on
+// entering the anon-func body (grammar.y.pre's own L_BASIC_TYPE(
+// function) mid-rule action) sets every currently-active enclosing
+// local's own dn.local_num = -1 for the duration -- the real compiler
+// cannot even resolve an enclosing local's name while compiling this
+// body, confirming this is enforced at parse time too, not just
+// missing at runtime. Real corpus code needing outer state instead
+// threads it explicitly (confirmed live, not assumed: lib/persist.c's
+// own real "call_out(function(object p){...}, 1, prev)", the local
+// "prev" passed as call_out()'s own extra call-time argument, becoming
+// the closure's own real "p" parameter when it fires) or uses the
+// owning object's own object variables (confirmed live: lib/body.c's
+// own real "evaluate(function(){ Dying = 0; })", "Dying" a real object
+// variable, not a capture) -- both already fall out of this driver's
+// own existing, unmodified machinery (real call-time arguments already
+// merge into a closure's own params the same way "(: :)"'s boundArgs
+// already do; object variables were never cleared by "(: :)"'s own
+// existing compilation either, only locals_ was). A corpus-wide scan
+// (25 real files) and a direct sample of 5 of them, read in full,
+// confirmed every real body stays within this exact real constraint --
+// see this session's own prior scoping report, and STATUS.md's own
+// entry for this session, for the complete real-source derivation and
+// the corpus sample.
+struct AnonFunctionExpr : AstNode {
     std::vector<Param> params;
     std::unique_ptr<Block> body;
 };

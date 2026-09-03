@@ -8,6 +8,7 @@
 #include "amlp/compiler/CodeGen.hpp"
 #include "amlp/dialect/LpcDialect.hpp"
 #include "amlp/vm/VM.hpp"
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <iterator>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace amlp {
@@ -268,8 +270,38 @@ std::string maskHashQuote(const std::string& source);
 // so real cpp's own "No such file or directory" diagnostic still
 // surfaces for an actually-broken include rather than this driver
 // silently swallowing it.
+// Real C's own "computed include" form (C99/C11 6.10.2p4: if a
+// '#include' line's own pp-tokens do not already form a
+// '<h-char-sequence>' or a '"q-char-sequence"', they are macro-expanded
+// first, and the result must form one of those two shapes instead) --
+// confirmed real and reachable, not a corner of the standard nobody
+// actually uses: Dead Souls 3.8.2's own real secure/include/global.h
+// does exactly "#define CONFIG_H \"/secure/include/config.h\"" then
+// "#include CONFIG_H" a few lines later, in the very file this
+// mudlib's own real global_include_file setting (<global.h>) implicitly
+// #includes into *every single object*. The absolute-quoted-path text
+// scan above only ever looks for a literal '"' character on the
+// '#include' line itself; a bare macro name has none, so it passed
+// through untouched, and real system cpp then expanded CONFIG_H to the
+// real absolute path *internally*, invisible to this pre-cpp text
+// pass, and failed with a real "No such file or directory" trying to
+// open it against the actual host filesystem root -- the identical
+// underlying problem the plain-text absolute-include case above already
+// solves, just reached through one extra, real, standard-mandated layer
+// of macro expansion this pass did not yet unwrap. Fixed narrowly: a
+// simple, single-token object-like "#define NAME \"value\"" is recorded
+// as it is seen (real cpp macro scope is whole-compilation, not
+// per-file, so this map threads through the same recursion the spliced-
+// include text already does); a later "#include NAME" line with no '<'
+// or '"' of its own is resolved through that map first, and if the
+// recorded value starts with '/' the result is handled by exactly the
+// same splice-or-rewrite logic as an ordinary literal absolute quoted
+// include, just one indirection earlier. Nothing about a normal
+// "#define NAME value" (no quotes, the overwhelmingly common case) or
+// an ordinary "#include <foo>"/"#include \"foo\"" changes at all.
 std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const std::string& mudlibRoot,
                                               std::unordered_set<std::string>& activeIncludes,
+                                              std::unordered_map<std::string, std::string>& macroDefs,
                                               int depth) {
     // Real, pathological include cycles aside (already guarded by
     // activeIncludes), 64 is far deeper than any genuine mudlib's own
@@ -285,14 +317,88 @@ std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const st
         bool spliced = false;
         size_t hashPos = line.find_first_not_of(" \t");
         if (hashPos != std::string::npos && line[hashPos] == '#') {
-            size_t incPos = line.find("include", hashPos + 1);
-            if (incPos != std::string::npos) {
-                size_t quotePos = line.find('"', incPos);
-                if (quotePos != std::string::npos && quotePos + 1 < line.size() &&
-                    line[quotePos + 1] == '/') {
-                    size_t endQuote = line.find('"', quotePos + 1);
+            // Identify the directive keyword itself (the run of letters
+            // right after '#', skipping only whitespace) once, rather
+            // than independently searching for the substrings "define"/
+            // "include" anywhere on the line -- the latter would false-
+            // positive on, say, a #define whose own quoted *value*
+            // happens to contain the word "include" (a real risk this
+            // fix's own citation, secure/include/global.h, does not
+            // trigger, but a plausible one elsewhere in a real corpus,
+            // not worth risking).
+            size_t kwStart = line.find_first_not_of(" \t", hashPos + 1);
+            size_t kwEnd = kwStart;
+            while (kwEnd != std::string::npos && kwEnd < line.size() &&
+                   std::isalpha(static_cast<unsigned char>(line[kwEnd]))) {
+                ++kwEnd;
+            }
+            bool isDefine = kwStart != std::string::npos &&
+                             line.compare(kwStart, kwEnd - kwStart, "define") == 0;
+            bool isInclude = kwStart != std::string::npos &&
+                              line.compare(kwStart, kwEnd - kwStart, "include") == 0;
+
+            if (isDefine) {
+                // "#define NAME "value"" -- capture the macro name and a
+                // quoted string value only; anything else (no value, an
+                // unquoted value, a function-like macro's own "(") is
+                // simply not recorded, and any '#include' referring to
+                // it falls through to real cpp exactly as before, which
+                // will correctly fail on it the same way it already
+                // would have without this whole fix.
+                size_t nameStart = line.find_first_not_of(" \t", kwEnd);
+                if (nameStart != std::string::npos) {
+                    size_t nameEnd = nameStart;
+                    while (nameEnd < line.size() &&
+                           (std::isalnum(static_cast<unsigned char>(line[nameEnd])) || line[nameEnd] == '_')) {
+                        ++nameEnd;
+                    }
+                    if (nameEnd > nameStart && (nameEnd >= line.size() || line[nameEnd] != '(')) {
+                        std::string macroName = line.substr(nameStart, nameEnd - nameStart);
+                        size_t q1 = line.find('"', nameEnd);
+                        if (q1 != std::string::npos) {
+                            size_t q2 = line.find('"', q1 + 1);
+                            if (q2 != std::string::npos) {
+                                macroDefs[macroName] = line.substr(q1 + 1, q2 - q1 - 1);
+                            }
+                        }
+                    }
+                }
+            } else if (isInclude) {
+                size_t quotePos = line.find('"', kwEnd);
+                bool viaMacro = false;
+                std::string macroExpandedLine;
+                if (quotePos == std::string::npos && line.find('<', kwEnd) == std::string::npos) {
+                    // Real C's own "computed include" (C99/C11
+                    // 6.10.2p4): neither '<' nor '"' appears on this
+                    // '#include' line at all, so the remaining pp-tokens
+                    // (here, always exactly one bare macro name in every
+                    // real corpus case seen) are macro-expanded first.
+                    // This driver does not run a real macro expander at
+                    // this stage (it shells out to real cpp for that,
+                    // after this whole pass), so only the one narrow,
+                    // real, evidenced shape is handled: a single bare
+                    // identifier already recorded by the "#define"
+                    // branch above.
+                    size_t nameStart = line.find_first_not_of(" \t", kwEnd);
+                    if (nameStart != std::string::npos) {
+                        size_t nameEnd = line.find_last_not_of(" \t\r") + 1;
+                        if (nameEnd > nameStart) {
+                            std::string macroName = line.substr(nameStart, nameEnd - nameStart);
+                            auto it = macroDefs.find(macroName);
+                            if (it != macroDefs.end()) {
+                                macroExpandedLine = line.substr(0, kwStart) + "include \"" + it->second + "\"";
+                                viaMacro = true;
+                            }
+                        }
+                    }
+                }
+                const std::string& scanLine = viaMacro ? macroExpandedLine : line;
+                size_t scanQuotePos = viaMacro ? scanLine.find('"', kwEnd) : quotePos;
+                if (scanQuotePos != std::string::npos && scanQuotePos + 1 < scanLine.size() &&
+                    scanLine[scanQuotePos + 1] == '/') {
+                    size_t endQuote = scanLine.find('"', scanQuotePos + 1);
                     if (endQuote != std::string::npos) {
-                        std::string quotedPath = line.substr(quotePos + 1, endQuote - quotePos - 1);
+                        std::string quotedPath = scanLine.substr(scanQuotePos + 1, endQuote - scanQuotePos - 1);
                         std::string realPath = mudlibRoot + quotedPath;
                         if (!activeIncludes.count(realPath)) {
                             std::ifstream target(realPath);
@@ -302,7 +408,7 @@ std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const st
                                 activeIncludes.insert(realPath);
                                 out << rewriteAbsoluteIncludesRecursive(
                                            maskHashQuote(targetBuf.str()), mudlibRoot,
-                                           activeIncludes, depth + 1)
+                                           activeIncludes, macroDefs, depth + 1)
                                     << "\n";
                                 activeIncludes.erase(realPath);
                                 spliced = true;
@@ -310,8 +416,20 @@ std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const st
                         }
                     }
                 }
-                if (!spliced && quotePos != std::string::npos && quotePos + 1 < line.size() &&
-                    line[quotePos + 1] == '/') {
+                if (!spliced && viaMacro) {
+                    // Target could not actually be read from disk (a
+                    // genuinely missing file, or a real include cycle):
+                    // fall back to the macro-expanded, mudlib-root-
+                    // prefixed line so real cpp's own diagnostic still
+                    // surfaces, the same fallback the plain-text case
+                    // already has just below.
+                    line = macroExpandedLine;
+                    if (scanQuotePos != std::string::npos && scanQuotePos + 1 < line.size() &&
+                        line[scanQuotePos + 1] == '/') {
+                        line.insert(scanQuotePos + 1, mudlibRoot);
+                    }
+                } else if (!spliced && quotePos != std::string::npos && quotePos + 1 < line.size() &&
+                           line[quotePos + 1] == '/') {
                     line.insert(quotePos + 1, mudlibRoot);
                 }
             }
@@ -323,7 +441,8 @@ std::string rewriteAbsoluteIncludesRecursive(const std::string& source, const st
 
 std::string rewriteAbsoluteIncludes(const std::string& source, const std::string& mudlibRoot) {
     std::unordered_set<std::string> activeIncludes;
-    return rewriteAbsoluteIncludesRecursive(source, mudlibRoot, activeIncludes, 0);
+    std::unordered_map<std::string, std::string> macroDefs;
+    return rewriteAbsoluteIncludesRecursive(source, mudlibRoot, activeIncludes, macroDefs, 0);
 }
 
 // ROADMAP.md row 1.2/1.3's own scoping note: real system cpp (see
@@ -425,9 +544,39 @@ struct StagedSource {
 // file's own body just below) so an absolute-quoted-path form gets the
 // identical mudlib-root rewrite every other #include in this driver
 // already gets, rather than a second, divergent code path.
+//
+// An angle-bracket globalIncludeFile ("<global.h>", the overwhelmingly
+// common real form -- confirmed against every vendored corpus's own
+// runtime config) is resolved and *spliced* directly here, its own real
+// on-disk content run through the same rewriteAbsoluteIncludesRecursive()
+// pass as everything else, rather than left as a bare "#include
+// <global.h>" line for real cpp's own "-I" search to resolve on its
+// own. Found live necessary, not a speculative generalization: Dead
+// Souls 3.8.2's own real secure/include/global.h (this mudlib's own
+// configured global include file) itself contains a real macro-computed
+// absolute include ("#define CONFIG_H \"/secure/include/config.h\"" then
+// "#include CONFIG_H" a few lines later) that only this driver's own
+// rewrite pass can resolve (see rewriteAbsoluteIncludesRecursive()'s own
+// header comment for the full citation) -- real cpp's own "-I" mechanism
+// finds and reads global.h itself just fine, but everything *inside* it
+// is then real cpp's own problem to resolve, with no opportunity for
+// this driver's own mudlib-root-aware rewrite to run on it at all. Only
+// the angle-bracket form is handled specially; a quoted-form
+// globalIncludeFile (config.hpp's own documented "\"/some/header.h\""
+// possibility) already goes through the plain line-rewrite path below
+// unchanged, since that form is already a literal, directly-scannable
+// absolute quoted path the existing pass already resolves correctly
+// without needing this. If the angle-bracket header cannot actually be
+// found under any configured include dir, this falls back to the
+// original plain "#include <name>" line, so real cpp's own "No such
+// file or directory" diagnostic still surfaces for a genuinely missing
+// global include file, matching this whole rewrite pass's own
+// established "let real cpp's own diagnostic surface for anything this
+// driver cannot itself resolve" discipline.
 StagedSource stageSourceForPreprocessing(const std::string& originalPath,
                                           const std::string& mudlibRoot,
-                                          const std::string& globalIncludeFile) {
+                                          const std::string& globalIncludeFile,
+                                          const std::vector<std::string>& includeDirs) {
     StagedSource result;
 
     std::ifstream f(originalPath);
@@ -439,13 +588,48 @@ StagedSource stageSourceForPreprocessing(const std::string& originalPath,
     buf << f.rdbuf();
     f.close();
 
+    // Shared across both the global-include-file splice below and the
+    // real object's own body just after it -- real cpp macro scope is
+    // whole-compilation, not per-file (a #define in one #include'd file
+    // stays visible for the rest of the unit, including whatever
+    // #included it), so these must be the *same* map/set across both,
+    // not two independent ones. Found live necessary, not assumed:
+    // secure/daemon/master.c's own real "#include ROOMS_H" (a second,
+    // separate macro-computed include, the object file's own body, not
+    // global.h's) depends on "#define ROOMS_H ..." from
+    // secure/include/global.h, its own configured global include file --
+    // with two independent maps (this function's own earlier version),
+    // ROOMS_H was recorded while resolving the prefix and then simply
+    // never seen again once the real file's own body was scanned.
+    std::unordered_set<std::string> activeIncludes;
+    std::unordered_map<std::string, std::string> macroDefs;
+
     std::string prefix;
     if (!globalIncludeFile.empty()) {
-        prefix = rewriteAbsoluteIncludes("#include " + globalIncludeFile + "\n", mudlibRoot);
+        bool splicedGlobalHeader = false;
+        if (globalIncludeFile.size() >= 2 && globalIncludeFile.front() == '<' &&
+            globalIncludeFile.back() == '>') {
+            std::string headerName = globalIncludeFile.substr(1, globalIncludeFile.size() - 2);
+            for (const auto& dir : includeDirs) {
+                std::ifstream header(dir + "/" + headerName);
+                if (header) {
+                    std::ostringstream headerBuf;
+                    headerBuf << header.rdbuf();
+                    prefix = rewriteAbsoluteIncludesRecursive(
+                        maskHashQuote(headerBuf.str()), mudlibRoot, activeIncludes, macroDefs, 0);
+                    splicedGlobalHeader = true;
+                    break;
+                }
+            }
+        }
+        if (!splicedGlobalHeader) {
+            prefix = rewriteAbsoluteIncludesRecursive("#include " + globalIncludeFile + "\n",
+                                                        mudlibRoot, activeIncludes, macroDefs, 0);
+        }
     }
 
     std::string rewritten = prefix + "# 1 \"" + originalPath + "\"\n" +
-        rewriteAbsoluteIncludes(maskHashQuote(buf.str()), mudlibRoot);
+        rewriteAbsoluteIncludesRecursive(maskHashQuote(buf.str()), mudlibRoot, activeIncludes, macroDefs, 0);
 
     char tmpPathTemplate[] = "/tmp/amlp_src_XXXXXX";
     int fd = mkstemp(tmpPathTemplate);
@@ -696,7 +880,7 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
     std::vector<std::string> includeDirs = splitIncludeDirs(config_.includeDir(), config_.mudlibRoot());
 
     StagedSource staged =
-        stageSourceForPreprocessing(path, config_.mudlibRoot(), config_.globalIncludeFile());
+        stageSourceForPreprocessing(path, config_.mudlibRoot(), config_.globalIncludeFile(), includeDirs);
     if (!staged.ok) {
         std::cerr << "[object] " << staged.errorMessage << "\n";
         return nullptr;

@@ -9,6 +9,150 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-03 (a further session, same day): Dead Souls 3.8.2 boot
+attempt, new row 3.10. Does not boot yet. 2 real driver bugs found and
+fixed with real citations, real fixes, and real regression tests
+(851 tests, up from 849, zero regressions). Boot blocked on a real,
+evidenced architectural gap, named and scoped rather than half-built,
+per the user's own explicit instruction to move to a different real
+mudlib after TMI-2 was exercised deeply across two sessions (15 real
+bugs total there).**
+
+Extracted `~/Downloads/ds3.8.2.zip` fresh to
+`temp/ds3.8.2_extracted/ds3.8.2/` (also copied to `temp/ds3.8.2.zip`,
+matching the vendoring precedent every other `temp/` mudlib archive
+already has; confirmed first that neither this exact archive nor an
+already-booted extraction of it existed under `temp/` -- the
+similarly-named `temp/dead-souls/` present on disk is a wholly
+unrelated, much newer Dead Souls 3.8.6 checkout targeting modern
+FluffOS 2019 via its own separate `driver/` submodule, never
+integrated with or booted against this project's own driver at all,
+confirmed by its own README and by `git log`/`STATUS.md` having zero
+prior mention of it in that role). `etc/driver_ds3.cfg` built from
+that mudlib's own real bundled `bin/mudos.cfg` ("mudlib directory :
+../lib", "master file : /secure/daemon/master", "simulated efun file
+: /secure/sefun/sefun", "include directories :
+/secure/include:/include", "global include file : <global.h>",
+"maximum evaluation cost : 5000000"), same derivation discipline as
+`etc/driver_tmi2.cfg`/`etc/driver_aethermud.cfg`. This real config's
+own two-entry "include directories" list is exactly what
+`ObjectManager.cpp`'s own `splitIncludeDirs()` (a prior session's own
+fix, its own header comment already citing this exact real
+`bin/mudos.cfg` value) was built for.
+
+**Bug 1: real C's own "computed include" form (`#include MACRO_NAME`,
+C99/C11 6.10.2p4) was entirely unresolved when the macro's own value
+was a quoted absolute mudlib path, blocking every single object in
+the mudlib from compiling.** This driver's existing absolute-quoted-
+include text scan (`rewriteAbsoluteIncludesRecursive()` in
+`ObjectManager.cpp`, row 3.8's own item 8, a prior session's fix for
+a *literal* `#include "/..."`) only ever looks for a literal `"`
+character on the `#include` line itself; a bare macro name has none,
+so it passed straight through untouched, and real system cpp then
+expanded it *internally* (invisible to this driver's own pre-cpp text
+pass) and tried to open the real absolute path against the actual
+host filesystem root -- "No such file or directory". Dead Souls'
+own real `secure/include/global.h` (its own configured
+`global_include_file`, `<global.h>`, real `lex.c`'s own
+`start_new_file()` implicitly `#include`s this into *every single
+compiled object*, confirmed against the real vendored FluffOS 2.9
+reference before relying on it) does exactly this: `#define CONFIG_H
+"/secure/include/config.h"` then, a few lines later, `#include
+CONFIG_H`. Fixed in `rewriteAbsoluteIncludesRecursive()`: a simple,
+single-token object-like `#define NAME "value"` is now recorded as it
+is seen (the directive keyword is identified positionally, right
+after `#`, not by a raw substring search for "define" anywhere on the
+line, to avoid a false match on a `#define` whose own quoted *value*
+happens to contain the word "include"); a later `#include NAME` line
+with neither `<` nor `"` of its own is resolved through that same
+record first, and if the recorded value starts with `/` it is handed
+to the exact same splice-or-rewrite logic the literal-quoted-path case
+already has, just one indirection earlier. A companion change makes
+the angle-bracket form of the driver's own `global_include_file`
+setting (`<global.h>`, the overwhelmingly common real form) get
+resolved and *spliced* directly in `stageSourceForPreprocessing()` --
+its own real on-disk content read and run through this same rewrite
+pass -- rather than left as a bare `#include <global.h>` line for real
+cpp's own `-I` search to resolve blind; this was needed for bug 1's
+own fix to have anywhere to actually attach, since global.h's content
+was previously never touched by this driver's own rewrite pass at all
+(cpp resolved it entirely on its own via `-I`, with no opportunity for
+this driver's own mudlib-root-aware logic to run on what was inside
+it). New regression test
+(`testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot`) mirrors
+the exact real `CONFIG_H`/`global.h` shape.
+
+**Bug 2: real cpp macro scope is whole-compilation, not per-file, but
+this driver's own global-include-file prefix and the compiled
+object's own body were being rewritten through two independent macro-
+tracking maps, so a macro recorded while resolving the prefix was
+invisible again the moment the real object's own body was scanned.**
+Dead Souls' own real `secure/daemon/master.c` (the master object
+itself, the very first thing this driver tries to load) has its own
+separate `#include ROOMS_H` in its own body -- `ROOMS_H` is `#define`'d
+in `global.h`, not in `master.c` itself, so real cpp's own genuinely
+whole-unit macro scope is exactly what real Dead Souls relies on here.
+Fixed by threading one shared `macroDefs` map (and the existing
+`activeIncludes` include-cycle-guard set) through both the global-
+include-file splice and the real object's own body rewrite in
+`stageSourceForPreprocessing()`, instead of each getting its own fresh
+state. New regression test
+(`testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody`)
+mirrors the exact real `ROOMS_H`/`master.c` shape: a macro `#define`'d
+in the configured global include file, consumed via a computed
+`#include` in a *separate* compiled object's own body.
+
+**Boot still blocked past these two fixes -- stopped here rather than
+continuing to patch narrowly, per this project's own standing "no
+half-built subsystems" discipline.** After both fixes, `master.c`
+compilation progresses much further (confirmed by staging the real
+preprocessor input to disk and running real system `cpp` on it by
+hand, entirely outside this driver, to see exactly how far real cpp
+itself gets: `lib.h`, `dirs.h`, `comp.h`, `events.h`, `lvs.h`,
+`props.h`, `std.h`, `user.h`, `compat.h`, `master.c` itself,
+`runtime_config.h`, `cfg.h` all resolve cleanly) before failing inside
+`secure/include/logs.h` specifically -- a real file reached from
+`master.c` via an entirely ordinary, non-absolute `#include <logs.h>`
+that real cpp resolves itself via `-I`, never touched by this driver's
+own rewrite pass at all, and `logs.h` has its own *third*, independent
+`#include CONFIG_H`. A corpus-wide scan (`grep -rlE` across the whole
+real mudlib) confirms this is not a one-off: 247 real files use the
+bare-macro-name `#include NAME` form at all, and while only 4 real
+absolute-path macros exist in the entire corpus (`CONFIG_H`/
+`NETWORK_H`/`ROOMS_H`/`SECRETS_H`, all `#define`'d exactly once, in
+`global.h`), any of those 247 consumer files could independently
+reference one of the four, reached via an ordinary `#include` this
+driver's own rewrite pass never sees at all -- it only ever touches
+the outermost compiled file and the one designated global include
+file, delegating every ordinary `#include <...>`/`#include "..."`
+anywhere else to real cpp's own `-I` resolution, same as before either
+fix this session made. Genuinely closing this needs a real
+architectural change: making this driver's own rewrite pass
+recursively resolve and splice *every* reachable `#include`, ordinary
+ones included, rather than delegating ordinary file resolution to real
+cpp and patching only the one absolute-path gap real cpp cannot itself
+cross. That is a real, cross-cutting change to how this driver's
+whole preprocessing pipeline works (cpp would stop doing any file
+resolution at all, only macro expansion/conditionals on one fully
+pre-assembled blob this driver built itself), with real correctness
+surface of its own (interaction with `#ifndef`/`#include` guards,
+conditional compilation, nested macro scope, and more, all currently
+handled for free by delegating to a real, mature cpp) -- not a narrow,
+single-file fix like the two bugs above, so named here in full and
+left for a dedicated future session rather than attempted piecemeal
+under this one.
+
+Full clean rebuild and full suite re-run after both fixes (2 edits,
+both in `ObjectManager.cpp`), 851 tests passing by the end (up from
+849), zero regressions at any point. Debug instrumentation added
+during live diagnosis (temporary `std::cerr` tracing, and temporarily
+keeping the staged preprocessor temp file on disk instead of deleting
+it) was removed before this session's own final build; confirmed via
+`git diff` that only the real, permanent fix remains staged.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-09-03: TMI-2 deeper pass, row 3.8, combat/communication/equip
 exercised for the first time (the 2026-09-02 pass covered only
 character creation, look, inventory, and movement). Same real TCP

@@ -4671,6 +4671,89 @@ static void testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves() {
     std::cout << "testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves OK\n";
 }
 
+// Found live against a real third-party mudlib corpus (Dead Souls 3.8.2's
+// boot attempt): real C's own "computed include" form (C99/C11
+// 6.10.2p4) -- secure/include/global.h's own real "#define CONFIG_H
+// \"/secure/include/config.h\"" followed a few lines later by "#include
+// CONFIG_H", a bare macro name with no '<' or '"' of its own on the
+// '#include' line at all. The absolute-include text scan the two tests
+// just above cover only ever looks for a literal '"' character on the
+// '#include' line itself, so a macro-computed one passed through
+// completely untouched; real system cpp then expanded the macro
+// *internally* and tried to open the real absolute path against the
+// actual host filesystem root, "No such file or directory" -- blocking
+// this mudlib's own global_include_file from compiling at all, which in
+// turn blocked *every single object* in the mudlib (global_include_file
+// is implicitly #included into everything). Mirrors the real shape
+// exactly: the macro is #define'd earlier in the same file as its own
+// later, bare-name '#include'.
+static void testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot() {
+    ObjectVarHarness harness;
+
+    harness.writeFile("/config_target.c",
+        "int config_value() {\n"
+        "    return 99;\n"
+        "}\n");
+
+    harness.writeFile("/global_with_computed_include.c",
+        "#define CONFIG_H \"/config_target.c\"\n"
+        "#include CONFIG_H\n"
+        "int probe() {\n"
+        "    return config_value();\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/global_with_computed_include");
+    assert(obj != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 99);
+
+    std::cout << "testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot OK\n";
+}
+
+// Found live against the same real Dead Souls 3.8.2 boot attempt, a
+// second, distinct bug in the same area: real cpp macro scope is
+// whole-compilation, not per-file -- a macro #define'd in one
+// #include'd file stays visible for the rest of the compilation unit,
+// including the file that #included it and everything after. Real
+// corpus: Dead Souls' own configured global include file,
+// secure/include/global.h, #defines several macros this way ("#define
+// ROOMS_H \"/secure/include/rooms.h\""), each meant to be used later by
+// whichever real object file needs it -- secure/daemon/master.c's own
+// real "#include ROOMS_H" is *not* inside global.h at all, it is the
+// compiled object's own body, several files away from where ROOMS_H was
+// actually #define'd. This driver's own global-include-file splice
+// (the fix just above) and the compiled object's own body used two
+// independent macro-tracking maps, so a macro recorded while resolving
+// the global include file was invisible again the moment the real
+// object's own body was scanned. Fixed by sharing one macro map (and
+// include-cycle-guard set) across both, matching real cpp's own single,
+// whole-unit macro scope.
+static void testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody() {
+    ObjectVarHarness harness("global_include_file: <global_macros.h>\n");
+    harness.writeFile("/global_macros.h",
+        "#define ROOMS_H \"/rooms_target.c\"\n");
+    harness.writeFile("/rooms_target.c",
+        "int rooms_value() {\n"
+        "    return 17;\n"
+        "}\n");
+    harness.writeFile("/uses_global_macro.c",
+        "#include ROOMS_H\n"
+        "int probe() {\n"
+        "    return rooms_value();\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/uses_global_macro");
+    assert(obj != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 17);
+
+    std::cout << "testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody OK\n";
+}
+
 // Found live against a real third-party mudlib corpus (row 3.8's TMI-2
 // boot attempt): std/object/sec_ob.c's own real "inherit
 // \"std/object/ob_logic\";" -- no leading '/', a real, valid LPC form
@@ -28628,6 +28711,8 @@ int main() {
     testCreateRuntimeErrorFailsLoadInsteadOfCrashing();
     testAbsoluteIncludePathResolvesAgainstMudlibRoot();
     testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves();
+    testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot();
+    testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody();
     testInheritPathWithoutLeadingSlashResolvesSameAsWithOne();
     testCppWarningsDoNotFailPreprocessing();
     testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg();

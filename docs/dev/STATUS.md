@@ -9,6 +9,263 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-03: TMI-2 deeper pass, row 3.8, combat/communication/equip
+exercised for the first time (the 2026-09-02 pass covered only
+character creation, look, inventory, and movement). Same real TCP
+connection method, same rigor. 4 further real, narrow driver bugs
+found and fixed, plus one real, well-evidenced bug found and
+deliberately left unfixed (a genuine architectural gap, named and
+scoped, not half-built). 849 tests passing (up from 844), zero
+regressions at every step. Row 3.8 stays marked `[x]`; this is
+additional depth on the same row, nothing reopened it.**
+
+Restarted the driver against `etc/driver_tmi2.cfg` (same config as the
+prior pass), connected over a real TCP socket the same way (a small
+Python client script, not telnet, so a scripted sequence of commands
+could be sent and every response captured for inspection). Created a
+fresh wizard-status character (`combattest`, later a second one for
+cross-player tests) and, since this account got the same real
+"automatic wizard status" grant the prior pass's account did, used
+real `clone` (a real wizard command, `/cmds/object/_clone.c`) to
+equip a starting `/obj/sword` and armor and to summon a real
+`/obj/orc` monster rather than searching the world for one, the
+fastest real path to combat.
+
+**Bug 1: `std/monster.c`'s own `mapping alias ;` (line 44) redeclaring
+a variable name already declared by its own multiply-inherited
+ancestor `std/body/alias.c` ("mapping alias;", reached via
+`std/body.c` -> `std/living.c` -> `std/monster.c`) was rejected as a
+hard codegen error, so every single monster in this mudlib
+(`/obj/orc.c` included) failed to compile at all: "codegen: object
+variable \"alias\" already declared".** Real `compiler.c`'s own
+`define_variable()` (compiler.c:1251-1296) treats this as legal,
+warning only ("Redeclaration of global variable '...'.",
+compiler.c:1272), never a hard error, unless the *existing* slot was
+declared `nomask` (compiler.c:1282) -- a case this driver does not
+track on object variables at all, and this corpus never uses. Fixed
+in `CodeGen::generate()` (`CodeGen.cpp`): removed the throw entirely,
+letting the redeclaration fall through to the same "assign a fresh
+slot" path an ordinary, non-colliding declaration already takes --
+real semantics confirmed to need nothing more than this, since the
+ancestor's own already-compiled bytecode keeps referencing its own
+fixed slot offset regardless of what a descendant declares later; only
+which slot *this file's own new code* resolves the plain name to
+changes. New regression test
+(`testObjectVariableRedeclarationOverInheritedNameIsLegalShadowing`)
+mirrors the real `alias`-in-`std/monster.c`-over-`std/body/alias.c`
+shape exactly, confirming the two slots are genuinely separate
+storage. A pre-existing test asserting the *opposite* (a hard throw
+for a same-file duplicate declaration) was itself wrong per this same
+real `define_variable()` codepath (its own header comment literally
+calls this case out: "the nasty idiots have two variables of the same
+name in the same object" -- still a warning, not an error), so it was
+renamed and rewritten to assert the real behavior instead
+(`testCodegenDuplicateObjectVariableIsLegalLastDeclarationWins`), not
+just relaxed.
+
+**Bug 2: `Scheduler::tickHeartbeats()` never set up a command giver
+before calling `heart_beat()`, so `this_player()` inside any
+`heart_beat()` body read stale or, the common case, a real "no
+player" int 0 -- aborting every single combat round.** Real
+`call_heart_beat()` (backend.c:355-373) explicitly resolves and pushes
+one: `new_command_giver = ob;` (the heart-beating object itself),
+walks its own shadow chain, nulls it out unless `O_ENABLE_COMMANDS` is
+actually set, then `save_command_giver(new_command_giver)` for the
+duration of the call. This driver's own `vm_.callFunction(obj,
+"heart_beat", {})` did none of this. Confirmed live: TMI-2's own real
+`std/monster.c`/`std/user.c` `continue_attack()` both do
+`this_player()->query("wimpy")` (or similar), a real, load-bearing
+idiom that assumes `this_player()` during a heart_beat() call is the
+heart-beating object itself; with no command giver ever pushed, this
+call_other()'d a non-object value, throwing "call_other: first
+argument must be an object or a string path" on *every* heartbeat
+tick, so combat never progressed no matter how many real seconds
+passed -- confirmed by the driver log showing this exact error
+repeating once per tick for both the player and the monster
+simultaneously. Fixed by resolving the real command giver (shadow-
+chain walk + `commandsEnabled()` check, matching real semantics
+exactly, both already tracked on `LpcObject`) and pushing/popping it
+via the existing `VM::pushCommandGiver()`/`popCommandGiver()` around
+the `heart_beat()` call, RAII-safe against a thrown `heart_beat()`.
+New regression test
+(`testHeartbeatSetsThisPlayerToTheHeartBeatingObjectWhenCommandsEnabled`)
+covers both real branches: an object with commands enabled sees itself
+as `this_player()`; one that never enabled commands sees a real 0,
+matching real `new_command_giver = 0`.
+
+**Bug 3: `restore_object()`/`save_object()`'s own on-disk format
+restored an unsavable slot (an object reference or closure) as this
+driver's own internal "undefined" value (`std::monostate`) instead of
+real, plain integer 0, so a restored `== 0` check silently failed.**
+Real `save_svalue()` (object.c) has no `T_OBJECT`/`T_CLOSURE` case at
+all -- confirmed directly, not guessed -- so real FluffOS writes
+nothing for one, and its own restore parser reads the resulting
+blank/missing text the same way it reads any other empty token: as
+plain `T_NUMBER` 0. Real LPC has no separate "undefined" runtime value
+at all; every unset slot, including this exact "used to hold an object
+but that object is gone now" case, is ordinary int 0. Confirmed live:
+TMI-2's own real `std/user.c::clean_up_attackers()` ("if
+(attackers[i] == 0 || !living(attackers[i])) continue;",
+`attackers` a real `object *` array) failed to skip a stale, save/
+restore-nulled attacker, falling through to `call_other()` a
+non-object value -- the *same* symptom as Bug 2, but a second,
+independent, compounding real cause (both had to be fixed for combat
+against a *reconnecting* character with a save file predating this
+session's own fixes to actually progress cleanly). Fixed in
+`EfunTable.cpp`'s `deserializeValue()`: `case 'N'` now returns
+`Value(int64_t{0})` instead of `Value{}`. (A structurally identical
+`case 'N'` exists in `StateSerializer.cpp`'s own separate
+`deserializeWorldValue()`, for this driver's own whole-world hotboot
+dump/restore mechanism -- a different subsystem with no real FluffOS
+equivalent to cite, sharing its `'N'` tag among object/closure
+references *and* DGD's own distinct `Nil` value and LDMud's own
+`Symbol`, where collapsing all of them to plain int 0 would be wrong
+for `Nil` specifically. Not touched this session: no live evidence
+this session's own testing ever exercised hotboot dump/restore at
+all, and fixing it correctly needs to keep `Nil` distinct from int 0
+while only object/closure collapse to 0 -- more surface than this
+session actually verified live. Named here so it is not
+reintroduced as an assumption later.) New regression test
+(`testRestoreObjectRestoresANulledObjectSlotAsRealIntegerZero`) saves
+an object variable holding a live self-reference, clears it, restores
+it, and confirms the restored slot really does compare `== 0`.
+
+**Bug 4: `living()`'s own `DEFAULT_THIS_OBJECT` handling
+(func_spec.c: "int living(object default: this_object());") fired
+whenever the argument wasn't an object -- including when the call site
+passed an explicit argument that just happens, at runtime, to not
+currently hold one -- rather than only when the call genuinely omitted
+the argument, silently reporting the *calling object's own* living()
+status instead of the correct 0.** Real `DEFAULT_THIS_OBJECT`
+(efun_defs.c:110) is a real, compile-time-only insertion for a call
+site with too few arguments; real `f_living()` (add_action.c:687-695)
+never re-examines whether the one argument it always receives by then
+was the caller's own or the compiler's inserted default. This
+driver's own equivalent of "the call omitted the argument" is
+`args.empty()`, not "`args[0]` is present but isn't an object" -- two
+different real situations conflated into one. This compounded Bug 3
+above: with `attackers[i]` restoring as `Value{}` instead of real int
+0, `!living(attackers[i])` was *also* silently wrong (evaluating
+`living()` of the *calling* object instead of the absent attacker),
+independently masking the same real bug from a second angle. Fixed in
+`EfunTable.cpp`'s `living()` registration: only default to
+`vm.currentObject()` when `args.empty()`; an explicit non-object
+argument now correctly yields target `nullptr` (living() == 0). New
+regression test
+(`testLivingWithExplicitFalsyNonObjectArgumentDoesNotFallBackToThisObject`).
+
+**Bug 5: a statement beginning with an indexed assignment (or a plain
+assignment, or any other bare expression) could not be comma-chained
+with a further expression before its terminating `;` -- real LPC's own
+C-style comma operator, valid in *any* expression-statement position,
+not just a `for` loop's own init/update clauses (which this driver
+already supported via the existing `parseCommaExprChain()`).** Real
+`grammar.y`'s own `statement: comma_expr ';'` (grammar.y:1055) is one
+production for every plain-expression statement; `comma_expr` itself
+is `expr0 | comma_expr ',' expr0` (grammar.y:1555-1562). This driver's
+own parser splits that one real production into three separate fast
+paths (a bare assignment, an indexed assignment, and the general
+expression-statement fallback), and none of the three honored the
+comma continuation -- confirmed live: TMI-2's own real
+`cmds/file/_eval.c` -> `doith()`'s own `inp[i] = inp[i] + ";"+
+inp[i+1], inp -= ({inp[i+1]});` (an indexed assignment followed by a
+comma-chained whole-array compound assignment) failed to compile at
+all ("expected \";\" in indexed assignment statement ... got \",\""),
+which broke the real `eval` wizard command entirely (the file that
+implements it could never even compile), which in turn was this
+session's own diagnostic tool of choice for chasing Bug 6 below before
+this was found and fixed first. Fixed with a new shared helper,
+`Parser::continueStatementCommaChain()`, called from all three fast
+paths right after each parses its own first element: if a comma
+follows, wraps the first statement into a synthetic non-scoping
+`Block` and keeps consuming further `, expr0` elements as their own
+`ExprStmt`s before the caller's own existing `expectText(";", ...)`
+runs, the identical desugaring `parseCommaExprChain()` already used
+for a `for` loop's own clauses. New regression test
+(`testStatementLevelCommaChainAfterIndexedAndPlainAssignmentVmExecution`)
+covers all three fast paths: the real indexed-assignment-then-
+compound-assignment shape from `doith()`, a bare assignment chained
+with another, and a general expression statement (a discarded
+`sizeof()` call) chained with an assignment.
+
+**Bug 6, found live, real, well-evidenced, and correctly left
+unfixed: `file_name()` has no real per-clone "#\<id\>" suffix (an
+already-documented, deliberate gap -- see its own comment in
+`EfunTable.cpp`), and this mudlib's own real
+`adm/simul_efun/hiddenp.c` depends on exactly that suffix to work.**
+Real `hiddenp(ob)` in TMI-2 is implemented as
+`!find_object(file_name(ob))` after a `seteuid(0)` privilege bump --
+relying on real `file_name()`'s own per-instance uniqueness (real
+`obname` always carries a `"#<clone id>"` suffix, `efuns_main.c`'s
+`f_file_name()`) so that `find_object()` can re-resolve *that exact
+live instance*, not just "some object compiled from this same file".
+This driver's `file_name()` returns the bare program path for every
+clone of the same file (confirmed directly, already flagged in its own
+comment as a known simplification with "nothing this driver runs yet
+depends on telling them apart this way" -- this session found the
+first real, live corpus dependency), so `hiddenp()` on *any* cloned,
+interactive player body returns 1 (wrongly "hidden") rather than 0.
+This cascades into `adm/simul_efun/visible.c`'s own real
+`visible(detectee, detector)` (`if (hiddenp(detectee_obj))
+detectee_vis = 3;`, beating any non-admin `detector_rank`), which in
+turn silently broke real cross-player `tell` ("Tellpartner is not on
+TMI2." even while both characters were live, in the same room, and
+`find_player()` itself correctly found the target -- confirmed
+directly via `eval` once Bug 5's fix made `eval` usable again) and
+`who`'s own `filter_users()` (each of two simultaneously connected
+wizard-status characters saw only themselves in `who`, confirmed with
+both connections live and `eval return sizeof(users())` independently
+confirming the real connection registry itself was correct: it
+returned 2, not 1, so this was never a registry bug). **Not fixed.**
+Giving `LpcObject` a real, unique per-file clone-id concept, threading
+it through `file_name()`'s own suffix, `find_object()`'s own suffixed-
+path parsing (so `find_object("/std/user#7")` re-resolves the *same*
+instance, not just any object compiled from `/std/user`), and
+`base_name()`'s own suffix-stripping (already noted as depending on
+this same concept) is a real, cross-cutting change touching object
+identity throughout the whole object-manager layer, not a narrow,
+single-file fix like the five bugs above -- named here in full, with
+its own concrete real corpus impact now confirmed live, rather than
+attempted piecemeal. `wizardp()`/`find_player()`/`users()` themselves
+were all independently confirmed correct via the same `eval` probing
+session, isolating the fault to `file_name()`/`hiddenp()` specifically
+rather than guessed.
+
+**Live verification, over real TCP connections (Python socket
+client, as before), several full runs, including two simultaneous
+connections for cross-player tests:** `wield`/`unwield`,
+`equip`/`unequip` (a sword and a suit of chainmail) all worked
+cleanly both directions; `say`, `emote`, `shout` all worked cleanly,
+including a real ask/exclaim `say` variant (trailing `?`/`!`); real
+combat via `kill` against a cloned `/obj/orc`, after both fixes above,
+ran a full real fight end to end with zero further errors -- real
+hit/miss resolution both directions ("You stab at Orc with your sword
+but you miss." / "Orc swipes at you with hir paws and does light
+damage."), real damage messages, and a real kill ("I don't see that
+here." / "The combat is over." once the orc died); a `score` call
+partway through still hits the already-known, already-tracked `%-`/
+`%=` sprintf column-mode gap (row 3.9's own scoped-out limitation, not
+re-litigated here). `help wield`'s own trailing literal `"1"` after
+its help banner (`_wield.c`'s own `help()` both `write()`s its usage
+text directly *and* returns int `1`, which the driver's help daemon
+then string-concatenates onto its own banner text, real LPC's own
+int-to-string coercion) was checked and confirmed to be real,
+faithful mudlib-content behavior, not a driver bug -- `_wield.c`'s own
+`help()` is simply inconsistent about whether it writes or returns its
+help text, unrelated to this driver.
+
+Full clean rebuild and full suite re-run after every fix in this list
+(6 total edits across `CodeGen.cpp`, `Scheduler.cpp`, `EfunTable.cpp`
+twice, and `Parser.cpp`/`Parser.hpp`), 849 tests passing throughout by
+the end (up from 844), zero regressions at any point. Test character
+files created during live verification (`combattest`, `combatterb`,
+`tellpartner`, both `data/std/user/` and `data/std/connection/`
+entries) deleted afterward, matching this project's own established
+cleanup precedent.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-09-02 (a further session, same day): TMI-2 boot, row 3.8, real
 feature-complete boot and gameplay confirmed. Login, character
 creation, look, inventory, and movement between real rooms all

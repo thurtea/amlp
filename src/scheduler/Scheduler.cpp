@@ -252,6 +252,42 @@ void Scheduler::tickHeartbeats() {
     for (auto& obj : due) {
         try {
             vm_.resetEvalCost();
+            // Real call_heart_beat() (backend.c:355-373) sets up
+            // this_player()/command_giver for the duration of the call,
+            // it does not leave it whatever it happened to be before:
+            // "new_command_giver = ob; while (new_command_giver->shadowing)
+            // new_command_giver = new_command_giver->shadowing; if
+            // (!(new_command_giver->flags & O_ENABLE_COMMANDS))
+            // new_command_giver = 0; ... save_command_giver(new_command_
+            // giver);" -- resolve the shadow chain, then null it out
+            // unless commands are actually enabled on the (possibly
+            // shadow-resolved) object, matching enable_commands()'s own
+            // real O_ENABLE_COMMANDS flag this driver already tracks
+            // (LpcObject::commandsEnabled()). Previously this called
+            // heart_beat() with whatever command giver (if any) happened
+            // to be left on the stack from an unrelated prior dispatch,
+            // so this_player() inside a heart_beat() body -- a real,
+            // load-bearing idiom (std/user.c's/std/monster.c's own
+            // continue_attack(), "this_player()->query(\"wimpy\")" and
+            // similar) -- read either stale or (the common case, no
+            // command in flight when a tick fires) a real "no player"
+            // int 0. That 0 fed straight into call_other() as its own
+            // first argument (real LPC compiles "->" to the very same
+            // call_other() efun, grammar.y:3611-3623, arrow_efun),
+            // confirmed live: TMI-2's own real /std/monster.c ->
+            // continue_attack() -> this_player()->query("wimpy") aborted
+            // every single heart_beat() tick for both the player and any
+            // monster mid-combat with "call_other: first argument must be
+            // an object or a string path", so no attack ever actually
+            // landed no matter how long combat continued. Fixed by
+            // resolving and pushing the real command giver here, popped
+            // unconditionally afterward (RAII, survives a thrown
+            // heart_beat()) the same way VM::moveObject()'s own
+            // CommandGiverGuard already does around init().
+            std::shared_ptr<LpcObject> giver = obj;
+            while (auto shadowed = giver->shadowing().lock()) giver = shadowed;
+            if (!giver->commandsEnabled()) giver = nullptr;
+            vm_.pushCommandGiver(giver);
             // Origin::Driver (this call's own default): real backend.c's
             // own heart_beat firing is "call_direct(ob, ...,
             // ORIGIN_DRIVER, 0)", confirmed directly -- unlike call_out's
@@ -260,7 +296,13 @@ void Scheduler::tickHeartbeats() {
             // citation); the two driver-fired timers are not the same
             // origin, so this is left explicit-by-omission deliberately,
             // not an oversight.
-            vm_.callFunction(obj, "heart_beat", {});
+            try {
+                vm_.callFunction(obj, "heart_beat", {});
+            } catch (...) {
+                vm_.popCommandGiver();
+                throw;
+            }
+            vm_.popCommandGiver();
         } catch (const std::exception& e) {
             std::cerr << "[heart_beat] " << obj->filename() << ": " << e.what() << "\n";
         }

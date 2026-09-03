@@ -77,6 +77,7 @@ private:
 
     AstPtr parseExpr();
     AstPtr parseCommaExprChain();
+    AstPtr continueStatementCommaChain(AstPtr firstStmt);
     AstPtr parseTernary();
     AstPtr parseLogicalOr();
     AstPtr parseLogicalAnd();

@@ -1199,6 +1199,43 @@ AstPtr Parser::parseCommaExprChain() {
     return block;
 }
 
+// Real grammar.y's own "statement: comma_expr ';'" (grammar.y:1055) is one
+// production for every plain-expression statement: comma_expr itself is
+// "expr0 | comma_expr ',' expr0" (grammar.y:1555-1562), the real C-style
+// comma operator, evaluating each expr0 in order and discarding every
+// result but the last. This driver's own statement parser splits that one
+// real production into three separate fast paths below (a bare
+// assignment, an indexed assignment, and the general expression-statement
+// fallback) rather than always going through parseCommaExprChain() from
+// scratch, since each fast path has already committed to parsing its own
+// first element a different way by the time it knows whether a comma
+// follows. This is the shared tail every one of them calls once their own
+// first statement is built, so all three honor the same real rule
+// uniformly: if what follows is a comma, real LPC allows chaining further
+// ", expr0" elements before the terminating ';', each evaluated for its
+// side effect only, exactly like the existing parseCommaExprChain() (used
+// for a for-loop's own init/update clause) already desugars this same
+// grammar rule. Real corpus: TMI-2's own real cmds/file/_eval.c ->
+// doith()'s "inp[i] = inp[i] + \";\"+ inp[i+1], inp -= ({inp[i+1]});" -- an
+// indexed assignment followed by a comma-chained whole-array compound
+// assignment, previously rejected outright ("expected \";\" in indexed
+// assignment statement ... got \",\"") since the indexed-assignment fast
+// path required its terminating ';' immediately, with no comma handling
+// at all.
+AstPtr Parser::continueStatementCommaChain(AstPtr firstStmt) {
+    if (!checkText(",")) return firstStmt;
+    auto block = std::make_unique<Block>();
+    block->isRealScope = false;
+    block->statements.push_back(std::move(firstStmt));
+    while (checkText(",")) {
+        advance();
+        auto s = std::make_unique<ExprStmt>();
+        s->expr = parseExpr();
+        block->statements.push_back(std::move(s));
+    }
+    return block;
+}
+
 AstPtr Parser::parseReturnStatement() {
     expectText("return", "return statement");
     auto stmt = std::make_unique<ReturnStmt>();
@@ -1270,8 +1307,9 @@ AstPtr Parser::parseAssignStatement() {
     auto stmt = std::make_unique<AssignStmt>();
     stmt->name = nameTok.text;
     stmt->value = parseExpr();
+    AstPtr result = continueStatementCommaChain(std::move(stmt));
     expectText(";", "assignment statement");
-    return stmt;
+    return result;
 }
 
 std::unique_ptr<Block> Parser::parseBranch() {
@@ -1576,18 +1614,20 @@ AstPtr Parser::parseStatement() {
                 stmt->value = parseExpr();
                 stmt->isCompound = isCompound;
                 stmt->compoundOp = compoundOp;
+                AstPtr result = continueStatementCommaChain(std::move(stmt));
                 expectText(";", "indexed assignment statement");
-                return stmt;
+                return result;
             }
         }
         pos_ = save;
     }
 
     auto expr = parseExpr();
+    auto exprStmt = std::make_unique<ExprStmt>();
+    exprStmt->expr = std::move(expr);
+    AstPtr result = continueStatementCommaChain(std::move(exprStmt));
     expectText(";", "expression statement");
-    auto stmt = std::make_unique<ExprStmt>();
-    stmt->expr = std::move(expr);
-    return stmt;
+    return result;
 }
 
 std::unique_ptr<Block> Parser::parseBlock() {

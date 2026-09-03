@@ -1215,10 +1215,31 @@ CompiledProgram CodeGen::generate(const Program& program,
     std::vector<std::pair<int, const AstNode*>> pendingVarInitializers;
 
     for (const auto& varDecl : program.objectVars) {
-        if (objectVars_.count(varDecl->name)) {
-            throw LpcRuntimeError(
-                "codegen: object variable \"" + varDecl->name + "\" already declared");
-        }
+        // Redeclaring a variable name this file already inherits is real,
+        // legal LPC, not a compile error: real compiler.c's own
+        // define_variable() (compiler.c:1251-1296) only ever yywarn()s
+        // "Redeclaration of global variable '...'." (compiler.c:1272) for
+        // this exact case, hard-erroring only when the *existing* slot was
+        // declared "nomask" (compiler.c:1282, "Illegal to redefine
+        // 'nomask' variable"), which this driver does not yet track on
+        // object variables at all (no evidence of a nomask-variable
+        // redeclaration in any vendored corpus, so not added here). Real
+        // corpus: TMI-2's own std/monster.c ("mapping alias ;", line 44)
+        // redeclares the "alias" already declared by its own multiply-
+        // inherited ancestor std/body/alias.c ("mapping alias;", line 15,
+        // reached via std/body.c -> std/living.c -> std/monster.c),
+        // confirmed live ("codegen: object variable \"alias\" already
+        // declared" previously aborted compiling every single monster in
+        // this mudlib, e.g. /obj/orc.c). Real semantics: the two slots
+        // are separate storage (the ancestor's own already-compiled
+        // bytecode keeps referencing its own fixed slot offset,
+        // unaffected by anything a descendant does later); only which
+        // *slot* an unqualified "alias" resolves to *within this file's
+        // own new code from here on* changes, exactly like the ordinary
+        // no-collision case just below -- so this is a no-op fall-through,
+        // not a special case: the plain objectVars_[name] = slot
+        // assignment a few lines down already provides the correct
+        // shadowing behavior once the throw is removed.
         int slot = static_cast<int>(nextObjectVarSlot);
         ++nextObjectVarSlot;
         // The real name is what this file's own code resolves through

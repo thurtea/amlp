@@ -2152,26 +2152,49 @@ static void testCodegenLocalShadowsObjectVariableOfSameName() {
     std::cout << "testCodegenLocalShadowsObjectVariableOfSameName OK\n";
 }
 
-static void testCodegenDuplicateObjectVariableThrows() {
+// Was testCodegenDuplicateObjectVariableThrows, asserting the opposite of
+// what real LPC actually does. Real compiler.c's own define_variable()
+// (compiler.c:1251-1296) explicitly handles this exact same-file case in
+// its own comment ("Okay, the nasty idiots have two variables of the same
+// name in the same object. This causes headaches for save_object()."):
+// still only a yywarn() ("Redeclaration of global variable '...'.",
+// compiler.c:1272), never a hard yyerror(), unless the earlier declaration
+// was "nomask" (compiler.c:1282). Renamed and rewritten to assert the
+// real behavior instead: codegen succeeds, and the second declaration's
+// own new slot is what this file's own subsequent code resolves an
+// unqualified "x" to (last-declared wins), matching the identical
+// across-inheritance case fixed in
+// testObjectVariableRedeclarationOverInheritedNameIsLegalShadowing above
+// (both real cases run through the exact same real define_variable()).
+static void testCodegenDuplicateObjectVariableIsLegalLastDeclarationWins() {
     std::string src =
         "int x;\n"
         "int x;\n"
         "void create() {\n"
-        "}\n";
+        "    x = 42;\n"
+        "}\n"
+        "int query_x() { return x; }\n";
     amlp::Lexer lexer(src);
     amlp::Parser parser(lexer.tokenize());
     auto program = parser.parseProgram();
     amlp::CodeGen codegen;
 
+    amlp::CompiledProgram compiled;
     bool threw = false;
     try {
-        codegen.generate(*program);
+        compiled = codegen.generate(*program);
     } catch (const amlp::LpcRuntimeError&) {
         threw = true;
     }
-    assert(threw);
+    assert(!threw);
+    // Both slots exist in the flattened layout (the first, now-orphaned
+    // one still occupies real storage, exactly like an inherited slot
+    // does), not just the second.
+    assert(compiled.objectVarNames.size() == 2);
+    assert(compiled.objectVarNames[0] == "x");
+    assert(compiled.objectVarNames[1] == "x");
 
-    std::cout << "testCodegenDuplicateObjectVariableThrows OK\n";
+    std::cout << "testCodegenDuplicateObjectVariableIsLegalLastDeclarationWins OK\n";
 }
 
 static void testCodegenUndeclaredVariableStillThrows() {
@@ -9301,6 +9324,54 @@ static void testForLoopCommaExprChainInInitAndUpdateVmExecution() {
     std::cout << "testForLoopCommaExprChainInInitAndUpdateVmExecution OK\n";
 }
 
+// Real grammar.y's own "statement: comma_expr ';'" (grammar.y:1055) applies
+// to every plain-expression statement, not just a for-loop's own init/
+// update clauses (testForLoopCommaExprChainInInitAndUpdateVmExecution
+// just above). Real corpus: TMI-2's own real cmds/file/_eval.c ->
+// doith()'s "inp[i] = inp[i] + \";\"+ inp[i+1], inp -= ({inp[i+1]});" -- an
+// indexed assignment statement followed by a comma-chained plain
+// (whole-variable) compound assignment, previously rejected outright
+// ("expected \";\" in indexed assignment statement ... got \",\"") since
+// the parser's own statement-level IndexAssignStmt/AssignStmt fast paths
+// required their terminating ';' immediately after their own first
+// element, with no comma-continuation handling at all -- unlike the
+// general expression-statement fallback and the for-loop clauses, which
+// already went through parseExpr()/parseCommaExprChain() correctly.
+// Covers all three statement fast paths this one shared fix touches: an
+// indexed assignment chained with a plain compound assignment (the real
+// doith() shape), a bare assignment chained with another bare assignment,
+// and a general expression statement (a bare call) chained with an
+// assignment.
+static void testStatementLevelCommaChainAfterIndexedAndPlainAssignmentVmExecution() {
+    amlp::Value indexed = runProbe(
+        "int *arr;\n"
+        "int side;\n"
+        "arr = ({ 1, 2, 3 });\n"
+        "arr[0] = arr[0] + 10, side = 99;\n"
+        "return arr[0] * 1000 + side;\n");
+    assert(std::holds_alternative<int64_t>(indexed.data));
+    assert(std::get<int64_t>(indexed.data) == 11099); // arr[0] == 11, side == 99
+
+    amlp::Value plainAssign = runProbe(
+        "int a, b;\n"
+        "a = 1, b = 2;\n"
+        "return a * 10 + b;\n");
+    assert(std::holds_alternative<int64_t>(plainAssign.data));
+    assert(std::get<int64_t>(plainAssign.data) == 12);
+
+    amlp::Value exprStmt = runProbe(
+        "int n;\n"
+        // A bare call, discarded, chained with an assignment -- exercises
+        // the general expression-statement fallback path specifically
+        // (one that does not start with "ident =" or "ident[").
+        "sizeof( ({ 1, 2, 3 }) ), n = 7;\n"
+        "return n;\n");
+    assert(std::holds_alternative<int64_t>(exprStmt.data));
+    assert(std::get<int64_t>(exprStmt.data) == 7);
+
+    std::cout << "testStatementLevelCommaChainAfterIndexedAndPlainAssignmentVmExecution OK\n";
+}
+
 // --- switch -----------------------------------------------------------
 // Hit immediately after for-loop comma-expression chains while
 // re-attempting the real boot: secure/SimulEfun/alignment.c's own
@@ -11711,6 +11782,54 @@ static void testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays() {
     std::cout << "testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays OK\n";
 }
 
+// Regression test for a genuine, live-caught bug: an object reference
+// cannot survive a save/restore round trip (real save_svalue(), object.c,
+// has no T_OBJECT case at all -- confirmed directly, not guessed), so
+// real LPC always reads such a slot back as plain, ordinary T_NUMBER 0,
+// the exact same value an unset "object" typed variable already holds --
+// there is no separate "undefined"/"void" runtime value in real LPC.
+// This driver's own restore path previously produced its own internal
+// std::monostate there instead, which compares unequal to a literal 0
+// (Value's own index-based valuesEqual(), Value.cpp) -- confirmed live:
+// TMI-2's own real std/user.c::clean_up_attackers() ("if (attackers[i]
+// == 0 || !living(attackers[i])) continue;", attackers being a real
+// object* array) failed to skip a save/restore-nulled entry, falling
+// through to call_other() a non-object value. Real corpus: any mudlib
+// that saves an "object" typed (or object-containing-array/mapping)
+// variable at all hits this the moment an object it once pointed to is
+// gone by the time the character reconnects, an entirely ordinary event
+// (not a rare edge case) for anything tracking transient object refs
+// (combat attackers, a held item, a room exit) in a saved field.
+static void testRestoreObjectRestoresANulledObjectSlotAsRealIntegerZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/save_nulled_probe.c",
+        "object *victims;\n"
+        "void create() { victims = ({ this_object() }); }\n"
+        "int save() { return save_object(\"/nulled_probe.o\"); }\n"
+        "void clear() { victims = 0; }\n"
+        "int load() { return restore_object(\"/nulled_probe.o\"); }\n"
+        // Real LPC idiom this exact bug broke: an explicit "== 0" check
+        // must be true for a restored, no-longer-savable object slot.
+        "int first_is_zero() { return victims[0] == 0; }\n");
+    auto obj = harness.objects.cloneObject("/save_nulled_probe");
+    assert(obj != nullptr);
+
+    // The object variable holds a real live self-reference at save time
+    // (an object cannot be serialized, so the round trip must still
+    // produce a real 0 regardless of what the live value was).
+    amlp::Value saveResult = harness.vm.callFunction(obj, "save", {});
+    assert(std::get<int64_t>(saveResult.data) == 1);
+
+    harness.vm.callFunction(obj, "clear", {});
+    amlp::Value loadResult = harness.vm.callFunction(obj, "load", {});
+    assert(std::get<int64_t>(loadResult.data) == 1);
+
+    amlp::Value isZero = harness.vm.callFunction(obj, "first_is_zero", {});
+    assert(std::get<int64_t>(isZero.data) == 1);
+
+    std::cout << "testRestoreObjectRestoresANulledObjectSlotAsRealIntegerZero OK\n";
+}
+
 // ROADMAP.md row 1.9's own "Save/restore silent-truncation finding"
 // addendum (2026-08-21): a bounded stopgap, not full width-aware
 // serialization (still its own, separately-scoped, larger item on that
@@ -13210,6 +13329,64 @@ static void testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain() {
     std::cout << "testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain OK\n";
 }
 
+// Real corpus: TMI-2's own std/monster.c ("mapping alias ;") redeclares a
+// variable name already declared by its own multiply-inherited ancestor
+// std/body/alias.c ("mapping alias;"). Real compiler.c's own
+// define_variable() (compiler.c:1251-1296) treats this as legal, warning
+// only (compiler.c:1272, "Redeclaration of global variable '...'."), not
+// a hard error, unless the existing slot was "nomask" (compiler.c:1282) --
+// this driver previously threw a hard codegen error for every such case,
+// which meant every real monster in this mudlib (e.g. /obj/orc.c, via
+// std/monster.c -> std/living.c -> std/body.c -> std/body/alias.c)
+// failed to compile at all ("codegen: object variable \"alias\" already
+// declared"). Confirms the two slots are genuinely separate storage: the
+// ancestor's own already-compiled code keeps reading/writing its own
+// fixed slot, completely unaffected by the descendant's later
+// redeclaration, while the descendant's own new code resolves the same
+// plain name to its own new, shadowing slot.
+static void testObjectVariableRedeclarationOverInheritedNameIsLegalShadowing() {
+    ObjectVarHarness harness;
+
+    // Ancestor, mirroring std/body/alias.c: declares "alias" itself and
+    // has its own functions that read/write it.
+    harness.writeFile("/shadow_ancestor.c",
+        "mapping alias;\n"
+        "void ancestor_set_alias() { alias = ([ \"anc\": 1 ]); }\n"
+        "mapping ancestor_query_alias() { return alias; }\n");
+
+    // Descendant, mirroring std/monster.c: inherits the ancestor
+    // (through an intermediate file, mirroring the real
+    // body.c -> living.c -> monster.c chain) and redeclares "alias"
+    // itself with its own, unrelated value.
+    harness.writeFile("/shadow_mid.c",
+        "inherit \"/shadow_ancestor\";\n");
+    harness.writeFile("/shadow_leaf.c",
+        "inherit \"/shadow_mid\";\n"
+        "mapping alias;\n"
+        "void leaf_set_alias() { alias = ([ \"leaf\": 2 ]); }\n"
+        "mapping leaf_query_alias() { return alias; }\n");
+
+    auto obj = harness.objects.cloneObject("/shadow_leaf");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "ancestor_set_alias", {});
+    harness.vm.callFunction(obj, "leaf_set_alias", {});
+
+    amlp::Value ancAlias = harness.vm.callFunction(obj, "ancestor_query_alias", {});
+    amlp::Value leafAlias = harness.vm.callFunction(obj, "leaf_query_alias", {});
+
+    auto* ancMap = std::get_if<std::shared_ptr<amlp::Mapping>>(&ancAlias.data);
+    auto* leafMap = std::get_if<std::shared_ptr<amlp::Mapping>>(&leafAlias.data);
+    assert(ancMap != nullptr && *ancMap != nullptr);
+    assert(leafMap != nullptr && *leafMap != nullptr);
+    assert((*ancMap)->entries.size() == 1);
+    assert(std::get<std::string>((*ancMap)->entries[0].first.data) == "anc");
+    assert((*leafMap)->entries.size() == 1);
+    assert(std::get<std::string>((*leafMap)->entries[0].first.data) == "leaf");
+
+    std::cout << "testObjectVariableRedeclarationOverInheritedNameIsLegalShadowing OK\n";
+}
+
 // ---------------------------------------------------------------------
 // add_action()/enable_commands() command dispatch subsystem. Grounded in
 // fluffos-2.9-ds2.08/add_action.c directly (not guessed) and this
@@ -14094,6 +14271,40 @@ static void testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject() {
     assert(std::get<int64_t>(disabled.data) == 0);
 
     std::cout << "testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject OK\n";
+}
+
+// Regression test for a genuine, live-caught bug: living()'s own
+// DEFAULT_THIS_OBJECT handling (real func_spec.c: "int living(object
+// default: this_object());") previously fired whenever the argument
+// wasn't an object -- including when the call site passed an explicit
+// argument that just happens, at runtime, to not currently hold one
+// (real LPC's ordinary "unset object variable reads back as int 0"
+// idiom) -- rather than only when the call genuinely omitted the
+// argument. Real DEFAULT_THIS_OBJECT (efun_defs.c:110) is a real,
+// compile-time-only insertion for a call site with too few arguments;
+// real f_living() (add_action.c:687-695) never re-examines whether the
+// one argument it always receives by then was the caller's own or the
+// compiler's inserted default. Confirmed live: TMI-2's own real
+// std/user.c::clean_up_attackers() calls living(attackers[i]) explicitly,
+// and a stale (save/restore-nulled) attackers[i] wrongly reported the
+// *calling object's own* living() status instead of the correct false.
+static void testLivingWithExplicitFalsyNonObjectArgumentDoesNotFallBackToThisObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lv_explicit.c",
+        "void enable() { enable_commands(); }\n"
+        "int living_of(object ob) { return living(ob); }\n");
+    auto probe = harness.objects.cloneObject("/lv_explicit");
+    assert(probe != nullptr);
+    harness.vm.callFunction(probe, "enable", {});
+
+    // probe itself has commands enabled, but the argument passed is an
+    // explicit non-object (int 0), not an omitted one -- must read 0,
+    // not silently fall back to reporting probe's own living() status.
+    amlp::Value result =
+        harness.vm.callFunction(probe, "living_of", {amlp::Value(int64_t{0})});
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testLivingWithExplicitFalsyNonObjectArgumentDoesNotFallBackToThisObject OK\n";
 }
 
 // set_hide(int) -- func_spec.c: "void set_hide(int);". Confirmed against
@@ -15972,6 +16183,68 @@ static void testHeartbeatCallingSetHeartBeatOnItselfDoesNotCorruptIteration() {
     assert(std::get<int64_t>(bystanderAfter.data) == 2);
 
     std::cout << "testHeartbeatCallingSetHeartBeatOnItselfDoesNotCorruptIteration OK\n";
+}
+
+// Regression test for a genuine, live-caught bug: tickHeartbeats() called
+// heart_beat() with whatever command giver (if any) happened to already
+// be on VM's own commandGiverStack_, instead of setting one up the way
+// real call_heart_beat() does (backend.c:355-373): "new_command_giver =
+// ob; ... if (!(new_command_giver->flags & O_ENABLE_COMMANDS))
+// new_command_giver = 0; ... save_command_giver(new_command_giver);".
+// Confirmed live: TMI-2's own real /std/monster.c's continue_attack(),
+// called from every monster's own heart_beat(), does
+// "this_player()->query(\"wimpy\")" -- with no command giver ever pushed,
+// this_player() fell through to int 0, and 0->query(...) aborted the
+// whole heart_beat() call every single tick, so combat never actually
+// progressed no matter how many rounds passed. Covers both real branches:
+// an object with commands enabled (enable_commands() called, matching
+// real O_ENABLE_COMMANDS) sees itself as this_player() during its own
+// heart_beat(); one that never enabled commands sees a real 0/null,
+// exactly like real backend.c's own "new_command_giver = 0" branch.
+static void testHeartbeatSetsThisPlayerToTheHeartBeatingObjectWhenCommandsEnabled() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_enabled.c",
+        "object seen;\n"
+        "int called;\n"
+        "void enable() { set_heart_beat(1); enable_commands(); }\n"
+        "void heart_beat() { called = 1; seen = this_player(); }\n"
+        "object query_seen() { return seen; }\n"
+        "int query_called() { return called; }\n");
+    harness.writeFile("/hb_disabled.c",
+        "int called;\n"
+        "int saw_zero;\n"
+        "void enable() { set_heart_beat(1); }\n" // no enable_commands()
+        "void heart_beat() { called = 1; if (!this_player()) saw_zero = 1; }\n"
+        "int query_called() { return called; }\n"
+        "int query_saw_zero() { return saw_zero; }\n");
+
+    auto enabled = harness.objects.cloneObject("/hb_enabled");
+    auto disabled = harness.objects.cloneObject("/hb_disabled");
+    assert(enabled != nullptr && disabled != nullptr);
+
+    harness.vm.callFunction(enabled, "enable", {});
+    harness.vm.callFunction(disabled, "enable", {});
+
+    scheduler.tickHeartbeats();
+
+    amlp::Value enabledCalled = harness.vm.callFunction(enabled, "query_called", {});
+    assert(std::get<int64_t>(enabledCalled.data) == 1);
+    amlp::Value seen = harness.vm.callFunction(enabled, "query_seen", {});
+    auto* seenPtr = std::get_if<std::shared_ptr<amlp::LpcObject>>(&seen.data);
+    assert(seenPtr != nullptr && *seenPtr == enabled);
+
+    amlp::Value disabledCalled = harness.vm.callFunction(disabled, "query_called", {});
+    assert(std::get<int64_t>(disabledCalled.data) == 1);
+    amlp::Value sawZero = harness.vm.callFunction(disabled, "query_saw_zero", {});
+    assert(std::get<int64_t>(sawZero.data) == 1);
+
+    // The command giver stack is popped back to empty afterward, not left
+    // dangling for whatever runs next.
+    assert(harness.vm.commandGiver() == nullptr);
+
+    std::cout << "testHeartbeatSetsThisPlayerToTheHeartBeatingObjectWhenCommandsEnabled OK\n";
 }
 
 // ---------------------------------------------------------------------
@@ -28253,7 +28526,7 @@ int main() {
     testCodegenEmitsPushObjectVarForRead();
     testCodegenEmitsStoreObjectVarForWrite();
     testCodegenLocalShadowsObjectVariableOfSameName();
-    testCodegenDuplicateObjectVariableThrows();
+    testCodegenDuplicateObjectVariableIsLegalLastDeclarationWins();
     testCodegenUndeclaredVariableStillThrows();
     testObjectVariablePersistsAcrossSeparateCalls();
     testObjectVariableIsPerInstanceNotSharedAcrossObjects();
@@ -28507,6 +28780,7 @@ int main() {
     testTrailingVarargsEllipsisParsesAndIsDiscarded();
     testOpenEndedRangeIndexVmExecution();
     testForLoopCommaExprChainInInitAndUpdateVmExecution();
+    testStatementLevelCommaChainAfterIndexedAndPlainAssignmentVmExecution();
     testSwitchParsesToSwitchStmtWithInterleavedLabels();
     testSwitchRangeCaseLabelParsesWithRangeEndSet();
     testSwitchRangeCaseLabelVmExecution();
@@ -28593,6 +28867,7 @@ int main() {
     testPreviousObjectMinusOneReturnsFullChain();
     testUnguardedClosureRoundTripsThroughSecurityAndMasterShape();
     testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays();
+    testRestoreObjectRestoresANulledObjectSlotAsRealIntegerZero();
     testSaveObjectThrowsClearErrorForWidthGreaterThanOneMappingInsteadOfSilentlyTruncating();
     testSaveObjectRestoreObjectStillRoundTripsAWidthOneMappingAfterTheWidthCheck();
     testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting();
@@ -28641,6 +28916,7 @@ int main() {
     testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable();
     testSiblingLeafObjectVariablesDoNotAliasEachOther();
     testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain();
+    testObjectVariableRedeclarationOverInheritedNameIsLegalShadowing();
     testEnvironmentDefaultsToNullBeforeAnyMove();
     testMoveObjectUpdatesEnvironmentAndInventory();
     testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions();
@@ -28661,6 +28937,7 @@ int main() {
     testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative();
     testPresentFindsInventoryItemByIdApplyNotByOtherFunctions();
     testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject();
+    testLivingWithExplicitFalsyNonObjectArgumentDoesNotFallBackToThisObject();
     testSetHideTogglesHiddenFlagWhenMasterValidHidePermits();
     testEnableWizardIsANoOpForANonInteractiveObject();
     testEnableWizardAndDisableWizardToggleTheFlagOnAnInteractiveObject();
@@ -28718,6 +28995,7 @@ int main() {
     testHeartbeatRuntimeErrorIsolatedFromOtherHeartbeatEnabledObjects();
     testHeartbeatPrunesDestructedObjectSilently();
     testHeartbeatCallingSetHeartBeatOnItselfDoesNotCorruptIteration();
+    testHeartbeatSetsThisPlayerToTheHeartBeatingObjectWhenCommandsEnabled();
     testMapArrayWithStringFunctionNameCallsMethodOnTargetForEachElement();
     testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements();
     testSortArrayWithStringFunctionNameOrdersByComparatorResult();

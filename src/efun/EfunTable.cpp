@@ -336,7 +336,28 @@ Value deserializeValue(const std::string& s, size_t& pos) {
     char kind = s[pos++];
     switch (kind) {
         case 'N':
-            return Value{};
+            // 'N' means "this slot held an object reference or closure,
+            // neither of which can survive a save/restore round trip"
+            // (see serializeValue()'s own comment just above). Real LPC
+            // has no separate "undefined"/"void" runtime value at all --
+            // real save_svalue() (object.c) has no T_OBJECT/T_CLOSURE
+            // case, so it writes nothing for one at all, and restore's
+            // own parser reads the resulting empty text the exact same
+            // way it reads any other missing/blank token: as plain
+            // integer 0, restoring the object-typed slot to real,
+            // ordinary T_NUMBER 0 -- the same "no object here" value an
+            // unset object variable always holds. Returning this
+            // driver's own std::monostate here instead (a C++-only
+            // concept with no real LPC equivalent) meant a restored
+            // slot's value no longer compared "== 0" true against a
+            // literal 0 the way real LPC guarantees, live-confirmed via
+            // TMI-2's own std/user.c::clean_up_attackers() ("if
+            // (attackers[i] == 0 || ...) continue;", attackers[] being a
+            // real object* array that had just round-tripped through a
+            // save/restore with a since-cleared attacker in it): the
+            // check silently failed to skip the cleared slot, falling
+            // through to call_other() a non-object value further down.
+            return Value(int64_t{0});
         case 'I': {
             size_t end = s.find(';', pos);
             int64_t v = std::stoll(s.substr(pos, end - pos));
@@ -5638,12 +5659,32 @@ void registerCoreEfuns() {
     // move_object() behind "living(this_object()) && living(ob)" to
     // block one living thing from moving directly into another (the
     // "mountable" exception aside).
+    // real func_spec.c: "int living(object default: this_object());" --
+    // DEFAULT_THIS_OBJECT (efun_defs.c:110) only ever fires when the real
+    // *call site* itself omits the argument; real f_living() (add_action.c:
+    // 687-695) then unconditionally dereferences whatever single svalue
+    // is on the stack as an object, trusting the compiler's own static
+    // T_OBJECT arg-type check. This driver's own equivalent of "the call
+    // site omitted the argument" is args.empty(), not "args[0] is present
+    // but happens not to hold an object" -- those are different real LPC
+    // situations (the second is an explicit, on-purpose `living(attackers
+    // [i])` where attackers[i]'s *current runtime value* just happens to
+    // be a plain int 0, the everyday "no object here" idiom for an
+    // `object` typed slot), and conflating them here previously meant
+    // `living(<falsy non-object value>)` silently answered for
+    // this_object() instead, live-confirmed via TMI-2's own real
+    // std/user.c::clean_up_attackers() ("if (attackers[i] == 0 ||
+    // !living(attackers[i])) continue;" -- a stale, save/restore-nulled
+    // attackers[] entry wrongly reported the *player's own* living()
+    // status instead of correctly reporting false for the absent
+    // attacker, masking the real bug just above it, see restore_object's
+    // own "N" -> Value(int64_t{0}) fix's citation for the root cause).
     t.registerEfun("living", [](VM& vm, std::vector<Value>& args) -> Value {
         std::shared_ptr<LpcObject> target;
-        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
-            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
-        } else {
+        if (args.empty()) {
             target = vm.currentObject();
+        } else if (std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
         }
         return Value(int64_t{target && target->commandsEnabled() ? 1 : 0});
     });

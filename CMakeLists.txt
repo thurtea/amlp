@@ -11,6 +11,16 @@ endif()
 
 option(AMLP_BUILD_TESTS "Build unit tests" ON)
 
+# Warnings on by default for every target in the tree (set before the
+# add_subdirectory calls below so it propagates to all of them). A clean
+# build is warning-free as of the commit that added this. -Werror is
+# deliberately not set: enforcing it needs a wider check across the
+# compilers CI and contributors actually use, since GCC and Clang differ
+# on which constructs they warn about.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra)
+endif()
+
 add_subdirectory(src/core)
 add_subdirectory(src/config)
 add_subdirectory(src/compiler)

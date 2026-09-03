@@ -17,6 +17,18 @@ class ObjectManager {
 public:
     explicit ObjectManager(Config& config);
 
+    // Process-shutdown teardown: releases every object this manager
+    // retains (the loaded_ blueprint/clone table, restoredObjects_, and
+    // master_/simulEfunObject_). When this is the last ObjectManager
+    // alive it then calls LiveObjectRegistry::releaseAll() to break the
+    // intra-object strong reference cycles that would otherwise keep an
+    // LpcObject (and its CompiledProgram and bytecode) alive past this
+    // point. Does not touch vm_: in both real startup (main.cpp) and
+    // every test harness (ObjectVarHarness) the VM is declared after the
+    // ObjectManager and so is already gone when this runs. No LPC
+    // applies, no master notification, this is not a destruct().
+    ~ObjectManager();
+
     void setVM(VM* vm) { vm_ = vm; }
 
     // Real FluffOS's own driver-internal "efun_defined(name)" (distinct

@@ -28,6 +28,16 @@ namespace amlp {
 
 namespace {
 
+// Number of ObjectManager instances currently alive. The global
+// LiveObjectRegistry is process-wide and shared by every manager (a
+// single one in the real driver; two or more at once only in a handful
+// of tests that compare state across harnesses), so ~ObjectManager only
+// runs the registry-wide cycle-break sweep when it is the last manager
+// going away. An earlier manager's destruction still drops its own
+// loaded_/restoredObjects_/caches; a self-referential clone it created
+// stays pinned by its own variable slot only until that final sweep.
+int g_liveManagerCount = 0;
+
 struct PreprocessResult {
     bool ok = false;
     std::string output;
@@ -947,7 +957,7 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vecto
 
 } // namespace
 
-ObjectManager::ObjectManager(Config& config) : config_(config) {}
+ObjectManager::ObjectManager(Config& config) : config_(config) { ++g_liveManagerCount; }
 
 std::string ObjectManager::normalizeFilename(const std::string& filename) {
     std::string result = filename;
@@ -1594,6 +1604,30 @@ void ObjectManager::retainRestoredObjects(std::vector<std::shared_ptr<LpcObject>
     restoredObjects_.insert(restoredObjects_.end(),
                              std::make_move_iterator(objs.begin()),
                              std::make_move_iterator(objs.end()));
+}
+
+ObjectManager::~ObjectManager() {
+    // Drop this manager's own retaining containers. On its own this is
+    // not enough: a self-referential object (one whose LPC variable or
+    // inventory holds a shared_ptr back to itself or a sibling) stays
+    // pinned at refcount 1 by its own slot even after loaded_ lets go.
+    loaded_.clear();
+    restoredObjects_.clear();
+    programCache_.clear();
+    programSource_.clear();
+    compiling_.clear();
+    virtualCompiling_.clear();
+    master_.reset();
+    simulEfunObject_.reset();
+
+    // Once this is the last manager alive, break those cycles across the
+    // whole process-wide table so every LpcObject (and its
+    // CompiledProgram and bytecode) can actually reach refcount zero.
+    // releaseAll() only zeroes variable/inventory slots, it frees
+    // nothing directly, so ordering it after the clears above is safe.
+    if (--g_liveManagerCount == 0) {
+        LiveObjectRegistry::releaseAll();
+    }
 }
 
 void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj,

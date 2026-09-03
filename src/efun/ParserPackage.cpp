@@ -1379,7 +1379,10 @@ int tokenAt(const VerbRuleNode& node, int index) {
 // (parseObj(), below) can do so directly, matching real code's own
 // "mp = add_match(...); mp->val.obs = ...;" idiom.
 SentenceMatch& addMatch(SentenceSession& session, MatchState& state, int token, int first, int last) {
-    SentenceMatch fresh{token, first, last};
+    SentenceMatch fresh{};
+    fresh.token = token;
+    fresh.first = first;
+    fresh.last = last;
     SentenceMatch* slot;
     if (state.numMatches < static_cast<int>(session.matches.size())) {
         session.matches[state.numMatches] = std::move(fresh);

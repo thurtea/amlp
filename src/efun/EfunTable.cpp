@@ -5287,7 +5287,7 @@ void registerCoreEfuns() {
     // here would be a new, uneven restriction rather than a faithful
     // port. A void/omitted env unlinks item with no new environment,
     // matching real "env may be 0".
-    t.registerEfun("set_environment", [](VM& vm, std::vector<Value>& args) -> Value {
+    t.registerEfun("set_environment", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty()) throw LpcRuntimeError("set_environment() requires at least 1 argument");
         auto* itemPtr = std::get_if<std::shared_ptr<LpcObject>>(&args[0].data);
         if (!itemPtr || !*itemPtr) throw LpcRuntimeError("Bad argument 1 to set_environment()");
@@ -9361,109 +9361,6 @@ void registerCoreEfuns() {
             return Value(replaceMxpHtml(std::get<std::string>(args[0].data), false, true));
         });
     }
-
-    // Shared helper for query_strike_bonus/query_parry_bonus below: real
-    // stat/env/property reads on the player object are LPC methods in
-    // this mudlib (query_stats, query_level, getenv, query_property all
-    // live in std/, not the efun table), so these two efuns call back
-    // into LPC for them via vm.callFunction(), the same mechanism
-    // map_array()/filter_array()/present() already use to call back
-    // into LPC by function name. ADDICTION_D->query_combat_modifiers()
-    // is resolved the same way call_other() itself resolves a string
-    // target (vm.findObject(), see that efun's own comment above).
-    static const auto riftsCombatStanceMod = [](VM& vm, const std::shared_ptr<LpcObject>& player,
-                                                  bool offensiveBonus) -> int64_t {
-        Value stance = vm.callFunction(player, "query_property", { Value(std::string("combat_stance")) });
-        if (!std::holds_alternative<std::string>(stance.data)) return 0;
-        const std::string& pos = std::get<std::string>(stance.data);
-        if (pos == "offensive") return offensiveBonus ? 2 : -2;
-        if (pos == "defensive") return offensiveBonus ? -2 : 2;
-        return 0;
-    };
-    static const auto riftsAddictionMod = [](VM& vm, const std::shared_ptr<LpcObject>& player,
-                                              const std::string& key) -> int64_t {
-        auto addictionD = vm.findObject("/daemon/addiction_d");
-        if (!addictionD) return 0;
-        Value mods = vm.callFunction(addictionD, "query_combat_modifiers", { Value(player) });
-        auto* map = std::get_if<std::shared_ptr<Mapping>>(&mods.data);
-        if (!map || !*map) return 0;
-        for (const auto& entry : (*map)->entries) {
-            if (valuesEqual(entry.first, Value(key)) &&
-                std::holds_alternative<int64_t>(entry.second.data)) {
-                return std::get<int64_t>(entry.second.data);
-            }
-        }
-        return 0;
-    };
-    static const auto riftsLevelBonus = [](int64_t occApm, int64_t level) -> int64_t {
-        switch (occApm) {
-        case 6: return level / 2;
-        case 5: return level / 3;
-        case 4: return level / 3;
-        case 3: return level / 4;
-        default: return level / 5;
-        }
-    };
-
-    // int query_strike_bonus(object player) -- transcribed unchanged
-    // from daemon/rifts_combat.c's own query_strike_bonus(); the two
-    // private helpers it alone called (position_strike_mod(),
-    // position_defense_mod()) had no other caller once
-    // query_strike_bonus()/query_parry_bonus() moved, and are now dead
-    // LPC code left in place rather than deleted this phase (see
-    // STATUS.md).
-    t.registerEfun("query_strike_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data) ||
-            !std::get<std::shared_ptr<LpcObject>>(args[0].data)) {
-            return Value(int64_t{0});
-        }
-        auto player = std::get<std::shared_ptr<LpcObject>>(args[0].data);
-
-        Value ppVal = vm.callFunction(player, "query_stats", { Value(std::string("PP")) });
-        Value levelVal = vm.callFunction(player, "query_level", {});
-        Value occVal = vm.callFunction(player, "getenv", { Value(std::string("rifts_occ")) });
-
-        int64_t pp = std::holds_alternative<int64_t>(ppVal.data) ? std::get<int64_t>(ppVal.data) : 0;
-        int64_t level = std::holds_alternative<int64_t>(levelVal.data) ? std::get<int64_t>(levelVal.data) : 0;
-        std::string occ = std::holds_alternative<std::string>(occVal.data) ? std::get<std::string>(occVal.data) : "";
-
-        int64_t bonus = ppCombatBonusCore(pp);
-        bonus += riftsLevelBonus(occBaseApmCore(occ), level);
-        bonus += riftsCombatStanceMod(vm, player, true);
-        bonus += riftsAddictionMod(vm, player, "strike");
-        return Value(bonus);
-    });
-
-    // int query_parry_bonus(object player) -- transcribed unchanged
-    // from daemon/rifts_combat.c's own query_parry_bonus().
-    t.registerEfun("query_parry_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data) ||
-            !std::get<std::shared_ptr<LpcObject>>(args[0].data)) {
-            return Value(int64_t{0});
-        }
-        auto player = std::get<std::shared_ptr<LpcObject>>(args[0].data);
-
-        Value ppVal = vm.callFunction(player, "query_stats", { Value(std::string("PP")) });
-        Value levelVal = vm.callFunction(player, "query_level", {});
-        Value occVal = vm.callFunction(player, "getenv", { Value(std::string("rifts_occ")) });
-
-        int64_t pp = std::holds_alternative<int64_t>(ppVal.data) ? std::get<int64_t>(ppVal.data) : 0;
-        int64_t level = std::holds_alternative<int64_t>(levelVal.data) ? std::get<int64_t>(levelVal.data) : 0;
-        std::string occ = std::holds_alternative<std::string>(occVal.data) ? std::get<std::string>(occVal.data) : "";
-
-        int64_t bonus = ppCombatBonusCore(pp);
-        bonus += riftsLevelBonus(occBaseApmCore(occ), level);
-        bonus += riftsCombatStanceMod(vm, player, false);
-        bonus += riftsAddictionMod(vm, player, "parry");
-        return Value(bonus);
-    });
-
-    // int query_dodge_bonus(object player) -- transcribed unchanged from
-    // daemon/rifts_combat.c's own query_dodge_bonus(): a plain alias for
-    // query_parry_bonus(), same scale as parry.
-    t.registerEfun("query_dodge_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
-        return EfunTable::instance().call("query_parry_bonus", vm, args);
-    });
 
     // -------------------------------------------------------------------------
     // Phase 0.13 efun growth batch - to_float, typeof, rename, rmdir, math

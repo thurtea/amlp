@@ -27,6 +27,7 @@ private:
     bool atEnd() const;
     bool isTypeKeyword(const Token& tok) const;
     bool isModifierKeyword(const Token& tok) const;
+    bool consumeArrayMarker();
 
     // Shared prefix of every top-level declaration (modifiers, type, an
     // optional array '*', and a name), factored out so parseProgram()

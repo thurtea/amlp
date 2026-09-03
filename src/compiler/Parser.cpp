@@ -45,6 +45,51 @@ bool Parser::checkText(const std::string& text) const {
     return t.text == text;
 }
 
+// Real FluffOS's own ARRAY_RESERVED_WORD build option (options.h: "If
+// this is defined then the word 'array' can be used to define arrays,
+// as in: int array x = ({ .... });"), gated in real grammar.y.pre
+// (fluffos-2.23-ds03, Dead Souls 3.8.2's own bundled driver source, not
+// the older vendored 2.9 reference which has no such grammar production
+// at all) behind "%ifdef ARRAY_RESERVED_WORD" specifically at
+// "basic_type: atomic_type | opt_atomic_type L_ARRAY" -- a type-position
+// suffix keyword, the exact same real shape "*" already has here, not a
+// general reserved word. Real corpus: Dead Souls 3.8.2's own
+// fluffos-2.23-ds03/local_options.ds explicitly "#define
+// ARRAY_RESERVED_WORD" (confirmed this mudlib's own real intended
+// driver build actually turns this on, not merely a driver capability
+// nobody exercises), and 172 real files across the mudlib use the form
+// (secure/daemon/master.c's own "private static string array
+// efuns_arr = ({});" among them).
+//
+// Deliberately NOT a lexer-level keyword reservation (unlike a real
+// yacc-generated parser, which reserves the word globally the moment
+// this option is compiled in, real options.h's own documented "side
+// effect": "'array' cannot be a variable or function name" once
+// enabled) -- "array" still lexes as an ordinary TokenType::Ident here,
+// and this helper only ever consumes it in the one syntactic position
+// real grammar.y.pre's own "L_ARRAY" actually occupies (immediately
+// after a declaration's own base type, the exact spot the existing '*'
+// check already looks at every call site below), matching the same
+// double-gating discipline this codebase already uses for other
+// dialect/build-optional keywords ("atomic"/"nil" for DGD, ROADMAP.md
+// row 1.3) rather than risk misreading a genuine identifier legitimately
+// named "array" used anywhere else in this driver's own bundled mudlib
+// or any other vendored corpus. No live corpus evidence anywhere of a
+// real variable/function actually named "array", so this narrower,
+// safer scope costs nothing today and avoids ever needing to guess
+// which mudlibs would want the word fully reserved.
+bool Parser::consumeArrayMarker() {
+    if (checkText("*")) {
+        advance();
+        return true;
+    }
+    if (check(TokenType::Ident) && peek().text == "array") {
+        advance();
+        return true;
+    }
+    return false;
+}
+
 const Token& Parser::expect(TokenType type, const std::string& context) {
     if (!check(type)) {
         throw LpcRuntimeError("parse error: expected token type in " + context +
@@ -1251,13 +1296,11 @@ AstPtr Parser::parseReturnStatement() {
 // callers below (a plain statement, and a for-loop init clause) each want
 // different tail handling, so that part is left to them.
 std::unique_ptr<VarDeclStmt> Parser::parseSingleVarDecl(const Token& typeTok) {
-    // An optional '*' marks an array-typed local, e.g. "mixed *items;",
+    // An optional '*' (or, real ARRAY_RESERVED_WORD builds, the bare
+    // word "array" -- see consumeArrayMarker()'s own comment) marks an
+    // array-typed local, e.g. "mixed *items;"/"mixed array items;",
     // same pattern as the parameter/return type array marker.
-    bool isArray = false;
-    if (checkText("*")) {
-        advance();
-        isArray = true;
-    }
+    bool isArray = consumeArrayMarker();
 
     Token nameTok = expect(TokenType::Ident, "variable declaration name");
 
@@ -1649,14 +1692,12 @@ std::vector<Param> Parser::parseParamList() {
     for (;;) {
         Token typeTok = expect(TokenType::Keyword, "function parameter type");
 
-        // An optional '*' marks an array/pointer type, e.g. "mixed *info".
+        // An optional '*' (or, real ARRAY_RESERVED_WORD builds, the bare
+        // word "array") marks an array/pointer type, e.g. "mixed *info"
+        // or "object array e" -- see consumeArrayMarker()'s own comment.
         // No array semantics are implemented, this only records the flag
-        // so the syntax parses instead of erroring or losing the '*'.
-        bool isArray = false;
-        if (checkText("*")) {
-            advance();
-            isArray = true;
-        }
+        // so the syntax parses instead of erroring or losing the marker.
+        bool isArray = consumeArrayMarker();
 
         // The name itself is optional -- real LPC allows a parameter to
         // be declared with just its type, no identifier at all (real
@@ -1716,13 +1757,12 @@ Parser::DeclPrefix Parser::parseDeclPrefix(const std::string& context) {
     if (check(TokenType::Keyword)) {
         type = advance().text;
 
-        // An optional '*' marks an array/pointer type, e.g. "string
-        // *epilog(int x)" or "mixed *items;". This only records the
-        // flag, no array semantics are implemented.
-        if (checkText("*")) {
-            advance();
-            isArray = true;
-        }
+        // An optional '*' (or, real ARRAY_RESERVED_WORD builds, the
+        // bare word "array") marks an array/pointer type, e.g. "string
+        // *epilog(int x)"/"string array GetTeachingLanguages()" or
+        // "mixed *items;" -- see consumeArrayMarker()'s own comment.
+        // This only records the flag, no array semantics implemented.
+        isArray = consumeArrayMarker();
     } else {
         // Real LPC allows the return/declaration type to be omitted
         // entirely when only modifiers precede the name -- grammar.y's
@@ -1804,13 +1844,11 @@ std::vector<std::unique_ptr<ObjectVarDecl>> Parser::parseObjectVarDeclRest(DeclP
         advance();
 
         // Each comma-separated name gets its own independent optional
-        // '*', matching real LPC (e.g. "mixed a, *b;"), not just
-        // inheriting the first name's array flag.
-        bool isArray = false;
-        if (checkText("*")) {
-            advance();
-            isArray = true;
-        }
+        // '*' (or, real ARRAY_RESERVED_WORD builds, "array" -- see
+        // consumeArrayMarker()'s own comment), matching real LPC (e.g.
+        // "mixed a, *b;"), not just inheriting the first name's array
+        // flag.
+        bool isArray = consumeArrayMarker();
 
         Token nameTok = expect(TokenType::Ident, "object variable declaration name");
 
@@ -1837,11 +1875,37 @@ std::vector<std::unique_ptr<ObjectVarDecl>> Parser::parseObjectVarDeclRest(DeclP
 // folding a left-associative chain of string literals here, at parse
 // time, since Program::inherits needs a final resolved path string, not
 // an expression tree -- there is no VM yet to evaluate one against.
+//
+// grammar.y's own "string_con1" is built on "string_con2", not a bare
+// L_STRING token -- "string_con2: L_STRING | string_con2 L_STRING", real
+// adjacent string literal concatenation with *no* operator at all
+// between them, the exact same real feature parsePrimary() already
+// implements for an ordinary expression (see its own citation, this
+// same corpus's real secure/daemon/master.c shout() call). This path
+// only ever consumed a "+"-joined chain, not a bare-adjacent one, so a
+// macro expanding to *adjacent* literals rather than "+"-joined ones
+// failed here even though the identical shape already worked fine as
+// an ordinary expression. Real corpus: Dead Souls 3.8.2's own
+// secure/include/std.h "#define LIB_DAEMON DIR_STD \"/daemon\"", where
+// DIR_STD itself further expands (secure/include/dirs.h) to "DIR_LIB
+// \"/std\"" and DIR_LIB to plain "\"/lib\"" -- real secure/daemon/
+// master.c's own "inherit LIB_DAEMON;" therefore reaches this function
+// as three bare-adjacent literals, "\"/lib\" \"/std\" \"/daemon\"", no
+// "+" anywhere in the chain. Fixed by consuming a run of adjacent
+// String tokens directly, the same way parsePrimary() already does,
+// interleaved with the existing "+"-joined handling so either form (or
+// a mix of both, a real if unusual possibility) resolves correctly.
 std::string Parser::parseInheritPathString() {
     std::string result = expect(TokenType::String, "inherit statement path").text;
-    while (checkText("+")) {
-        advance();
-        result += expect(TokenType::String, "inherit statement path (string concatenation)").text;
+    for (;;) {
+        if (check(TokenType::String)) {
+            result += advance().text;
+        } else if (checkText("+")) {
+            advance();
+            result += expect(TokenType::String, "inherit statement path (string concatenation)").text;
+        } else {
+            break;
+        }
     }
     return result;
 }

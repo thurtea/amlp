@@ -3106,6 +3106,85 @@ static void testInheritStatementParsesPathAndConcatenation() {
     std::cout << "testInheritStatementParsesPathAndConcatenation OK\n";
 }
 
+// Real grammar.y's own "string_con1" is built on "string_con2"
+// ("L_STRING | string_con2 L_STRING"), real adjacent string literal
+// concatenation with *no* operator between the literals at all -- the
+// same real feature parsePrimary() already implements for an ordinary
+// expression (its own citation: this exact real corpus's own
+// secure/daemon/master.c "shout(\"...\" \"...\")" idiom). Real corpus:
+// Dead Souls 3.8.2's own secure/include/std.h "#define LIB_DAEMON
+// DIR_STD \"/daemon\"" (DIR_STD itself further expanding, via
+// secure/include/dirs.h, to "DIR_LIB \"/std\"", and DIR_LIB to plain
+// "\"/lib\""), so real secure/daemon/master.c's own "inherit
+// LIB_DAEMON;" reaches the parser, after cpp's own macro expansion, as
+// three bare-adjacent string literals with no "+" anywhere -- fully
+// resolved here, not simulated via a macro pipeline, since the parser
+// sees the identical token stream either way. Previously rejected
+// outright ("expected \";\" in inherit statement ... got \"/std\"":
+// parseInheritPathString() consumed only the first literal, found no
+// "+", and returned, leaving the second literal stranded for the
+// caller's own trailing ";" check to choke on instead). Also covers a
+// real, if unusual, mixed chain (adjacent literals interleaved with a
+// "+"-joined one) to confirm the two forms compose, not just work in
+// isolation.
+static void testInheritStatementParsesAdjacentStringLiteralsWithNoOperator() {
+    std::string src =
+        "inherit \"/lib\" \"/std\" \"/daemon\";\n"
+        "inherit \"/secure\" \"/daemon\" + \"/refs\" \"/extra\";\n"
+        "void create() {}\n";
+    amlp::Lexer lexer(src);
+    amlp::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    assert(program->inherits.size() == 2);
+    assert(program->inherits[0] == "/lib/std/daemon");
+    assert(program->inherits[1] == "/secure/daemon/refs/extra");
+
+    std::cout << "testInheritStatementParsesAdjacentStringLiteralsWithNoOperator OK\n";
+}
+
+// Real FluffOS's own ARRAY_RESERVED_WORD build option (options.h: "the
+// word 'array' can be used to define arrays, as in: int array x = ({
+// .... });"), gated in real grammar.y.pre (Dead Souls 3.8.2's own
+// bundled fluffos-2.23-ds03 driver source, not the older vendored 2.9
+// reference which has no such grammar production at all) at "basic_type:
+// atomic_type | opt_atomic_type L_ARRAY". Real corpus: Dead Souls
+// 3.8.2's own fluffos-2.23-ds03/local_options.ds explicitly "#define
+// ARRAY_RESERVED_WORD" (this mudlib's own real intended driver build
+// genuinely turns this on), and 172 real files across the mudlib use
+// the form, secure/daemon/master.c's own "private static string array
+// efuns_arr = ({});" among them. Covers all four real positions this
+// codebase already supported the '*' suffix in (an object variable, a
+// local variable, a function parameter, and a function's own return
+// type), proving each resolves to genuine, working array semantics at
+// runtime, not just that the syntax parses.
+static void testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlreadyDid() {
+    ObjectVarHarness harness;
+    harness.writeFile("/array_kw_probe.c",
+        "private static string array efuns_arr = ({});\n"
+        "string array GetNames() {\n"
+        "    string array n;\n"
+        "    n = ({ \"a\", \"b\" });\n"
+        "    return n;\n"
+        "}\n"
+        "int SumLens(object array items) {\n"
+        "    return sizeof(items);\n"
+        "}\n"
+        "int probe() {\n"
+        "    string array local_names = GetNames();\n"
+        "    efuns_arr += ({ \"x\", \"y\" });\n"
+        "    return sizeof(local_names) * 10 + sizeof(efuns_arr) + SumLens(({ this_object() }));\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/array_kw_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 23); // 2*10 (local_names) + 2 (efuns_arr) + 1 (items)
+
+    std::cout << "testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlreadyDid OK\n";
+}
+
 static void testInheritedFunctionFallbackInvokedAtRuntime() {
     ObjectVarHarness harness;
 
@@ -4752,6 +4831,135 @@ static void testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjec
     assert(std::get<int64_t>(result.data) == 17);
 
     std::cout << "testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody OK\n";
+}
+
+// ROADMAP.md row 3.10's own follow-up: the include-rewrite pass
+// (rewriteAbsoluteIncludesRecursive()) previously only ever recursed
+// into an *absolute* quoted include -- an ordinary relative quoted or
+// angle-bracket include was always left for real cpp's own "-I" search
+// to resolve blind, with no opportunity for anything inside that file
+// to reach this driver's own logic. Real corpus: Dead Souls 3.8.2's
+// own secure/include/logs.h, reached from secure/daemon/master.c via
+// an entirely ordinary "#include <logs.h>", itself contains a further
+// real "#include CONFIG_H" (a macro-computed absolute include) that was
+// invisible to this pass entirely until it was made to resolve every
+// #include form, not just the two originally special-cased entry
+// points. The four tests below cover the generalized recursion itself,
+// independent of whether any specific real mudlib boots: a relative
+// quoted include reached transitively (proving the new currentDir
+// threading resolves against the *including* file's own directory, not
+// the outermost file's), an angle-bracket include reached transitively,
+// a macro #define'd and consumed entirely within a file reached via an
+// ordinary (non-absolute) include, and a real include cycle with a real
+// "#ifndef" guard (proving activeIncludes still terminates this
+// driver's own splicing correctly, while the overall compile succeeds
+// via real cpp's own guard evaluation on the assembled result, the
+// exact same way real cpp's own recursive #include handling already
+// relies on for a genuinely cyclic, guarded header).
+
+static void testRecursiveIncludeResolvesARelativeQuotedIncludeAgainstItsOwnIncludingFilesDirectory() {
+    ObjectVarHarness harness;
+    assert(::mkdir((harness.tempDir + "/sub").c_str(), 0755) == 0);
+
+    harness.writeFile("/sub/inner.h", "int mid_value() { return 42; }\n");
+    // mid.h's own "#include \"inner.h\"" must resolve against mid.h's
+    // *own* directory ("sub/"), not outer.c's (the mudlib root) -- if
+    // currentDir were not threaded through the recursion correctly,
+    // this would search the root instead and fail to find inner.h at
+    // all, since inner.h is never referenced from outer.c directly.
+    harness.writeFile("/sub/mid.h", "#include \"inner.h\"\n");
+    harness.writeFile("/outer.c",
+        "#include \"sub/mid.h\"\n"
+        "int probe() { return mid_value(); }\n");
+
+    auto obj = harness.objects.cloneObject("/outer");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+
+    std::cout << "testRecursiveIncludeResolvesARelativeQuotedIncludeAgainstItsOwnIncludingFilesDirectory OK\n";
+}
+
+static void testRecursiveIncludeResolvesAnAngleBracketIncludeReachedTransitively() {
+    ObjectVarHarness harness;
+    harness.writeFile("/level2.h", "int level2_value() { return 84; }\n");
+    // level1.h's own "#include <level2.h>" is itself reached only via
+    // outer.c's own "#include <level1.h>" -- level2.h was never
+    // referenced from outer.c directly, so this only resolves if the
+    // pass recurses into level1.h's own content at all.
+    harness.writeFile("/level1.h", "#include <level2.h>\n");
+    harness.writeFile("/outer.c",
+        "#include <level1.h>\n"
+        "int probe() { return level2_value(); }\n");
+
+    auto obj = harness.objects.cloneObject("/outer");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 84);
+
+    std::cout << "testRecursiveIncludeResolvesAnAngleBracketIncludeReachedTransitively OK\n";
+}
+
+static void testRecursiveIncludeResolvesAMacroDefinedAndConsumedEntirelyWithinATransitivelyReachedFile() {
+    ObjectVarHarness harness;
+    harness.writeFile("/deep_target.c", "int deep_value() { return 55; }\n");
+    // mid.h is reached from outer.c via an ordinary relative quoted
+    // include (not the outermost file, not the designated global
+    // include file -- the two entry points macro tracking already
+    // covered before this generalization); mid.h then both #defines
+    // and #includes its own macro entirely within itself.
+    harness.writeFile("/mid.h",
+        "#define DEEP_HDR \"/deep_target.c\"\n"
+        "#include DEEP_HDR\n");
+    harness.writeFile("/outer.c",
+        "#include \"mid.h\"\n"
+        "int probe() { return deep_value(); }\n");
+
+    auto obj = harness.objects.cloneObject("/outer");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 55);
+
+    std::cout << "testRecursiveIncludeResolvesAMacroDefinedAndConsumedEntirelyWithinATransitivelyReachedFile OK\n";
+}
+
+static void testRecursiveIncludeHandlesARealIncludeCycleWithoutInfiniteLooping() {
+    ObjectVarHarness harness;
+    // A real cycle (a.h includes b.h includes a.h back), each with a
+    // real "#ifndef" multiple-inclusion guard -- activeIncludes must
+    // stop this driver's own splicing from recursing forever the
+    // moment it reaches the second "#include \"a.h\"" (a.h is already
+    // mid-splice at that point), leaving that one line as ordinary
+    // literal text for real cpp to see; cpp then correctly no-ops it
+    // via the already-#defined guard macro, exactly the way real cpp's
+    // own recursive #include handling already relies on for any
+    // genuinely cyclic, guarded header.
+    harness.writeFile("/a.h",
+        "#ifndef A_H\n"
+        "#define A_H\n"
+        "#include \"b.h\"\n"
+        "int a_value() { return 1; }\n"
+        "#endif\n");
+    harness.writeFile("/b.h",
+        "#ifndef B_H\n"
+        "#define B_H\n"
+        "#include \"a.h\"\n"
+        "int b_value() { return 2; }\n"
+        "#endif\n");
+    harness.writeFile("/outer.c",
+        "#include \"a.h\"\n"
+        "int probe() { return a_value() + b_value(); }\n");
+
+    auto obj = harness.objects.cloneObject("/outer");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 3);
+
+    std::cout << "testRecursiveIncludeHandlesARealIncludeCycleWithoutInfiniteLooping OK\n";
 }
 
 // Found live against a real third-party mudlib corpus (row 3.8's TMI-2
@@ -28650,6 +28858,8 @@ int main() {
     testSscanfVmAdjacentSThenLiteralPercentWithNoLiteralBetween();
     testSscanfVmTwoAdjacentSSpecifiersThrows();
     testInheritStatementParsesPathAndConcatenation();
+    testInheritStatementParsesAdjacentStringLiteralsWithNoOperator();
+    testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlreadyDid();
     testInheritedFunctionFallbackInvokedAtRuntime();
     testInheritedObjectVariableSlotsShareStorageWithParent();
     testInheritCycleDetectedAsCompileFailure();
@@ -28713,6 +28923,10 @@ int main() {
     testNestedAbsoluteIncludeInsideAnIncludedFileAlsoResolves();
     testMacroComputedAbsoluteIncludeResolvesAgainstMudlibRoot();
     testGlobalIncludeFileMacroComputedIncludeIsVisibleInTheCompiledObjectsOwnBody();
+    testRecursiveIncludeResolvesARelativeQuotedIncludeAgainstItsOwnIncludingFilesDirectory();
+    testRecursiveIncludeResolvesAnAngleBracketIncludeReachedTransitively();
+    testRecursiveIncludeResolvesAMacroDefinedAndConsumedEntirelyWithinATransitivelyReachedFile();
+    testRecursiveIncludeHandlesARealIncludeCycleWithoutInfiniteLooping();
     testInheritPathWithoutLeadingSlashResolvesSameAsWithOne();
     testCppWarningsDoNotFailPreprocessing();
     testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg();

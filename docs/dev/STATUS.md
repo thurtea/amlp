@@ -9,6 +9,216 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-03 (a further session, same day): the row 3.10 architectural
+gap (the include-rewrite pass only recursing into two special-cased
+entry points) is closed. 2 further real driver bugs found and fixed
+with real citations, real fixes, and real regression tests (857
+tests, up from 851, zero regressions). Boot now progresses fully past
+the whole cpp/preprocessing layer, into pure parser territory, and is
+newly blocked on a real, different, and genuinely larger closure-
+literal language feature -- named plainly and stopped at, per this
+session's own explicit instruction not to force past it.**
+
+Scoped first, as asked, before touching anything. **Where the
+recursion stopped:** `rewriteAbsoluteIncludesRecursive()`
+(`ObjectManager.cpp:302-440` as of the prior session) only ever
+recursed into a spliced file for two special-cased shapes: a literal
+`#include "/..."` (absolute, quoted, found via a bare `"` scan) and a
+bare macro name whose `#define`d value was itself such an absolute
+quoted path. Every ordinary `#include <foo.h>`/`#include "foo.h"`
+(relative or angle-bracket, literal or macro-computed to something
+non-absolute) was left completely untouched, for real cpp's own `-I`
+search (`runPreprocessor()`, three `-I` sources: CWD, the outer file's
+own directory, and the configured include dirs) to resolve blind, with
+zero visibility into what was inside those files from this driver's
+own side. That is exactly how `secure/include/logs.h` (reached from
+`secure/daemon/master.c` via an ordinary `#include <logs.h>`) escaped
+detection: never scanned by this pass at all, so its own further real
+`#include CONFIG_H` stayed invisible.
+
+**What making it fully recursive required, confirmed before building
+anything:** walking every `#include` this pass encounters -- angle-
+bracket and quoted, absolute and relative, literal and macro-computed
+-- not just the two entry points. The existing `activeIncludes` cycle
+guard and `macroDefs` whole-compilation macro map both generalize
+completely unchanged: real cpp's own cycle-safety and macro-scope
+rules never depended on *which* files get spliced, only on "don't
+re-splice a file already mid-splice" and "a `#define` anywhere is
+visible to everything after it," both already true regardless of how
+broadly this pass reaches. The one genuinely new piece of state is
+`currentDir`: real cpp's own quote-form `#include "foo.h"` search
+order tries the *including* file's own directory first (before
+falling back to `-I`), which an absolute path never needs (always
+mudlib-root-relative) and an angle-bracket include never gets (real
+`<>` semantics skip the including file's own directory entirely,
+confirmed against the C standard's own documented distinction) --
+`currentDir` threads through the recursion, updated to each newly-
+spliced file's own real directory, so a file reached two levels deep
+resolves its own relative includes against *its own* directory, not
+the outermost compiled file's.
+
+**Smallest correct first slice, exactly as scoped:** made the existing
+pass recursive for every `#include` form, reusing `activeIncludes`/
+`macroDefs` as-is, adding only `currentDir` (and `includeDirs`,
+already available at every call site, now threaded into the recursion
+itself rather than only the two former entry points). Implemented in
+`ObjectManager.cpp`: `rewriteAbsoluteIncludesRecursive()`'s own
+`isInclude` branch now extracts the raw target text and delimiter
+uniformly (quoted, angle-bracket, or macro-computed), resolves it
+(mudlib-root-relative if absolute; `currentDir` then `includeDirs`, in
+that order, if not, skipping `currentDir` for the angle-bracket form)
+and splices whatever is found, falling back to letting real cpp's own
+`-I` search attempt it (unchanged) only when nothing could be located.
+`stageSourceForPreprocessing()`'s three call sites updated to pass
+`includeDirs` and their own correct `currentDir` (the directory a
+found global-include-file header actually lives in; the compiled
+object's own directory for its body). The now-dead
+`rewriteAbsoluteIncludes()` convenience wrapper (unused after the
+prior session's own fixes already called the recursive form directly
+everywhere) was removed rather than left stale; every comment
+referencing it by name updated to point at the real function instead.
+
+**Re-verified against real cpp directly, not just this driver's own
+log:** preprocessing `secure/daemon/master.c` now succeeds completely
+-- no cpp errors at all, past `logs.h` and every further real include
+in its own tree.
+
+**Bug 3 (parser): `inherit`'s own path-string parser only folded a
+`"+"`-joined chain of string literals, not real LPC's own separate
+bare-adjacent-literal concatenation.** Real `grammar.y`'s own
+`string_con1` is built on `string_con2`
+("`L_STRING | string_con2 L_STRING`"), real adjacent string literal
+concatenation with *no* operator between the literals at all -- the
+exact same real feature `Parser.cpp`'s own `parsePrimary()` already
+implements for an ordinary expression (its own existing citation: this
+same corpus's real `secure/daemon/master.c` `shout("...\n"
+"...\n")` idiom, split across lines). `parseInheritPathString()`
+(`Parser.cpp:1840-1847` as of the prior session) only ever consumed one
+`String` token then looked for a literal `+`; finding none, it
+returned immediately, leaving any further adjacent literal stranded
+for the caller's own trailing `;` check to choke on. Real corpus:
+Dead Souls' own real `secure/include/std.h`'s `"#define LIB_DAEMON
+DIR_STD \"/daemon\""` (`DIR_STD` itself further expanding, via
+`secure/include/dirs.h`, to `"DIR_LIB \"/std\""`, and `DIR_LIB` to
+plain `"\"/lib\""`) makes real `master.c`'s own `inherit LIB_DAEMON;`
+expand, after cpp's own real macro expansion, to three bare-adjacent
+string literals with no `+` anywhere: `"/lib" "/std" "/daemon"`.
+Confirmed live via the exact reported error ("expected \";\" in
+inherit statement ... got \"/std\""), not guessed. Fixed by having
+`parseInheritPathString()` also consume a run of adjacent `String`
+tokens directly, interleaved with the existing `+`-joined handling so
+either form, or a real mixed chain of both, resolves correctly. New
+regression test
+(`testInheritStatementParsesAdjacentStringLiteralsWithNoOperator`)
+covers a pure adjacent chain and a mixed adjacent-plus-`+` chain.
+
+**Bug 4 (parser): real FluffOS's own optional `ARRAY_RESERVED_WORD`
+build flag, an alternate `array`-keyword spelling for an array type,
+was entirely unsupported.** Real `options.h` (Dead Souls' own bundled
+`fluffos-2.23-ds03` driver source, a real, much newer FluffOS fork
+than the vendored 2.9 reference this project's other citations lean
+on, not the same tree): "If this is defined then the word 'array' can
+be used to define arrays, as in: `int array x = ({ .... });`." Real
+`grammar.y.pre`'s own `basic_type: atomic_type | opt_atomic_type
+L_ARRAY`, gated behind `%ifdef ARRAY_RESERVED_WORD` specifically.
+Dead Souls' own real `fluffos-2.23-ds03/local_options.ds` explicitly
+`#define`s this flag (confirmed this mudlib's own real intended driver
+build genuinely turns it on, not merely a driver capability nobody
+exercises), and a corpus-wide scan found 172 real files using the
+form, `secure/daemon/master.c`'s own `private static string array
+efuns_arr = ({});` (the exact next real parse failure hit) among them.
+Fixed with a new shared `Parser::consumeArrayMarker()` helper
+(`Parser.cpp`), checking for the bare identifier `"array"` immediately
+after a declaration's own base type -- deliberately *not* a blanket
+lexer-level keyword reservation the way a real yacc-generated parser
+does once this option is compiled in (real `options.h`'s own
+documented "side effect: 'array' cannot be a variable or function
+name" once enabled), since this driver's own hand-written Parser can
+recognize the word only in the one syntactic position real grammar
+actually uses it, avoiding any risk of ever misreading a genuine
+identifier named `array` used anywhere else in any other vendored
+corpus -- matching this codebase's own established double-gating
+discipline for other dialect/build-optional keywords (`atomic`/`nil`
+for DGD, `ROADMAP.md` row 1.3). Reused at all four positions the
+existing `"*"` array-suffix marker already covered: an object
+variable, a local variable, a function parameter, and a function's own
+return type (all four call sites previously duplicated the identical
+three-line `"*"` check independently). New regression test
+(`testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlreadyDid`)
+exercises real runtime array semantics (not just that the syntax
+parses) through all four positions at once, via a real clone/call
+round trip.
+
+**4 further new regression tests for the recursive-include
+generalization itself, independent of whether any specific real
+mudlib boots** (`testRecursiveIncludeResolvesARelativeQuotedInclude...`,
+`...AnAngleBracketIncludeReachedTransitively`,
+`...AMacroDefinedAndConsumedEntirelyWithinATransitivelyReachedFile`,
+`...ARealIncludeCycleWithoutInfiniteLooping`): a relative quoted
+include reached only via an intermediate file (proving `currentDir`
+resolves against the *including* file's own directory, not the
+outermost one), an angle-bracket include reached the same transitive
+way, a macro `#define`'d and consumed entirely within a file itself
+only reached via an ordinary (non-absolute, non-global-include-file)
+include, and a real cycle (`a.h` includes `b.h` includes `a.h`, each
+with a real `#ifndef` guard) confirming `activeIncludes` still
+terminates this driver's own splicing correctly while the overall
+compile succeeds via real cpp's own guard evaluation on the assembled
+result -- the exact same way real cpp's own recursive `#include`
+handling already relies on for a genuinely cyclic, guarded header.
+
+**Boot now blocked on a real, different, and genuinely larger closure-
+literal language feature, not a narrow bug -- named here and stopped
+at, exactly as this session's own instructions called for if this
+happened.** Real modern FluffOS's own `function(<params>) { <body> }`
+anonymous-function *expression* form: confirmed directly against Dead
+Souls' own real bundled `fluffos-2.23-ds03/grammar.y.pre` (`expr0: ...
+| L_BASIC_TYPE '(' argument ')' block`, gated on the `L_BASIC_TYPE`
+token being specifically `TYPE_FUNCTION` -- `function` is already an
+ordinary, already-supported type keyword in this driver, used as a
+parameter/return type elsewhere in this same file, e.g.
+`mixed apply_unguarded(function f)` -- building a real `NODE_ANON_FUNC`
+AST node). This is a real, named parameter list (the same grammar as
+an ordinary function definition's own parameters) plus a real, full
+statement-block body (`if`/`while`/`for`/local declarations/multiple
+statements/`return`, not just one expression) written inline as an
+expression, evaluating to a callable closure value. Confirmed
+structurally different from, and a real strict superset of, this
+driver's existing `(: comma_expr :)` closure literal
+(`ClosureLiteralExpr`, `Ast.hpp:181-190`), which only ever wraps a
+single comma-expression body addressed by positional `$1`/`$2`
+references, never a real named parameter list or a real statement-
+block body -- reusing that existing machinery is not a narrow
+adaptation: this needs its own AST node, its own `CodeGen` compilation
+path (compiling a genuinely nested function, the same shape an
+ordinary top-level function already gets, but triggered from an
+*expression* context), and a real, currently entirely unaddressed
+design question this driver has never had to answer before -- whether
+and how such a literal captures the *enclosing* function's own local
+variables (real lexical closure semantics), since a statement block
+with its own `if`/`while`/local declarations is exactly the shape
+where that question becomes unavoidable, unlike the existing single-
+expression `(: ... :)` form. Real corpus, not theoretical: a scan
+found 25 real files across the mudlib using this exact form
+(`call_out(function(){ ... })`, `filter(target, function(object ob){
+... })`, `evaluate(function(){ Dying = 0; })`, and similar). Not
+attempted this session, per its own explicit instruction to report a
+new blocker plainly rather than force past it -- this is a real,
+sizable closure/scoping feature addition, not a contained parser
+tweak like the three fixes above it.
+
+Full clean rebuild and full suite re-run after each of the three fixes
+in this session (recursive-include generalization, the inherit
+adjacent-string-literal fix, and the `ARRAY_RESERVED_WORD` fix), 857
+tests passing by the end (up from 851), zero regressions at any point.
+Driver process stopped cleanly after the final boot attempt; no test
+character files or other live-verification artifacts were created
+this session (the boot itself never reached the point of accepting a
+connection).
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-09-03 (a further session, same day): Dead Souls 3.8.2 boot
 attempt, new row 3.10. Does not boot yet. 2 real driver bugs found and
 fixed with real citations, real fixes, and real regression tests

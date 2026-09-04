@@ -4172,15 +4172,24 @@ void registerCoreEfuns() {
     // (a failed lookup/uninitialized value), never for a plain literal
     // 0 or any other type (func_spec.cpp: "int undefinedp(mixed); int
     // nullp undefinedp(mixed);" -- nullp is a real alias, not a
-    // separate efun). This driver has no int-subtype distinction the
-    // way real FluffOS does; monostate (this driver's own "no value"
-    // state -- what an undefined function call returns, and currently
-    // what an object variable reads as before its first assignment) is
-    // the closest analog, so that is what this checks instead of a
-    // T_NUMBER subtype flag. Surfaced live: daemon/multi.c's own
-    // query_prevent_login().
+    // separate efun). Two real cases now checked, matching real
+    // find_in_mapping()'s and setup_variables()'s own shared const0u
+    // exactly (see Value.hpp's own isUndefined/makeUndefinedNumber()
+    // comments): a missing mapping key (this driver's own monostate,
+    // its pre-existing "no value" sentinel for that case, unrelated to
+    // the flag below) and, as of the isUndefined field, a genuinely
+    // never-assigned FluffOS-dialect local or object variable (real
+    // const0u, T_NUMBER 0 with the T_UNDEFINED subtype). The previous
+    // version of this comment claimed monostate was "currently what an
+    // object variable reads as" -- stale the moment LpcObject.cpp/
+    // VM.cpp moved that default to a real, isUndefined-tagged 0 instead
+    // of monostate; fixed here to check the actual current
+    // representation rather than the one this comment used to describe.
+    // Surfaced live: daemon/multi.c's own query_prevent_login(), and
+    // secure/daemon/master.c's own privs_file() (ROADMAP.md row 3.10).
     auto undefinedpImpl = [](VM&, std::vector<Value>& args) -> Value {
-        bool isUndefined = !args.empty() && std::holds_alternative<std::monostate>(args[0].data);
+        bool isUndefined = !args.empty() &&
+            (std::holds_alternative<std::monostate>(args[0].data) || args[0].isUndefined);
         return Value(static_cast<int64_t>(isUndefined ? 1 : 0));
     };
     t.registerEfun("undefinedp", undefinedpImpl);

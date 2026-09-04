@@ -1525,12 +1525,16 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
         objectVarBase = offsetIt->second;
     }
 
-    // Real int64_t 0 per slot, not monostate -- see LpcObject.cpp's own
-    // comment on variables_'s identical initialization for the citation;
-    // a declared-but-not-yet-assigned local reads as 0 in real LPC too,
-    // and the args loop below overwrites whichever slots are actually
-    // parameters immediately after anyway.
-    std::vector<Value> locals(fn.numLocals, Value(int64_t{0}));
+    // Real int64_t 0 per slot (not monostate -- see LpcObject.cpp's own
+    // comment on variables_'s identical initialization for the
+    // citation), tagged undefined under FluffOS to match real const0u
+    // (main.c/interpret.c's setup_variables()'s own push_undefineds()) --
+    // see Value.hpp's own isUndefined/makeUndefinedNumber() comments.
+    // Real LDMud has no equivalent, so this stays a plain 0 under every
+    // other dialect. The args loop below overwrites whichever slots are
+    // actually parameters immediately after anyway.
+    Value defaultLocal = (config().dialect() == "fluffos") ? makeUndefinedNumber() : Value(int64_t{0});
+    std::vector<Value> locals(fn.numLocals, defaultLocal);
     if (fn.isVarargs && fn.numArgs > 0) {
         // Real interpret.c:1394-1410's own setup_varargs_variables(): the
         // last declared parameter (slot numArgs-1) is always bound to a
@@ -2989,7 +2993,10 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
 // ROADMAP.md row 2.5 rules out.
 Task<Value> VM::runAsync(const CompiledProgram& program, const FunctionEntry& fn,
                           std::vector<Value> args, const std::shared_ptr<LpcObject>& obj) {
-    std::vector<Value> locals(fn.numLocals, Value(int64_t{0}));
+    // Same real const0u default as VM::run() above, same dialect gate --
+    // see that site's own comment.
+    Value defaultLocalAsync = (config().dialect() == "fluffos") ? makeUndefinedNumber() : Value(int64_t{0});
+    std::vector<Value> locals(fn.numLocals, defaultLocalAsync);
     for (size_t i = 0; i < args.size() && i < locals.size(); ++i) {
         locals[i] = std::move(args[i]);
     }

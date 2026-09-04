@@ -1343,7 +1343,10 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& rawFilen
     auto program = compile(filename);
     if (!program) return nullptr;
 
-    auto obj = std::make_shared<LpcObject>(filename, program);
+    // Real FluffOS T_UNDEFINED gate (Value.hpp's own isUndefined
+    // comment) -- real LDMud has no equivalent, so a declared object
+    // variable stays a plain, untagged 0 under that dialect.
+    auto obj = std::make_shared<LpcObject>(filename, program, config_.dialect() == "fluffos");
     loaded_[filename] = obj;
     LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
@@ -1414,7 +1417,8 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFile
     auto program = compile(filename);
     if (!program) return nullptr;
 
-    auto obj = std::make_shared<LpcObject>(filename, program);
+    // Same real FluffOS T_UNDEFINED gate as loadObject() above.
+    auto obj = std::make_shared<LpcObject>(filename, program, config_.dialect() == "fluffos");
     LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
     // real clone_object() -> give_uid_to_object(new_ob) (simulate.c:309),

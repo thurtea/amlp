@@ -1,5 +1,242 @@
 # STATUS
 
+**2026-09-04 (a further session, continuing further): T_UNDEFINED gap
+built exactly per this session's own prior scoping report below, and
+Dead Souls 3.8.2's boot re-attempted past the installer's `privs_file()`
+check.** 892 tests total, up from 888, full suite green throughout
+(direct binary run and `ctest` both confirm 0 failures), zero
+regressions at any step.
+
+1. `Value::isUndefined` (`Value.hpp`): a plain `bool`, default `false`,
+   sibling to `data`, matching real FluffOS's own `type`+`subtype`
+   svalue shape exactly rather than a new `ValueVariant` alternative --
+   no `std::visit`/exhaustive-switch site exists over the variant
+   (confirmed, not just carried over from the scoping read), so this
+   needed no changes anywhere arithmetic/comparison/truthiness already
+   read `data`. `makeUndefinedNumber()` is the one shared constructor
+   for real const0u (`Value(int64_t{0})` with `isUndefined = true`),
+   used at all three real default-init call sites so there is exactly
+   one place that builds the real shape.
+2. Dialect-conditional at all three sites, exactly as scoped: `VM.cpp`'s
+   `run()` and `runAsync()` (two separate locals-init call sites) gate
+   on `config().dialect() == "fluffos"` directly; `LpcObject`'s
+   constructor gained a third `bool fluffosDialect = true` parameter
+   (default matches `Config::dialect()`'s own default), threaded from
+   both real `ObjectManager::loadObject()`/`cloneObject()` call sites
+   via `config_.dialect() == "fluffos"`. Real LDMud gets a plain,
+   untagged 0 at every one of these sites, matching its own genuine
+   lack of the concept (confirmed against `temp/ldmud/src/svalue.h`
+   directly in the scoping pass below, not re-guessed here).
+3. `undefinedp()`/`nullp()` (`EfunTable.cpp`, real aliases of one
+   function, unchanged) now check `holds_alternative<monostate> ||
+   args[0].isUndefined` instead of monostate alone -- both real cases
+   preserved: a missing mapping key (monostate, already correct,
+   unaffected) and a genuinely never-assigned FluffOS-dialect local or
+   object variable (the new flag). The stale comment there (predating
+   the object-var/local default-value fix, still describing monostate
+   as "currently what an object variable reads as") is corrected in
+   place, not left stale next to the fix. A second, same-vintage stale
+   comment found in passing, `test_lexer.cpp`'s own
+   `testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes`, corrected too.
+4. Re-verified against the actual new field, not just the scoping
+   pass's source-only read: `isTruthy()`/`valuesEqual()` (`Value.cpp`)
+   read only `data.index()`/the stored numeric value, never
+   `isUndefined` -- confirmed by reading both functions directly.
+   `serializeValue()` (`EfunTable.cpp`'s `save_object()` backing)
+   writes `'I' << *iv << ';'` for any `int64_t`, `isUndefined` never
+   read -- an undefined 0 saves and restores as a plain defined 0,
+   matching real FluffOS's own subtype-blind `save_svalue()`.
+   `sprintfNumericArg()` accepts any `int64_t` unconditionally,
+   `isUndefined` never read -- matches real sprintf.c's own type-only
+   check. Every arithmetic opcode (`Sub`/`Mul`/`Div`/`Mod`/`Add`, read
+   directly in `VM.cpp`) constructs a fresh `Value(int64_t{...})` for
+   its result, so `isUndefined` resets to its `false` default for free
+   on every computed value, matching real FluffOS's own explicit
+   `subtype = 0` reset on every arithmetic opcode without needing an
+   explicit reset here. `++x`/`--x` has no dedicated opcode at all
+   (desugars to the same `Add`/`Store` path) so needed no separate
+   check. `StoreLocal`/`StoreObjectVar` do a plain whole-`Value` copy,
+   correctly propagating `isUndefined` on a bare `x = y` the same way
+   real `assign_svalue()`'s whole-`svalue_t` copy does (`interpret.c:
+   617-622`, confirmed directly) -- so assigning one already-undefined
+   variable into another also reads undefined, matching real behavior,
+   not just "reads as 0".
+5. 4 new regression tests, `test_lexer.cpp`: a never-assigned local
+   reading `undefinedp()`/`nullp()` true under FluffOS and false under
+   LDMud from the identical source; an explicitly-assigned `0` local
+   reading false under both dialects; one broad arithmetic/comparison/
+   truthiness/string-concat test running (not just asserting) `u + 1`,
+   `1 - u`, `u * 5`, `u == plain`, `u == 0`, `plain == u`, `u != 1`,
+   `u < 1`, `u > -1`, `u ? 1 : 0`, `!u`, and `"n=" + u` against an
+   undefined local, all matching plain-0 results exactly; and the
+   object-variable sibling case (LDMud false, FluffOS true) mirroring
+   `LpcObject.cpp`'s own default-init site specifically, not just
+   locals.
+6. **Dead Souls 3.8.2 boot re-attempted against `etc/driver_ds3.cfg`,
+   live over a real TCP connection (Python client script), same method
+   prior sessions used.** Confirmed real progress past the exact named
+   blocker: the installer's `"What is your MUD admin username?"` prompt
+   now accepts `testadmin` and proceeds into real account-creation
+   (attempting to `clone_object()` `/lib/player` for the new save file)
+   with no privilege-denial reached anywhere in the
+   `BANISH_D`/`check_access()`/`privs_file()` chain -- the previous
+   session's own hard "no privs assigned" denial is gone. Boot now
+   reaches a new, different, previously-undocumented real parser gap
+   (not found or named in any earlier session): `lib/lib/include/
+   player.h:4`'s real `class death { int Date; string Enemy; }` --
+   real FluffOS's own `class <name> { <member decls> }` struct-type
+   declaration, reached via `player.c`'s own `#include "include/
+   player.h"`. This driver's parser has no `class`-type-declaration
+   grammar at all; seeing `class` where it expects a variable
+   declaration's own base type, it consumes `class` itself as the
+   variable name and then chokes on the next real token, `death`
+   (surfacing as "expected \";\" in object variable declaration ...
+   got \"death\"" -- the driver's own line-number report, "line 1", is
+   an artifact of the include-splice rewrite resetting the line
+   counter, not literally `player.h`'s own line 1, confirmed by reading
+   `player.h` directly and finding `class death` at its real line 4).
+   Named here and stopped at, not investigated further or forced past,
+   per this project's own standing "no half-built subsystems"/"name a
+   real blocker, don't force past it" discipline -- scoping a `class`
+   type declaration is its own, separate future session's work.
+   `docs/dev/ROADMAP.md` row 3.10 updated in place with this outcome.
+
+Documentation-structure flag, no action taken (per explicit instruction
+to wait for go-ahead, this is not a code/scope decision): CLAUDE.md's
+own Orientation section documents only `temp/reference/
+fluffos-2.9-ds2.08/` as "the vendored real FluffOS 2.9 source used for
+every citation throughout this repo"; it does not mention the second
+real vendored tree this and the prior session both cited directly,
+`temp/ds3.8.2_extracted/ds3.8.2/fluffos-2.23-ds03/` (the exact driver
+version Dead Souls 3.8.2 itself ships with, bundled inside that
+mudlib's own extracted archive rather than placed under `temp/
+reference/`). This gap caused a real wrong claim in the prior session
+("does not exist anywhere on disk"), corrected once actually checked.
+Proposed one-line addition, pending go-ahead: a new paragraph in
+CLAUDE.md's Orientation section, immediately after the existing
+`temp/reference/fluffos-2.9-ds2.08/` paragraph (after line 56, before
+the section's closing), naming `temp/ds3.8.2_extracted/ds3.8.2/
+fluffos-2.23-ds03/` as a second real, on-disk, gitignored FluffOS
+source tree, narrower in scope than the canonical one (citations tied
+specifically to Dead Souls 3.8.2's own bundled driver version rather
+than general cross-repo citations), so a missing-file check against
+only the canonical path does not wrongly conclude a real, on-disk
+citation target does not exist.
+
+**2026-09-04 (a further session): T_UNDEFINED gap scoped in full against
+real FluffOS/LDMud source and this driver's own current code, no code
+written yet, per this project's own "scope first" discipline.** Also
+closed out this session's own opening verification task: STATUS.md's
+row-3.10 entry already read "888 tests total, up from 874" and "14 new
+regression tests" (confirmed against a direct `ctest`/binary run: 888
+test cases, 0 failed, `all tests passed`); no 995/18 figure was present
+in the file, so nothing needed correcting there.
+
+1. **Real FluffOS representation, confirmed directly against source
+   (both vendored trees agree):** `T_UNDEFINED` (`lpc.h:89`, value
+   `0x4`) is a *subtype* value, meaningful only when a `svalue_t`'s
+   `type` field is `T_NUMBER` -- not a distinct top-level type tag.
+   `main.c:120-122` (`temp/reference/fluffos-2.9-ds2.08`) /
+   `main.c:123-125` (`temp/ds3.8.2_extracted/ds3.8.2/fluffos-2.23-ds03`,
+   the exact driver version Dead Souls 3.8.2 ships with, a second real
+   vendored tree on disk not currently named in CLAUDE.md's Orientation
+   section) both construct `const0u` identically: `type = T_NUMBER`,
+   `u.number = 0`, `subtype = T_UNDEFINED` -- bit-for-bit the same as a
+   literal `0` except that one field. `interpret.c`'s own
+   `setup_variables()` (`push_undefineds(local)`, `:1386-1390`) confirms
+   every declared local, not just object variables, defaults to
+   `const0u` on every function call; `object.c:1595/1892/1950` and
+   `simulate.c:988` confirm the same for object variables;
+   `mapping.c:827-847`'s `find_in_mapping()` confirms a missing mapping
+   key also returns `const0u`, not a plain `const0`. Only
+   `undefinedp()`/`nullp()` (`efuns_main.c:3456-3466`, confirmed real
+   aliases of the same function via `efun_defs.c:141`'s
+   `F_UNDEFINEDP | F_ALIAS_FLAG`) observe the subtype; `==` (`f_eq()`,
+   `eoperators.c:97-107`) compares only `u.number`, and every arithmetic/
+   assignment opcode explicitly resets `subtype = 0` on its result
+   (confirmed by grep across `eoperators.c`/`interpret.c`), so the
+   distinction never survives being used in an expression. `sprintf()`'s
+   own `%d`/`%o`/`%x`/`%c` type check (`sprintf.c`, cited already in
+   `EfunTable.cpp:3106-3120`) and `save_svalue()`/`save_object()`
+   (`object.c:138-`, switches on `type` only) both ignore `subtype`
+   entirely -- a saved-and-restored undefined value comes back as a
+   plain defined `0`, matching this driver's own existing sprintf
+   comment.
+2. **LDMud has no equivalent concept at all**, confirmed directly against
+   `temp/ldmud/src/svalue.h`: no `T_UNDEFINED`, no `undefinedp`/`nullp`
+   efun anywhere in source or `doc/`, and the secondary-type union on
+   `struct svalue_s` (`x.exponent`/`x.closure_type`/`x.quotes`/etc.) has
+   no "was this ever assigned" slot. `F_CLEAR_LOCALS`
+   (`interpret.c:16269-16284`) resets locals to plain `const0`, not any
+   undefined-tagged variant. This is a real, permanent, FluffOS-only
+   distinction, not a gap in LDMud's own source -- any fix stays
+   dialect-conditional (a no-op under LDMud) rather than universal.
+3. **This driver's own `Value` type and default-init sites, checked
+   directly, not guessed:** `VM.cpp:1533` (`VM::run()`) and `VM.cpp:2992`
+   (`VM::runAsync()`, a second, parallel call-setup site) both default
+   `locals` to `Value(int64_t{0})`; `LpcObject.cpp:29` does the same for
+   `variables_`. Both carry comments explicitly framing this as a known
+   simplification over a prior, arithmetic-breaking `std::monostate`
+   default. `undefinedp()`/`nullp()` (`EfunTable.cpp:4182-4187`) already
+   exist and correctly check `std::holds_alternative<std::monostate>`,
+   but that comment (`:4176-4179`) is now stale: it still says monostate
+   is "currently what an object variable reads as," which stopped being
+   true the moment `LpcObject.cpp`/`VM.cpp` were changed to a real `0` --
+   so today `undefinedp()` can never see a never-assigned local or
+   object variable at all, only a missing-mapping-key monostate (which
+   remains correctly detected, matching real `find_in_mapping()`).
+   `CodeGen.cpp:721-727`'s `emitVarDeclStmt()` confirms it emits no
+   bytecode at all for a declared-without-initializer local, relying
+   entirely on the VM's default fill -- so there is no third site to
+   find there. `isTruthy()`/`valuesEqual()` (`Value.cpp`) key only off
+   `data.index()` and the stored numeric value, matching real `f_eq()`'s
+   subtype-blind comparison already -- neither needs to change. The
+   natural fix shape (matching real FluffOS's own `type`+`subtype`
+   struct exactly, not a new variant alternative): a plain
+   `bool isUndefined = false;` sibling field on `struct Value` next to
+   `data`, set `true` only at the two default-init sites (plus
+   `runAsync`'s copy, three call sites total), left at its default
+   everywhere a fresh `Value(int64_t{...})` is constructed by arithmetic
+   or a literal -- which every such site already does today, so no
+   opcode needs to change. Real FluffOS's `assign_svalue()` (`:617-622`)
+   copies the whole `svalue_t` including `subtype` on a plain `x = y`,
+   so a bare bool field (copied automatically by `Value`'s default copy
+   constructor) matches that propagation for free; nothing here needs a
+   `std::visit`/exhaustive-switch update since `Value.hpp:54-60`'s own
+   comment already confirms none exist over the variant.
+4. **Smallest real first slice: yes, genuinely just those two efuns,
+   confirmed rather than assumed.** Checked the two real named
+   candidates for a wider distinction directly: `sprintf()`'s `%d`-family
+   type check and `save_object()`'s `save_svalue()` both switch on
+   `type`/`data.index()` only, never `subtype` (source cited under item
+   1) -- so real FluffOS itself does not distinguish the two anywhere
+   outside `undefinedp()`/`nullp()`. The complete slice: add the
+   `isUndefined` flag, set it at the three default-init call sites,
+   and repoint `undefinedp()`/`nullp()` at
+   `(isUndefined && holds int64_t 0) || holds monostate` instead of
+   monostate alone (both must keep working: the mapping-miss case is
+   real and already correct). Nothing else needs to change.
+5. **Confirmed this fully unblocks the named `privs_file()` case, and
+   nothing further is needed for it.** Real source:
+   `temp/ds3.8.2_extracted/ds3.8.2/lib/secure/daemon/master.c:214-236`.
+   `mixed ret;` is a declared-only local; the only path that leaves it
+   untouched is `nom` being falsy, at which point real FluffOS's `ret`
+   genuinely never receives an assignment before `if(undefinedp(ret))`
+   -- exactly the never-assigned-local case, not an object variable or a
+   mapping miss. `file_privs()` itself
+   (`temp/ds3.8.2_extracted/ds3.8.2/lib/secure/sefun/security.c:9-30`)
+   is a plain per-directory string lookup (`PRIV_MUDLIB` for `daemon`,
+   `PRIV_SECURE` for `secure`/`adm`, etc.), and every downstream consumer
+   of `privs_file()`'s return (`check_access()`'s own
+   `query_privs()`/`member_array()` calls, `master.c:353/511/520-521/
+   574-578`) is ordinary string/array logic untouched by the undefined
+   distinction. So fixing the local-variable default plus
+   `undefinedp()` is sufficient end to end for this call site: no
+   further change anywhere in the master.c/`check_access()` chain is
+   needed.
+
+Not yet implemented; waiting on explicit go-ahead before writing code.
+
 Dated session entries below, most recent first. `STATUS-ARCHIVE.md`
 (which used to hold everything before the 5 most recent sessions) was
 deleted 2026-08-21 by the project owner directly (`git log`: "deletion

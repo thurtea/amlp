@@ -16491,11 +16491,12 @@ static void testObjectVarInitializerParentRunsBeforeChild() {
 // int undefinedp(mixed) / int nullp(mixed). Surfaced live: daemon/
 // multi.c's own query_prevent_login().
 static void testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes() {
-    // A bare unassigned local/object variable is real LPC's own 0
-    // default now (see LpcObject.cpp's own comment), not this driver's
-    // separate monostate sentinel -- environment() on an object with no
-    // environment set is a genuine, reliable source of monostate to
-    // test undefinedp()/nullp() against instead.
+    // A bare unassigned local/object variable is now real const0u under
+    // FluffOS -- Value::isUndefined-tagged, not this driver's separate
+    // monostate sentinel (see the T_UNDEFINED-gap tests just below this
+    // one for that case specifically) -- environment() on an object
+    // with no environment set is a genuine, reliable source of
+    // monostate to test undefinedp()/nullp() against instead.
     amlp::Value result = runProbe(
         "mixed never_set;\n"
         "never_set = environment(this_object());\n"
@@ -29508,6 +29509,161 @@ static void testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesS
     std::cout << "testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesSefunCShape OK\n";
 }
 
+// T_UNDEFINED gap (this session's own prior scoping report, real
+// lpc.h:89/main.c:120-122's own const0u, real interpret.c:1386-1390's
+// own setup_variables()/push_undefineds()): a declared-but-never-
+// assigned local under FluffOS is real const0u (T_NUMBER 0 tagged
+// T_UNDEFINED), visible only to undefinedp()/nullp() -- see Value.hpp's
+// own isUndefined/makeUndefinedNumber() comments. Real LDMud has no
+// equivalent concept at all (confirmed against temp/ldmud/src/svalue.h),
+// so the identical declaration must read back as a plain, untagged 0
+// there instead -- both dialects checked here against the exact same
+// source, not just FluffOS alone.
+static void testNeverAssignedLocalIsUndefinedpAndNullpTrueUnderFluffosFalseUnderLdmud() {
+    {
+        amlp::Value result = runProbe(
+            "mixed ret;\n"
+            "return ({ undefinedp(ret), nullp(ret) });");
+        assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(result.data));
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+        assert(arr != nullptr && arr->items.size() == 2);
+        assert(std::get<int64_t>(arr->items[0].data) == 1);
+        assert(std::get<int64_t>(arr->items[1].data) == 1);
+    }
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/tundef_local_ldmud.c",
+            "void create() {}\n"
+            "mixed *probe() {\n"
+            "    mixed ret;\n"
+            "    return ({ undefinedp(ret), nullp(ret) });\n"
+            "}\n");
+        auto ob = harness.objects.loadObject("/tundef_local_ldmud");
+        assert(ob != nullptr);
+        amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+        assert(arr != nullptr && arr->items.size() == 2);
+        assert(std::get<int64_t>(arr->items[0].data) == 0);
+        assert(std::get<int64_t>(arr->items[1].data) == 0);
+    }
+
+    std::cout << "testNeverAssignedLocalIsUndefinedpAndNullpTrueUnderFluffosFalseUnderLdmud OK\n";
+}
+
+// An explicit "= 0" clears the T_UNDEFINED subtype in real FluffOS
+// (every opcode that produces a fresh number result resets subtype to
+// 0, confirmed by grep across real eoperators.c/interpret.c -- see
+// Value.hpp's own isUndefined comment); under LDMud there was never
+// anything to clear. Both dialects must agree: undefinedp() is false
+// either way.
+static void testExplicitlyAssignedZeroLocalIsUndefinedpFalseUnderFluffosAndLdmud() {
+    {
+        amlp::Value result = runProbe(
+            "mixed ret;\n"
+            "ret = 0;\n"
+            "return undefinedp(ret);");
+        assert(std::get<int64_t>(result.data) == 0);
+    }
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/tundef_zero_ldmud.c",
+            "void create() {}\n"
+            "int probe() {\n"
+            "    mixed ret;\n"
+            "    ret = 0;\n"
+            "    return undefinedp(ret);\n"
+            "}\n");
+        auto ob = harness.objects.loadObject("/tundef_zero_ldmud");
+        assert(ob != nullptr);
+        amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+        assert(std::get<int64_t>(result.data) == 0);
+    }
+
+    std::cout << "testExplicitlyAssignedZeroLocalIsUndefinedpFalseUnderFluffosAndLdmud OK\n";
+}
+
+// Real FluffOS's own subtype-blind arithmetic/comparison/truthiness
+// (eoperators.c's f_eq() comparing only u.number; IS_ZERO-style
+// truthiness never reading subtype at all -- see Value.hpp's own
+// isUndefined comment): a never-assigned local must behave exactly
+// like an explicitly-assigned plain 0 everywhere except undefinedp()/
+// nullp() themselves. Run, not just asserted from the design: every
+// comparison here is between the undefined local and a genuinely
+// plain, freshly-assigned 0, both funneled through the real Add/Sub/
+// Eq/Lt/Not opcodes.
+static void testUndefinedLocalArithmeticComparisonAndTruthinessAllMatchPlainZeroUnderFluffos() {
+    amlp::Value result = runProbe(
+        "mixed u;\n"
+        "int plain;\n"
+        "plain = 0;\n"
+        "return ({\n"
+        "    u + 1,\n"
+        "    1 - u,\n"
+        "    u * 5,\n"
+        "    u == plain,\n"
+        "    u == 0,\n"
+        "    plain == u,\n"
+        "    u != 1,\n"
+        "    u < 1,\n"
+        "    u > -1,\n"
+        "    u ? 1 : 0,\n"
+        "    !u,\n"
+        "    \"n=\" + u\n"
+        "});");
+    assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr != nullptr && arr->items.size() == 12);
+    assert(std::get<int64_t>(arr->items[0].data) == 1);   // u + 1
+    assert(std::get<int64_t>(arr->items[1].data) == 1);   // 1 - u
+    assert(std::get<int64_t>(arr->items[2].data) == 0);   // u * 5
+    assert(std::get<int64_t>(arr->items[3].data) == 1);   // u == plain
+    assert(std::get<int64_t>(arr->items[4].data) == 1);   // u == 0
+    assert(std::get<int64_t>(arr->items[5].data) == 1);   // plain == u
+    assert(std::get<int64_t>(arr->items[6].data) == 1);   // u != 1
+    assert(std::get<int64_t>(arr->items[7].data) == 1);   // u < 1
+    assert(std::get<int64_t>(arr->items[8].data) == 1);   // u > -1
+    assert(std::get<int64_t>(arr->items[9].data) == 0);   // u ? 1 : 0 (falsy)
+    assert(std::get<int64_t>(arr->items[10].data) == 1);  // !u (truthy negation)
+    assert(std::get<std::string>(arr->items[11].data) == "n=0"); // string+number concat
+
+    std::cout << "testUndefinedLocalArithmeticComparisonAndTruthinessAllMatchPlainZeroUnderFluffos OK\n";
+}
+
+// Same distinction, object-variable form (LpcObject.cpp's own
+// construction-time fill, not VM::run()'s locals fill) -- the exact
+// shape real Dead Souls 3.8.2's own secure/daemon/master.c privs_file()
+// relies on ("mixed ret; ...; if(undefinedp(ret)) ret = file_privs(file);",
+// ROADMAP.md row 3.10), except privs_file()'s own `ret` is a local, not
+// an object variable; this covers the sibling default-init site the
+// same session's scoping report named as equally affected.
+static void testNeverAssignedObjectVariableIsUndefinedpTrueUnderFluffosFalseUnderLdmud() {
+    {
+        amlp::Value result = runProbeMulti(
+            "mixed ret;\n"
+            "mixed *probe() { return ({ undefinedp(ret), nullp(ret) }); }\n");
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+        assert(arr != nullptr && arr->items.size() == 2);
+        assert(std::get<int64_t>(arr->items[0].data) == 1);
+        assert(std::get<int64_t>(arr->items[1].data) == 1);
+    }
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/tundef_objvar_ldmud.c",
+            "void create() {}\n"
+            "mixed ret;\n"
+            "mixed *probe() { return ({ undefinedp(ret), nullp(ret) }); }\n");
+        auto ob = harness.objects.loadObject("/tundef_objvar_ldmud");
+        assert(ob != nullptr);
+        amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+        auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+        assert(arr != nullptr && arr->items.size() == 2);
+        assert(std::get<int64_t>(arr->items[0].data) == 0);
+        assert(std::get<int64_t>(arr->items[1].data) == 0);
+    }
+
+    std::cout << "testNeverAssignedObjectVariableIsUndefinedpTrueUnderFluffosFalseUnderLdmud OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -30412,6 +30568,10 @@ int main() {
     testCallArgumentSpreadThroughEfunColonColonFormExpandsIntoEfunArgs();
     testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeCallParent();
     testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesSefunCShape();
+    testNeverAssignedLocalIsUndefinedpAndNullpTrueUnderFluffosFalseUnderLdmud();
+    testExplicitlyAssignedZeroLocalIsUndefinedpFalseUnderFluffosAndLdmud();
+    testUndefinedLocalArithmeticComparisonAndTruthinessAllMatchPlainZeroUnderFluffos();
+    testNeverAssignedObjectVariableIsUndefinedpTrueUnderFluffosFalseUnderLdmud();
     std::cout << "all tests passed\n";
     return 0;
 }

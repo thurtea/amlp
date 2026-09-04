@@ -11,7 +11,17 @@ namespace amlp {
 
 class LpcObject : public std::enable_shared_from_this<LpcObject> {
 public:
-    LpcObject(std::string filename, std::shared_ptr<CompiledProgram> program);
+    // `fluffosDialect` gates whether a freshly declared object variable
+    // is tagged real FluffOS's own T_UNDEFINED (Value::isUndefined, see
+    // Value.hpp's own comment) -- real LDMud has no equivalent concept,
+    // so callers under any other dialect pass false and get a plain,
+    // untagged 0 instead (see LpcObject.cpp's own constructor comment).
+    // Defaults to true (Config::dialect()'s own default is "fluffos"),
+    // so any construction site that genuinely does not care still gets
+    // real FluffOS behavior rather than silently reverting to the old
+    // untagged default.
+    LpcObject(std::string filename, std::shared_ptr<CompiledProgram> program,
+              bool fluffosDialect = true);
 
     const std::string& filename() const { return filename_; }
 

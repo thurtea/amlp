@@ -75,6 +75,27 @@ using ValueVariant = std::variant<
 struct Value {
     ValueVariant data;
 
+    // Real FluffOS's T_UNDEFINED (lpc.h: "#define T_UNDEFINED 0x4 /*
+    // undefinedp() returns true */"): a *subtype* flag alongside an
+    // ordinary T_NUMBER svalue, not a separate value kind, set only on
+    // const0u (main.c: "const0u.type = T_NUMBER; const0u.subtype =
+    // T_UNDEFINED; const0u.u.number = 0;") and cleared to 0 by every
+    // opcode that produces a fresh number (confirmed by grep across
+    // eoperators.c/interpret.c -- every arithmetic/assignment result
+    // explicitly resets subtype). This field mirrors that shape
+    // directly: a plain bool sibling to `data`, not a new ValueVariant
+    // alternative, so isTruthy()/valuesEqual() and every arithmetic
+    // opcode keep reading `data` exactly as before and need no changes
+    // (see makeUndefinedNumber()'s own comment). Only ever true when
+    // `data` holds an int64_t 0 constructed via makeUndefinedNumber();
+    // meaningless (and never set) on any other alternative. FluffOS-
+    // dialect-only: real LDMud has no equivalent concept at all
+    // (confirmed against temp/ldmud/src/svalue.h -- no T_UNDEFINED, no
+    // undefinedp()/nullp() efun, no secondary-type slot for it), so
+    // callers gate construction on dialect, this field itself carries
+    // no dialect awareness.
+    bool isUndefined = false;
+
     Value() = default;
     template <typename T>
     Value(T v) : data(std::move(v)) {}
@@ -84,6 +105,18 @@ struct Value {
 
 bool isTruthy(const Value& v);
 bool valuesEqual(const Value& a, const Value& b);
+
+// Real const0u (main.c): a declared-but-not-yet-assigned local/object
+// variable under FluffOS. Callers are responsible for the dialect gate
+// (real LDMud has no equivalent -- see Value::isUndefined's own
+// comment); this just builds the one real shape both VM.cpp's own
+// locals-init sites and LpcObject.cpp's object-variable init share, so
+// there is exactly one place that constructs it.
+inline Value makeUndefinedNumber() {
+    Value v(int64_t{0});
+    v.isUndefined = true;
+    return v;
+}
 
 // throw(mixed) -- real FluffOS's own F_THROW (efuns_main.c's f_throw():
 // stores the argument into the single global "value to hand back to the

@@ -180,17 +180,9 @@ private:
     // via lookup_any_class_member(), a real, documented ambiguity-prone
     // shortcut this driver deliberately does not replicate -- no real
     // corpus site found needing it, see this row's own scoping report).
-    // Only recognizes a bare VarRefExpr naming a locally- or object-
-    // variable-declared class type (localClassTypes_ shadows
-    // objectVarClassTypes_, matching resolveVariable()'s own local-
-    // wins-over-global precedence); anything else (a call result, a
-    // nested index/member expression, ...) returns "", and the caller
-    // (emitIndexValue()) throws a clear error naming exactly what could
-    // not be resolved, rather than misreading it as an ordinary
-    // integer/string index. No real corpus site needs anything richer
-    // (every real "->member" site found is a directly class-declared
-    // variable, never a chained "a->b->c" or an indexed result) -- see
-    // this row's own scoping report and STATUS.md entry.
+    // Only a bare VarRefExpr of a class-declared variable, or a
+    // TypeCastExpr "(class Name)expr" (grammar.y:780-786). Anything
+    // else returns "" and emitIndexValue() throws rather than guessing.
     std::string staticClassTypeOf(const AstNode& expr) const;
 
     // Shared by emitExpr()'s own IndexExpr case and

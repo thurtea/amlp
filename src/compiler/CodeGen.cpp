@@ -48,6 +48,9 @@ int CodeGen::resolveClassMemberIndex(const std::string& className,
 }
 
 std::string CodeGen::staticClassTypeOf(const AstNode& expr) const {
+    if (auto* cast = dynamic_cast<const TypeCastExpr*>(&expr)) {
+        return cast->className;
+    }
     auto* ref = dynamic_cast<const VarRefExpr*>(&expr);
     if (!ref) return "";
     auto localIt = localClassTypes_.find(ref->name);
@@ -458,6 +461,18 @@ void CodeGen::emitExpr(const AstNode& expr) {
         emitSpreadExpansions(arrLit->elementIsSpread);
         out_->code.push_back(
             Instruction{OpCode::MakeArray, 0, static_cast<int32_t>(arrLit->elements.size())});
+        return;
+    }
+    if (auto* typeCast = dynamic_cast<const TypeCastExpr*>(&expr)) {
+        emitExpr(*typeCast->inner);
+        return;
+    }
+    if (auto* comma = dynamic_cast<const CommaExpr*>(&expr)) {
+        // grammar.y CREATE_TWO_VALUES / pop_value($1): left runs for
+        // side effect, right is the value.
+        emitExpr(*comma->left);
+        out_->code.push_back(Instruction{OpCode::Pop, 0, 0});
+        emitExpr(*comma->right);
         return;
     }
     if (auto* newClass = dynamic_cast<const NewClassExpr*>(&expr)) {

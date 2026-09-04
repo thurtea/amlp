@@ -60,6 +60,13 @@ struct BinaryExpr : AstNode {
     AstPtr right;
 };
 
+// grammar.y:1555-1565 comma_expr (CREATE_TWO_VALUES): evaluate left,
+// discard it, yield right. Above expr0, not inside it.
+struct CommaExpr : AstNode {
+    AstPtr left;
+    AstPtr right;
+};
+
 // BitNot: real LPC/C "~x", one's-complement bitwise NOT (grammar.y:
 // "'~' expr0", same "%right L_NOT '~'" precedence tier as unary "!").
 // Found live against a real third-party mudlib corpus (row 3.8's TMI-2
@@ -444,6 +451,14 @@ struct MappingLiteralExpr : AstNode {
 // free, with zero additional statement/expression-level parsing code.
 struct MemberNameMarker : AstNode {
     std::string name;
+};
+
+// "(class Name)expr" (grammar.y:780-786 cast, basic_type includes
+// L_CLASS identifier). Runtime no-op; className is for ->member
+// resolution. Ordinary "(string)expr" stays stripped, not this node.
+struct TypeCastExpr : AstNode {
+    std::string className;
+    AstPtr inner;
 };
 
 // "class <name> { <member decls> }" -- the declaration itself (real

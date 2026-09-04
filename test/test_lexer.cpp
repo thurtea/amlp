@@ -29917,6 +29917,84 @@ static void testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisb
     std::cout << "testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisbehavior OK\n";
 }
 
+// grammar.y:780-786 / 632-668: "(class Name)expr" is a real cast.
+// Runtime no-op; the type is kept so ->member on an indexed result
+// resolves. Exact interactive.c shape: ((class marriage)Marriages[0])->Spouse.
+static void testClassCastOnIndexedArrayElementThenMemberRead() {
+    amlp::Value result = runProbeMulti(
+        "class marriage { string Spouse; int DivorceDate; }\n"
+        "string probe() {\n"
+        "    class marriage *Marriages;\n"
+        "    class marriage m;\n"
+        "    m = new(class marriage Spouse: \"Ada\", DivorceDate: 0);\n"
+        "    Marriages = ({ m });\n"
+        "    return ((class marriage)Marriages[0])->Spouse;\n"
+        "}\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "Ada");
+
+    std::cout << "testClassCastOnIndexedArrayElementThenMemberRead OK\n";
+}
+
+// "(class Name *)expr" is the same cast production's optional_star
+// form. No ->member on the array itself, so this stays a no-op strip.
+static void testClassStarCastIsARuntimeNoOpLikeStringStarCast() {
+    amlp::Value result = runProbeMulti(
+        "class marriage { string Spouse; }\n"
+        "int probe() {\n"
+        "    class marriage *Marriages;\n"
+        "    class marriage m;\n"
+        "    m = new(class marriage Spouse: \"Ada\");\n"
+        "    Marriages = ({ m });\n"
+        "    return sizeof((class marriage *)Marriages);\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    std::cout << "testClassStarCastIsARuntimeNoOpLikeStringStarCast OK\n";
+}
+
+// grammar.y:2450 L_RETURN comma_expr, race.c:206
+// "return (Race = extra), race;" -- last expr0 is the returned value.
+static void testReturnCommaExprYieldsRightmostValueAfterAssignmentSideEffect() {
+    amlp::Value result = runProbeMulti(
+        "int Race;\n"
+        "int set_and_return() {\n"
+        "    int extra, race;\n"
+        "    extra = 7;\n"
+        "    race = 3;\n"
+        "    return (Race = extra), race;\n"
+        "}\n"
+        "int probe() {\n"
+        "    int r;\n"
+        "    r = set_and_return();\n"
+        "    return Race * 10 + r;\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 73);
+
+    std::cout << "testReturnCommaExprYieldsRightmostValueAfterAssignmentSideEffect OK\n";
+}
+
+// expr_list_node is expr0, so f(a, b) is two args. Parenthesized
+// '(' comma_expr ')' (grammar.y:2969) is how a comma operator is
+// passed as a single argument.
+static void testCallArgsStaySeparateWhileParenthesizedCommaExprIsOneArg() {
+    amlp::Value result = runProbeMulti(
+        "int add(int a, int b) { return a + 10 * b; }\n"
+        "int id(int x) { return x; }\n"
+        "int probe() {\n"
+        "    int two_args, paren_comma;\n"
+        "    two_args = add(3, 4);\n"
+        "    paren_comma = id((8, 9));\n"
+        "    return two_args * 1000 + paren_comma;\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 43009);
+
+    std::cout << "testCallArgsStaySeparateWhileParenthesizedCommaExprIsOneArg OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -30834,6 +30912,10 @@ int main() {
     testClassInstanceStoredAsMappingValueRetrievedThroughMemberThenIndexChain();
     testClassTypedForeachValueVariableMemberReadInsideLoopBody();
     testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisbehavior();
+    testClassCastOnIndexedArrayElementThenMemberRead();
+    testClassStarCastIsARuntimeNoOpLikeStringStarCast();
+    testReturnCommaExprYieldsRightmostValueAfterAssignmentSideEffect();
+    testCallArgsStaySeparateWhileParenthesizedCommaExprIsOneArg();
     std::cout << "all tests passed\n";
     return 0;
 }

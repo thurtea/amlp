@@ -118,6 +118,8 @@ private:
     std::string parseInheritPathString();
 
     AstPtr parseExpr();
+    // grammar.y comma_expr (above expr0). parseExpr() stays expr0.
+    AstPtr parseCommaExpr();
     AstPtr parseCommaExprChain();
     AstPtr continueStatementCommaChain(AstPtr firstStmt);
     AstPtr parseTernary();

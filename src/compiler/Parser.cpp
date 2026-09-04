@@ -361,12 +361,7 @@ AstPtr Parser::parsePrimary() {
     // the Parser same as real LPC does), so this is the one place that
     // decides what a bare "$" actually means: real grammar's only
     // production consuming a bare "'$'" token is this one, immediately
-    // followed by "(". Only a single expr is parsed here, not a full
-    // comma_expr (real grammar's own "comma_expr" production) -- every
-    // real "$(expr)" site found across this repo's own vendored mudlib
-    // corpora (Dead Souls 3.8.2 included) uses exactly one expression
-    // inside the parens, never a comma-separated sequence, so a bare
-    // parseExpr() already covers every real, confirmed use.
+    // followed by "(". grammar.y.pre "'$' '(' comma_expr ')'".
     if (checkText("$") && peekAt(1).text == "(") {
         if (lambdaBoundValuesStack_.empty()) {
             throw LpcRuntimeError(
@@ -374,7 +369,7 @@ AstPtr Parser::parsePrimary() {
         }
         advance(); // $
         advance(); // (
-        AstPtr valueExpr = parseExpr();
+        AstPtr valueExpr = parseCommaExpr();
         expectText(")", "$(...) bound value");
         int slot = static_cast<int>(lambdaBoundValuesStack_.back().size());
         lambdaBoundValuesStack_.back().push_back(std::move(valueExpr));
@@ -694,7 +689,7 @@ AstPtr Parser::parsePrimary() {
 
     if (checkText("(")) {
         advance();
-        auto expr = parseExpr();
+        auto expr = parseCommaExpr();
         expectText(")", "parenthesized expression");
         return expr;
     }
@@ -827,7 +822,7 @@ AstPtr Parser::parsePrimary() {
         // this mudlib uses that form.
         if (name == "catch" && checkText("(")) {
             advance(); // "("
-            auto guarded = parseExpr();
+            auto guarded = parseCommaExpr();
             expectText(")", "catch expression");
 
             auto catchExpr = std::make_unique<CatchExpr>();
@@ -1037,7 +1032,9 @@ AstPtr Parser::parsePostfix() {
                 advance();
                 startFromEnd = true;
             }
-            AstPtr startExpr = parseExpr();
+            AstPtr startExpr = (dialect_ == LpcDialect::LdMud)
+                ? parseExpr()
+                : parseCommaExpr();
             AstPtr endExpr = nullptr;
             AstPtr mapColumn = nullptr;
             bool endFromEnd = false;
@@ -1229,6 +1226,33 @@ AstPtr Parser::parseUnary() {
         if (checkText(")")) {
             advance(); // ')'
             return parseUnary();
+        }
+        pos_ = save;
+    }
+    // grammar.y:780-786: cast is '(' basic_type optional_star ')';
+    // basic_type includes L_CLASS identifier (grammar.y:632-668).
+    // Kept as TypeCastExpr so ->member can resolve; "(class Name *)"
+    // is a no-op strip like "(string *)".
+    if (dialect_ == LpcDialect::FluffOS && checkText("(") &&
+        peekAt(1).type == TokenType::Ident && peekAt(1).text == "class" &&
+        peekAt(2).type == TokenType::Ident) {
+        size_t save = pos_;
+        advance(); // '('
+        advance(); // class
+        std::string className = advance().text;
+        bool star = false;
+        if (checkText("*")) {
+            advance();
+            star = true;
+        }
+        if (checkText(")")) {
+            advance();
+            auto inner = parseUnary();
+            if (star) return inner;
+            auto cast = std::make_unique<TypeCastExpr>();
+            cast->className = std::move(className);
+            cast->inner = std::move(inner);
+            return cast;
         }
         pos_ = save;
     }
@@ -1530,6 +1554,22 @@ AstPtr Parser::parseExpr() {
     return parseTernary();
 }
 
+// grammar.y:1555-1565: comma_expr is expr0 | comma_expr ',' expr0, with
+// CREATE_TWO_VALUES so the last expr0 is the value. Used by return, if,
+// while, switch, catch, '(' comma_expr ')', not by expr_list (args and
+// array elements stay parseExpr / expr0).
+AstPtr Parser::parseCommaExpr() {
+    AstPtr left = parseExpr();
+    while (checkText(",")) {
+        advance();
+        auto comma = std::make_unique<CommaExpr>();
+        comma->left = std::move(left);
+        comma->right = parseExpr();
+        left = std::move(comma);
+    }
+    return left;
+}
+
 // Real LPC's for-loop init/update clauses are a "comma_expr" (grammar.y:
 // "for_expr: /* EMPTY */ | comma_expr", "comma_expr: expr0 | comma_expr
 // ',' expr0"), i.e. one or more comma-separated expressions each
@@ -1601,7 +1641,7 @@ AstPtr Parser::parseReturnStatement() {
     expectText("return", "return statement");
     auto stmt = std::make_unique<ReturnStmt>();
     if (!checkText(";")) {
-        stmt->expr = parseExpr();
+        stmt->expr = parseCommaExpr();
     }
     expectText(";", "return statement");
     return stmt;
@@ -1692,7 +1732,7 @@ AstPtr Parser::parseIfStatement() {
     expectText("if", "if statement");
     expectText("(", "if condition");
     auto stmt = std::make_unique<IfStmt>();
-    stmt->condition = parseExpr();
+    stmt->condition = parseCommaExpr();
     expectText(")", "if condition");
     stmt->thenBranch = parseBranch();
 
@@ -1708,7 +1748,7 @@ AstPtr Parser::parseWhileStatement() {
     expectText("while", "while statement");
     expectText("(", "while condition");
     auto stmt = std::make_unique<WhileStmt>();
-    stmt->condition = parseExpr();
+    stmt->condition = parseCommaExpr();
     expectText(")", "while condition");
     stmt->body = parseBranch();
     return stmt;
@@ -1724,7 +1764,7 @@ AstPtr Parser::parseDoWhileStatement() {
     stmt->body = parseBranch();
     expectText("while", "do-while statement");
     expectText("(", "do-while condition");
-    stmt->condition = parseExpr();
+    stmt->condition = parseCommaExpr();
     expectText(")", "do-while condition");
     expectText(";", "do-while statement");
     return stmt;
@@ -1755,7 +1795,7 @@ AstPtr Parser::parseForStatement() {
     expectText(";", "for statement init clause");
 
     if (!checkText(";")) {
-        stmt->condition = parseExpr();
+        stmt->condition = parseCommaExpr();
     }
     expectText(";", "for statement condition clause");
 
@@ -1855,7 +1895,7 @@ AstPtr Parser::parseForeachStatement() {
 AstPtr Parser::parseSwitchStatement() {
     expectText("switch", "switch statement");
     expectText("(", "switch statement subject");
-    AstPtr subject = parseExpr();
+    AstPtr subject = parseCommaExpr();
     expectText(")", "switch statement subject");
     expectText("{", "switch statement body");
 

@@ -1,6 +1,156 @@
 # STATUS
 
-**2026-09-04 (comment-density cleanup, continuing an interrupted pass):
+**2026-09-04 (a further session, continuing further yet): value-producing
+`comma_expr`, the named leftover on Dead Souls 3.8.2's
+`lib/lib/race.c:206` `return (Race = extra), race;`.** Scoped against
+real grammar first, then built as a precedence layer above `expr0`, not
+as a return-only special case and not by folding comma into
+`parseExpr()`. 905 tests total (903 plus 2), full suite green (direct
+`build/test/amlp_tests` and `ctest` both 0 failures).
+
+1. **Real grammar.** `comma_expr: expr0 | comma_expr ',' expr0`
+   (`grammar.y:1555-1565`; 2.23 `grammar.y.pre:1545-1550`) builds
+   `CREATE_TWO_VALUES` / `pop_value($1)` so the last `expr0` is the
+   value. It sits *above* `expr0`, not inside it. Positions that take
+   `comma_expr`: `L_RETURN comma_expr ';'` (`grammar.y:2450`),
+   `statement: comma_expr ';'`, `if`/`while`/`switch`/`for_expr`,
+   `'(' comma_expr ')'` (`grammar.y:2969`), `catch`, index,
+   `'$' '(' comma_expr ')'`. Positions that take `expr0` via
+   `expr_list_node` (`grammar.y:2488-2496`): call arguments, array
+   elements. Assignment RHS is `lvalue L_ASSIGN expr0`
+   (`grammar.y:1570`). So `f(a, b)` is two arguments; `f((a, b))` is one
+   argument (the parenthesized `comma_expr`); `a = 1, b = 2;` as a
+   statement is `(a = 1), (b = 2)`, not `a = (1, b = 2)`.
+
+2. **This driver's prior support.** `parseExpr()` is `expr0`
+   (`parseTernary()`). Statement-level and for-loop commas already
+   existed (`continueStatementCommaChain` / `parseCommaExprChain`) as
+   Blocks of ExprStmts that discard every value. Nothing produced a
+   last-value-wins expression, so `parseReturnStatement()`'s
+   `parseExpr()` then `';'` rejected the race.c form.
+
+3. **Why not fold comma into `parseExpr()`.** That would make every
+   current `parseExpr()` site a `comma_expr`, including `parseArgList`
+   and assignment RHS, which would silently turn `f(a, b)` into one
+   argument and `a = 1, b = 2` into `a = (1, b = 2)`. Real grammar
+   forbids that. The narrow fix is a layer *above* `expr0`:
+   `parseCommaExpr()` chains `parseExpr()` on comma into `CommaExpr`
+   (codegen: emit left, `Pop`, emit right). Wired at every
+   `comma_expr` site that previously called `parseExpr()` once (return,
+   if/while/do-while/switch/for condition, parenthesized expr, catch,
+   `$(...)`, FluffOS index start). `parseExpr()` stays `expr0`.
+   Statement/for Blocks unchanged. LDMud `map[key, col]` still uses
+   `parseExpr()` for the start so the column comma is not eaten.
+
+4. **Tests.** The exact race.c return shape (`Race` assigned 7, returned
+   value 3). Call `add(3, 4)` still two arguments; `id((8, 9))` is one
+   parenthesized comma_expr yielding 9. Bare statement comma already
+   covered by `testStatementLevelCommaChainAfterIndexedAndPlainAssignmentVmExecution`
+   (TMI-2 `_eval.c`).
+
+5. **Dead Souls 3.8.2 boot re-attempted, live TCP, same method.**
+   `race.c` now compiles. Inherit chain reaches `lib/lib/body.c`.
+   New named blocker, stopped at: `body.c:317`'s real
+   `Protection[i]->time` where `Protection` is
+   `private static class MagicProtection *Protection` (line 48). That
+   is `->member` on an `IndexExpr` of a `class Name *` variable with
+   no `(class MagicProtection)` cast, the case the class-cast slice
+   explicitly left out. `staticClassTypeOf()` only knows a bare
+   `VarRefExpr` or a `TypeCastExpr`. Named rather than forced.
+
+`docs/dev/ROADMAP.md` row 3.10 updated in place with this outcome.
+
+**2026-09-04 (a further session, continuing further): FluffOS
+`(class Name)` / `(class Name *)` C-style casts, the named leftover
+blocker on Dead Souls 3.8.2's `lib/lib/interactive.c` after
+`object::create()` already resolved on HEAD.** Picked this over the
+still-open comment-density pass on VM.cpp / CodeGen.cpp /
+ParserPackage.cpp / Parser.cpp: boot is the product goal, cleanup can
+wait. 903 tests total (901 plus 2), full suite green (direct
+`build/test/amlp_tests` and `ctest` both 0 failures). Assessed as a
+narrow extension of the existing `(string)x` strip, not a new
+subsystem, so built in the same turn.
+
+1. **Real grammar, both vendored trees agree.** `cast: '(' basic_type
+   optional_star ')'` (2.9-ds2.08 `grammar.y:780-786`; 2.23-ds03
+   `grammar.y.pre:839-844`). `basic_type` is `atomic_type`
+   (`grammar.y:667-668`), and `atomic_type` includes `L_CLASS
+   L_DEFINED_NAME` and `L_CLASS L_IDENTIFIER` (`grammar.y:632-664`;
+   `grammar.y.pre:665-695`). The expression production is `cast expr0
+   %prec L_NOT` (`grammar.y:2275-2279`): `$$ = $2; $$->type = $1;`, a
+   compile-time type annotation with no runtime opcode. So both
+   `(class marriage)Marriages[0]` and `(class marriage *)expr` are
+   real casts. Real corpus: `lib/lib/interactive.c:493-494`'s
+   `((class marriage)Marriages[0])->Spouse` (the extra parens are
+   load-bearing: postfix `->` binds tighter than unary cast), plus
+   `lib/cmds/players/biography.c:38`'s
+   `(class marriage *)this_player()->GetMarriages()` and
+   `secure/daemon/finger.c:129-130`'s same indexed-element form as
+   interactive.c.
+
+2. **Existing cast support could not just grow a keyword.**
+   `Parser::parseUnary()` already treats `(type)` / `(type*)` as a
+   no-op strip when `(` is followed by a type *Keyword* (`string`,
+   `object`, ...). `class` lexes as `Ident`, so `(class marriage)`
+   was never recognized and fell through as a parenthesized
+   expression, then failed. Runtime stays a no-op (this driver has
+   no static type checker, matching real FluffOS without
+   `exact_types`). Stripping the class name the same way as
+   `(string)x` is not enough when `->member` follows:
+   `CodeGen::staticClassTypeOf()` only understood a bare `VarRefExpr`
+   of a class-declared variable, so
+   `((class marriage)Marriages[0])->Spouse` is `->` on a cast wrapping
+   an `IndexExpr` and would throw `cannot resolve "->Spouse"`.
+
+3. **What was built.** `parseUnary()` recognizes FluffOS
+   `(class Name)` / `(class Name *)` (rewind if the `)` is missing, so
+   a parenthesized `class` identifier is untouched). Non-star form
+   wraps `TypeCastExpr { className, inner }`. Star form still strips,
+   like `(string *)`, because the assignment target already carries
+   the array-of-class type. `staticClassTypeOf()` returns
+   `TypeCastExpr::className`; `emitExpr()` emits `inner` only. Ordinary
+   `(string)x` tests unchanged (still no wrapper). Not in this slice:
+   walking an `IndexExpr` of a `class Name *` variable so
+   `Marriages[0]->Spouse` would work *without* a cast. No real corpus
+   site does that; they all write the cast.
+
+4. **Two new regression tests:** the exact interactive.c shape
+   (`((class marriage)Marriages[0])->Spouse` reading `"Ada"`), and
+   `(class marriage *)Marriages` as a runtime no-op `sizeof` matching
+   `(string *)`.
+
+5. **Dead Souls 3.8.2 boot re-attempted against `etc/driver_ds3.cfg`,
+   live over a real TCP connection (Python socket client, not telnet),
+   same method as before.** Master/simul_efun still boot. Sending
+   `testadmin` at the installer username prompt now compiles
+   `/lib/player`. `player.c:24` inherits `LIB_INTERACTIVE` *before*
+   `LIB_LIVING`, and there is no compile error on
+   `lib/lib/interactive.c` at all: `object::create()` (line 51) and
+   the `(class marriage)` casts (lines 493-494) both compile. The
+   named leftover blocker is gone.
+
+   Boot now reaches a new, different parser gap, named here and
+   stopped at rather than forced through in the same commit.
+   `lib/lib/race.c:206`'s real `return (Race = extra), race;` (driver
+   reported "line 222", the include-splice line-counter artifact, not
+   a misread of the file). Real grammar is `L_RETURN comma_expr ';'`
+   (`grammar.y:2450`; 2.23 `grammar.y.pre:2448`), and `comma_expr` is
+   `expr0 | comma_expr ',' expr0` (`grammar.y:1555-1565`) building
+   `CREATE_TWO_VALUES` so the *last* expr0 is the returned value.
+   This driver already implements that comma operator for expression
+   *statements* and for-loop init/update (`parseCommaExprChain` /
+   `continueStatementCommaChain`), but those desugar to a Block of
+   ExprStmts (side effect only, every value discarded).
+   `parseReturnStatement()` still does `parseExpr()` then expects
+   `;`, so a comma is a parse error. Reusing the statement Block as
+   `ReturnStmt::expr` would drop the returned value. That is still a
+   narrow follow-up (return needs last-value-wins, matching
+   `CREATE_TWO_VALUES`, not a new VM opcode), but it is a different
+   production from this cast work and is not built here.
+
+`docs/dev/ROADMAP.md` row 3.10 updated in place with this outcome.
+
+**2026-09-04 (comment-density cleanup, continuing an interrupted pass):**
 inline source comments trimmed on the remaining worst-offending
 `src/**/*.cpp` files, comments only, plus the type-keyword qualified
 parent-call form that was already sitting unstaged from the interrupted

@@ -35,6 +35,13 @@ private:
     int internString(const std::string& s);
     int internFloat(double d);
     void emitExpr(const AstNode& expr);
+    // Emits one OpCode::ExpandVarargs per spread-marked position in
+    // isSpread, real generate_expr_list()'s own second pass (icode.c:
+    // 264-274) -- see Bytecode.hpp's OpCode::ExpandVarargs comment for
+    // the full citation. Called after every element the list describes
+    // has already been emitted (pushed) in order; a no-op when isSpread
+    // is empty (the common, no-spread case).
+    void emitSpreadExpansions(const std::vector<bool>& isSpread);
     void emitCallExpr(const CallExpr& call);
     void emitCallOtherExpr(const CallOtherExpr& callOther);
     void emitSscanfExpr(const SscanfExpr& sscanf);

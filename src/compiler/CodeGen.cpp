@@ -405,6 +405,7 @@ void CodeGen::emitExpr(const AstNode& expr) {
         for (const auto& elem : arrLit->elements) {
             emitExpr(*elem);
         }
+        emitSpreadExpansions(arrLit->elementIsSpread);
         out_->code.push_back(
             Instruction{OpCode::MakeArray, 0, static_cast<int32_t>(arrLit->elements.size())});
         return;
@@ -575,10 +576,29 @@ void CodeGen::emitExpr(const AstNode& expr) {
 // plus its own trailing CallParentQualifierSlot data instruction, the
 // same "opcode plus immediately-following data instruction" shape
 // Sscanf already uses for its var-slot table.
+void CodeGen::emitSpreadExpansions(const std::vector<bool>& isSpread) {
+    if (isSpread.empty()) return;
+    // Real generate_expr_list()'s own algorithm (icode.c:250-275): n
+    // starts at the total element count and is decremented once per
+    // position in list order, regardless of whether that position is
+    // itself spread -- every element (spread or not) still occupies one
+    // static stack slot at the point this runs. See Bytecode.hpp's
+    // OpCode::ExpandVarargs comment for why the resulting static operand
+    // stays correct even after an earlier expansion in this same list.
+    int n = static_cast<int>(isSpread.size());
+    for (bool spread : isSpread) {
+        --n;
+        if (spread) {
+            out_->code.push_back(Instruction{OpCode::ExpandVarargs, n, 0});
+        }
+    }
+}
+
 void CodeGen::emitCallExpr(const CallExpr& call) {
     for (const auto& argNode : call.args) {
         emitExpr(*argNode);
     }
+    emitSpreadExpansions(call.argIsSpread);
     int calleeIdx = internString(call.callee);
 
     if (call.parentCall) {
@@ -1462,6 +1482,7 @@ CompiledProgram CodeGen::generate(const Program& program,
         entry.name = fn->name;
         entry.entryPoint = static_cast<uint32_t>(result.code.size());
         entry.numArgs = static_cast<uint8_t>(fn->params.size());
+        entry.isVarargs = fn->isVarargs;
 
         if (fn->body) {
             emitBlock(*fn->body);
@@ -1596,6 +1617,7 @@ void CodeGen::emitPendingAnonFuncs() {
         entry.name = pending.name;
         entry.entryPoint = static_cast<uint32_t>(out_->code.size());
         entry.numArgs = static_cast<uint8_t>(pending.expr->params.size());
+        entry.isVarargs = pending.expr->isVarargs;
 
         emitBlock(*pending.expr->body);
         out_->code.push_back(Instruction{OpCode::Return, 0, 0});

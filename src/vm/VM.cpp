@@ -1531,11 +1531,39 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
     // and the args loop below overwrites whichever slots are actually
     // parameters immediately after anyway.
     std::vector<Value> locals(fn.numLocals, Value(int64_t{0}));
-    for (size_t i = 0; i < args.size() && i < locals.size(); ++i) {
-        locals[i] = std::move(args[i]);
+    if (fn.isVarargs && fn.numArgs > 0) {
+        // Real interpret.c:1394-1410's own setup_varargs_variables(): the
+        // last declared parameter (slot numArgs-1) is always bound to a
+        // real array holding every actual argument at or past that
+        // position -- a real empty array when the caller supplied too
+        // few arguments to reach it (real "arr = &the_null_array;" at
+        // :1405), not undefined/0, and a single-element array when
+        // exactly one argument lands there (real "n = actual - num_arg +
+        // 1", so n=1 when actual == num_arg), not that one value bare.
+        size_t restSlot = static_cast<size_t>(fn.numArgs) - 1;
+        for (size_t i = 0; i < restSlot && i < args.size() && i < locals.size(); ++i) {
+            locals[i] = std::move(args[i]);
+        }
+        auto restArr = std::make_shared<Array>();
+        if (args.size() > restSlot) {
+            restArr->items.assign(std::make_move_iterator(args.begin() + static_cast<long>(restSlot)),
+                                   std::make_move_iterator(args.end()));
+        }
+        if (restSlot < locals.size()) {
+            locals[restSlot] = Value(restArr);
+        }
+    } else {
+        for (size_t i = 0; i < args.size() && i < locals.size(); ++i) {
+            locals[i] = std::move(args[i]);
+        }
     }
 
     std::vector<Value> localStack;
+    // Real interpret.c:75/2694's own global num_varargs, kept local to
+    // this one VM::run() call instead -- see Bytecode.hpp's
+    // OpCode::ExpandVarargs comment for why a member would need explicit
+    // save/restore around nested calls that a local does not.
+    int64_t pendingVarargsDelta = 0;
     size_t ip = fn.entryPoint;
 
     // catch(expr) support (see Ast.hpp's CatchExpr and Bytecode.hpp's
@@ -2171,8 +2199,34 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 break;
             }
 
+            case OpCode::ExpandVarargs: {
+                // See Bytecode.hpp's own OpCode::ExpandVarargs comment
+                // for the full real-semantics citation (interpret.c:
+                // 2680-2724).
+                int64_t n = instr.operand;
+                if (n < 0 || static_cast<size_t>(n) >= localStack.size()) {
+                    throw LpcRuntimeError("ExpandVarargs: bad stack offset");
+                }
+                size_t slotIndex = localStack.size() - 1 - static_cast<size_t>(n);
+                if (!std::holds_alternative<std::shared_ptr<Array>>(localStack[slotIndex].data)) {
+                    throw LpcRuntimeError(
+                        "Item being expanded with \"...\" is not an array");
+                }
+                auto arr = std::get<std::shared_ptr<Array>>(localStack[slotIndex].data);
+                size_t arrSize = arr ? arr->items.size() : 0;
+                auto slotIt = localStack.begin() + static_cast<long>(slotIndex);
+                slotIt = localStack.erase(slotIt);
+                if (arrSize > 0) {
+                    localStack.insert(slotIt, arr->items.begin(), arr->items.end());
+                }
+                pendingVarargsDelta += static_cast<int64_t>(arrSize) - 1;
+                ++ip;
+                break;
+            }
+
             case OpCode::MakeArray: {
-                int argc = instr.argCount;
+                int argc = instr.argCount + static_cast<int32_t>(pendingVarargsDelta);
+                pendingVarargsDelta = 0;
                 if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
                     throw LpcRuntimeError("MakeArray: bad arg count");
                 }
@@ -2185,7 +2239,8 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
             }
 
             case OpCode::MakeMapping: {
-                int entryCount = instr.argCount;
+                int entryCount = instr.argCount + static_cast<int32_t>(pendingVarargsDelta);
+                pendingVarargsDelta = 0;
                 int width = instr.operand;
                 if (width < 1) width = 1;
                 size_t stride = static_cast<size_t>(width) + 1; // key + values
@@ -2490,7 +2545,8 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 }
                 const std::string& funcName = program.stringPool[instr.operand];
 
-                int argc = instr.argCount;
+                int argc = instr.argCount + static_cast<int32_t>(pendingVarargsDelta);
+                pendingVarargsDelta = 0;
                 if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
                     throw LpcRuntimeError("Call: bad arg count for " + funcName);
                 }
@@ -2630,7 +2686,8 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     qualifier = &qualifierStorage;
                 }
 
-                int argc = instr.argCount;
+                int argc = instr.argCount + static_cast<int32_t>(pendingVarargsDelta);
+                pendingVarargsDelta = 0;
                 if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
                     throw LpcRuntimeError("CallParent: bad arg count for " + funcName);
                 }
@@ -2760,7 +2817,8 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 }
                 const std::string& efunName = program.stringPool[instr.operand];
 
-                int argc = instr.argCount;
+                int argc = instr.argCount + static_cast<int32_t>(pendingVarargsDelta);
+                pendingVarargsDelta = 0;
                 if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
                     throw LpcRuntimeError("CallEfun: bad arg count for " + efunName);
                 }

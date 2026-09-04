@@ -113,6 +113,42 @@ enum class OpCode : uint8_t {
     // forced resolution tier on the same underlying value shape.
     PushEfunClosure,
     CallApply,
+    // Real icode.c's own F_EXPAND_VARARGS (row 3.10's own array/call
+    // spread operator, "expr...", real grammar.y:2488-2496's
+    // "expr0 L_DOT_DOT_DOT", scoped in full in this row's own prior
+    // scoping report before any code was written). operand = distance
+    // from the top of localStack (0 = the topmost value) to the one
+    // spread element this instruction splices, real interpret.c:2680-
+    // 2724's own "s = sp - i" -- CodeGen emits one of these per spread
+    // element, always right after every element of the enclosing list
+    // has already been pushed in order (real generate_expr_list(),
+    // icode.c:250-275), with each instruction's own operand computed
+    // statically at compile time (N-1-position) rather than adjusted
+    // for any earlier expansion: real FluffOS's own invariant holds
+    // here identically -- an earlier (lower) expansion shifts both the
+    // stack top and every later element's own position by the same
+    // amount, so a later element's static distance from the top never
+    // needs correcting.
+    //
+    // Requires the value at that slot to be a real array (LpcRuntimeError
+    // otherwise, matching real interpret.c:2688-2689's own
+    // "Item being expanded with ... is not an array"); splices the
+    // array's own elements into that one slot in place (real
+    // interpret.c:2695-2721: empty removes the slot, one element
+    // replaces it directly, more shifts the stack up to make room) and
+    // adds (size - 1) to VM::run()'s own local pendingVarargsDelta
+    // (real interpret.c:75/2694's own global num_varargs -- kept as a
+    // local here instead: this driver recurses through nested VM::run()
+    // calls with a fresh localStack each time rather than real
+    // FluffOS's one flat process-wide stack, so a per-call local gives
+    // the identical accumulation behavior with no cross-call leakage
+    // risk a member variable would need explicit save/restore around).
+    // MakeArray, MakeMapping, Call, CallParent, and CallEfun each add
+    // that delta to their own static argCount/entryCount and reset it
+    // to zero, exactly real interpret.c's own repeated
+    // "offset += num_varargs; num_varargs = 0;" pattern at :2747,
+    // :2764, :3601, :3704.
+    ExpandVarargs,
     MakeArray,
     // operand = mapping width (real mapping->num_values, at least 1);
     // argCount = number of entries. Stack layout per entry is the key
@@ -228,6 +264,17 @@ struct FunctionEntry {
     // all, so it cannot behave differently for any of the 747 tests
     // that predate this row.
     bool isAsync = false;
+    // Real grammar.y:706-717's own "argument_list L_DOT_DOT_DOT" (see
+    // Ast.hpp's FunctionDecl::isVarargs comment for the full citation).
+    // true means numArgs's own last slot is a real varargs rest-
+    // parameter: VM::run() binds it to a real array of every actual
+    // argument at or past that position (real interpret.c:1394-1410's
+    // own setup_varargs_variables()), not a plain positional value.
+    // VM::runAsync() never reads this field -- that coroutine path is
+    // still row 2.5's own deliberately tiny hand-built-bytecode subset
+    // (PushInt/PushLocal/StoreLocal/Add/Call/Suspend/Return/Halt only,
+    // see its own default: case), out of this row's scope.
+    bool isVarargs = false;
 };
 
 struct CompiledProgram {

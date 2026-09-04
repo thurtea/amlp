@@ -29,6 +29,28 @@ private:
     bool isModifierKeyword(const Token& tok) const;
     bool consumeArrayMarker();
 
+    // True when a type could start reading here: an ordinary type
+    // keyword, or a completely bare "array" (real grammar.y.pre:697-715's
+    // own "opt_atomic_type L_ARRAY", opt_atomic_type itself optional,
+    // real grammar's own "/* empty */" alternative defaulting to
+    // TYPE_ANY/"mixed" -- consumeArrayMarker()'s own two-word "<type>
+    // array" form only covers the case where opt_atomic_type is present,
+    // e.g. "mixed array x"; this is the bare case, "array x" alone, real
+    // corpus: secure/sefun/sockets.c's own "foreach (array item in
+    // finalsocks)", lib/std/bane.c's "int SetBane(array arr)",
+    // lib/std/story.c's "array GetTaleKeys()"/"array msg;",
+    // lib/guard.c's "private static array PendingGuard"). Used wherever
+    // a lookahead decides whether a declaration starts here at all.
+    bool startsType() const;
+    struct TypeToken { std::string type; bool isArray; };
+    // Consumes one type: startsType()'s bare "array" (synthesized as
+    // {"mixed", true}), or an ordinary type keyword followed by
+    // consumeArrayMarker()'s own optional two-word marker. Always
+    // consumes a real type token or throws -- callers that also allow a
+    // type to be omitted entirely (parseDeclPrefix()) check startsType()
+    // and check(TokenType::Keyword) separately instead of calling this.
+    TypeToken parseTypeToken(const std::string& context);
+
     // Shared prefix of every top-level declaration (modifiers, type, an
     // optional array '*', and a name), factored out so parseProgram()
     // can consume it exactly once and then branch on whether '(' follows
@@ -55,7 +77,11 @@ private:
     DeclPrefix parseDeclPrefix(const std::string& context);
     std::unique_ptr<FunctionDecl> parseFunctionRest(DeclPrefix prefix);
     std::vector<std::unique_ptr<ObjectVarDecl>> parseObjectVarDeclRest(DeclPrefix prefix);
-    std::vector<Param> parseParamList();
+    // isVarargsOut, when given, is set true if this list ends in a real
+    // varargs "..." (see Ast.hpp's FunctionDecl::isVarargs comment).
+    // nullptr (the default) is only for a hypothetical caller that has
+    // nowhere to record it; both current callers pass a real out-param.
+    std::vector<Param> parseParamList(bool* isVarargsOut = nullptr);
     std::unique_ptr<Block> parseBlock();
     std::unique_ptr<Block> parseBranch();
     AstPtr parseStatement();
@@ -70,7 +96,7 @@ private:
     AstPtr parseSwitchStatement();
     struct ForeachVarSpec { std::string name; bool isNewDecl; };
     ForeachVarSpec parseForeachVar();
-    std::unique_ptr<VarDeclStmt> parseSingleVarDecl(const Token& typeTok);
+    std::unique_ptr<VarDeclStmt> parseSingleVarDecl(const std::string& typeText, bool isArray);
     AstPtr parseVarDeclStatement();
     AstPtr parseAssignStatement();
     void parseInheritStatement(Program& program);
@@ -93,7 +119,17 @@ private:
     AstPtr parseUnary();
     AstPtr parsePostfix();
     AstPtr parsePrimary();
-    std::vector<AstPtr> parseArgList();
+
+    // A call argument list, real grammar.y:2470-2510's own
+    // expr_list/expr_list2/expr_list_node -- see Ast.hpp's CallExpr::
+    // argIsSpread comment. isSpread is empty when no argument here is
+    // spread (the common case, matching the AST field's own contract),
+    // else exactly args.size() long.
+    struct ArgListResult {
+        std::vector<AstPtr> args;
+        std::vector<bool> isSpread;
+    };
+    ArgListResult parseArgList();
 
     std::vector<Token> tokens_;
     size_t pos_ = 0;

@@ -35,6 +35,7 @@ bool Config::loadFromFile(const std::string& path) {
         else if (key == "port") port_ = std::stoi(val);
         else if (key == "heartbeat_interval_ms") heartbeatIntervalMs_ = std::stoi(val);
         else if (key == "max_eval_cost") maxEvalCost_ = std::stoi(val);
+        else if (key == "max_string_length") maxStringLength_ = std::stoi(val);
         else if (key == "include_dir") includeDir_ = val;
         else if (key == "simul_efun_file") simulEfunFile_ = val;
         else if (key == "mud_name") mudName_ = val;

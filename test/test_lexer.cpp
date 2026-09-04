@@ -50,6 +50,15 @@
 #include <map>
 #include <cmath>
 
+// PendingInputTo::function is now a string|function Value (see
+// Connection.hpp's own comment) rather than a plain std::string, so a
+// test checking which handler got registered by name needs an explicit
+// string-alternative check rather than a bare "== \"name\"".
+static bool functionNameIs(const amlp::Value& fn, const std::string& expected) {
+    auto* name = std::get_if<std::string>(&fn.data);
+    return name && *name == expected;
+}
+
 static void testBasicTokenize() {
     std::string src =
         "void create() {\n"
@@ -3183,6 +3192,62 @@ static void testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlr
     assert(std::get<int64_t>(result.data) == 23); // 2*10 (local_names) + 2 (efuns_arr) + 1 (items)
 
     std::cout << "testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlreadyDid OK\n";
+}
+
+// The test above covers the two-word "<type> array" form. Real
+// grammar.y.pre:697-715's own "opt_atomic_type L_ARRAY" makes
+// opt_atomic_type itself optional (real "/* empty */" alternative,
+// defaulting to TYPE_ANY/"mixed"), so a completely bare "array" -- no
+// preceding type at all -- is real too, and was NOT covered by
+// Parser::consumeArrayMarker() (which only ever looks for the marker
+// immediately after an already-read type keyword). Found live
+// re-attempting the Dead Souls 3.8.2 boot after row 3.10's own spread-
+// operator work landed: secure/sefun/sockets.c's own real "foreach
+// (array item in finalsocks)" -- with "array" lexing as a plain Ident
+// (Parser::consumeArrayMarker()'s own comment), not a Keyword, this
+// silently misparsed as a bare pre-existing loop variable named "array"
+// followed by an unexpected "item" where "in" was expected. The same
+// gap was real, not just theoretical, in every other position this
+// bare form can appear (real corpus, each cited in
+// Parser::startsType()'s own comment): lib/guard.c's own object-
+// variable "private static array PendingGuard", lib/std/story.c's own
+// local "array msg;" and its own return type "array GetTaleKeys()",
+// and lib/std/bane.c's own parameter "int SetBane(array arr)" -- the
+// object-variable case was the most dangerous of the four, since
+// Parser::parseDeclPrefix()'s own "type omitted entirely" fallback
+// silently consumed a bare "array" as the declaration's own *name*
+// instead of erroring, rather than fail loudly.
+static void testBareArrayKeywordWithNoPrecedingTypeWorksInEveryPositionIncludingForeach() {
+    ObjectVarHarness harness;
+    harness.writeFile("/bare_array_kw_probe.c",
+        "private static array efuns_arr = ({});\n"
+        "array GetNames() {\n"
+        "    array n;\n"
+        "    n = ({ \"a\", \"b\" });\n"
+        "    return n;\n"
+        "}\n"
+        "int SumLens(array items) {\n"
+        "    return sizeof(items);\n"
+        "}\n"
+        "int probe() {\n"
+        "    array local_names = GetNames();\n"
+        "    int total;\n"
+        "    efuns_arr += ({ \"x\", \"y\" });\n"
+        "    foreach (array item in local_names) {\n"
+        "        total += 1;\n"
+        "    }\n"
+        "    return sizeof(local_names) * 10 + sizeof(efuns_arr) + "
+        "SumLens(({ this_object() })) + total * 100;\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/bare_array_kw_probe");
+    assert(obj != nullptr);
+    amlp::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    // 2*10 (local_names) + 2 (efuns_arr) + 1 (items) + 2*100 (foreach ran twice)
+    assert(std::get<int64_t>(result.data) == 223);
+
+    std::cout << "testBareArrayKeywordWithNoPrecedingTypeWorksInEveryPositionIncludingForeach OK\n";
 }
 
 static void testInheritedFunctionFallbackInvokedAtRuntime() {
@@ -8920,6 +8985,63 @@ static void testObjectsReturnsEveryLiveObjectAndOmitsDestructedOnes() {
     std::cout << "testObjectsReturnsEveryLiveObjectAndOmitsDestructedOnes OK\n";
 }
 
+// get_garbage() (real packages/contrib.c's own f_get_garbage(), see
+// EfunTable.cpp's own comment for the full real-semantics derivation).
+// Found live continuing the Dead Souls 3.8.2 boot attempt: secure/
+// sefun/sefun.c's own real call_out() wrapper calls this
+// unconditionally, needed for master.c's own create() to complete.
+//
+// Only tests the three conditions that are actually observable in this
+// driver's own architecture (isClone/environment/shadowing), not real
+// "ref==1": empirically confirmed while writing this test (see
+// EfunTable.cpp's own comment) that an object satisfying real "ref==1"
+// here is, by this driver's own weak-tracking LiveObjectRegistry
+// design, freed by ordinary C++ RAII in the same statement that would
+// have made it eligible -- there is no way to construct an LPC-level
+// scenario where such an object is still alive for a *later*
+// get_garbage() call to find, so that specific condition cannot be
+// exercised from LPC at all, not just untested here.
+static void testGetGarbageExcludesStillReferencedClones() {
+    ObjectVarHarness harness;
+    harness.writeFile("/garbage_target.c", "int marker;\n");
+    // A clone referenced for the whole test by garbage_holder.c's own
+    // real object variable -- a real, non-table reference, so this one
+    // must never be eligible even though it is a real clone with no
+    // environment and no shadow.
+    harness.writeFile("/garbage_holder.c",
+        "object held;\n"
+        "void create() { held = clone_object(\"/garbage_target\"); }\n"
+        "object get_held() { return held; }\n");
+    harness.writeFile("/garbage_probe.c",
+        "int contains(mixed *arr, object me) {\n"
+        "    int i;\n"
+        "    for (i = 0; i < sizeof(arr); i++) if (arr[i] == me) return 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "int probe(object held_ref) {\n"
+        "    mixed *g = get_garbage();\n"
+        // held_ref (a real, currently-referenced clone) and this_object()
+        // (this call's own currently-executing clone, referenced by the
+        // VM's own call stack for the duration of this call) must both
+        // be absent.
+        "    return contains(g, held_ref) * 10 + contains(g, this_object());\n"
+        "}\n");
+
+    auto probe = harness.objects.cloneObject("/garbage_probe");
+    assert(probe != nullptr);
+    auto holder = harness.objects.cloneObject("/garbage_holder");
+    assert(holder != nullptr);
+
+    amlp::Value heldRef = harness.vm.callFunction(holder, "get_held", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(heldRef.data));
+
+    amlp::Value result = harness.vm.callFunction(probe, "probe", {heldRef});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testGetGarbageExcludesStillReferencedClones OK\n";
+}
+
 static void testObjectsWithStringFilterExcludesFalsyResultsAndAbortsOnMissingFunction() {
     ObjectVarHarness harness;
     harness.writeFile("/objsf_probe.c",
@@ -9869,7 +9991,15 @@ static void testArrayUsableAsParameterNameNotReservedAsType() {
     std::cout << "testArrayUsableAsParameterNameNotReservedAsType OK\n";
 }
 
-static void testTrailingVarargsEllipsisParsesAndIsDiscarded() {
+// Renamed from testTrailingVarargsEllipsisParsesAndIsDiscarded (row
+// 3.10's own spread-operator work made the trailing "..." real -- see
+// Ast.hpp's FunctionDecl::isVarargs comment -- that name and its own
+// comment described the old parsed-and-discarded behavior this test
+// never actually exercised at the VM level anyway, only parsing; the
+// real capture semantics are proven live by the
+// testVarargsRestParamCapture*/testVarargsCapturedRestParam* tests
+// below). This still checks parsing only, now including the flag.
+static void testTrailingVarargsEllipsisParsesAndSetsIsVarargs() {
     // Mirrors secure/SimulEfun/misc.c's own "int true(mixed args...)".
     std::string src = "int true(mixed args...) { return 1; }\n";
     amlp::Lexer lexer(src);
@@ -9879,8 +10009,9 @@ static void testTrailingVarargsEllipsisParsesAndIsDiscarded() {
     assert(program->functions.size() == 1);
     assert(program->functions[0]->params.size() == 1);
     assert(program->functions[0]->params[0].name == "args");
+    assert(program->functions[0]->isVarargs);
 
-    std::cout << "testTrailingVarargsEllipsisParsesAndIsDiscarded OK\n";
+    std::cout << "testTrailingVarargsEllipsisParsesAndSetsIsVarargs OK\n";
 }
 
 static void testOpenEndedRangeIndexVmExecution() {
@@ -10229,7 +10360,7 @@ static void testInputToRegistersPendingHandlerWithExtraArgsAndTargetObject() {
     assert(conn.hasPendingInputTo());
     auto pending = conn.takePendingInputTo();
     assert(pending.has_value());
-    assert(pending->function == "get_name");
+    assert(functionNameIs(pending->function, "get_name"));
     assert(pending->extraArgs.size() == 2);
     assert(std::get<std::string>(pending->extraArgs[0].data) == "extra1");
     assert(std::get<std::string>(pending->extraArgs[1].data) == "extra2");
@@ -10264,7 +10395,7 @@ static void testInputToNumericFlagArgumentIsSkippedNotTreatedAsExtraArg() {
 
     auto pending = conn.takePendingInputTo();
     assert(pending.has_value());
-    assert(pending->function == "get_password");
+    assert(functionNameIs(pending->function, "get_password"));
     // The int 3 is the echo-flag slot (real f_input_to()'s "arg[1].type
     // == T_NUMBER" check), not an extra arg -- only "tail" is carried
     // over.
@@ -10340,6 +10471,62 @@ static void testDispatchLinePrefersPendingInputToHandlerOverProcessInput() {
     std::cout << "testDispatchLinePrefersPendingInputToHandlerOverProcessInput OK\n";
 }
 
+// Real simulate.c's own input_to() accepts a closure/function pointer
+// as its first argument, not only a string function name (real corpus:
+// Dead Souls 3.8.2's own installer, secure/lib/connect.first.c's own
+// "input_to((: InputName :), I_NOESC);"). Found live continuing the
+// Dead Souls boot-then-live-verification session: this efun previously
+// rejected every closure-form call outright ("input_to: expected a
+// string function name as the first argument"), and even after
+// accepting one, Server.cpp's own dispatch site unconditionally called
+// vm.callFunction(target, pending->function, ...) treating the stored
+// handler as always a string -- both fixed together (Connection.hpp's
+// own PendingInputTo::function comment has the full derivation). Same
+// shape as testDispatchLinePrefersPendingInputToHandlerOverProcessInput
+// just above, but with a real "(: :)" closure literal registered
+// instead of a string, proving the closure actually *fires* through
+// the real dispatch path, not just that registration itself no longer
+// throws.
+static void testInputToWithClosureFormFiresThroughRealDispatch() {
+    ObjectVarHarness harness;
+    harness.writeFile("/login_closure.c",
+        "string lastCalled;\n"
+        "string lastLine;\n"
+        "void start() { input_to((: get_name :)); }\n"
+        "void get_name(string str) { lastCalled = \"get_name\"; lastLine = str; }\n"
+        "void process_input(string str) { lastCalled = \"process_input\"; lastLine = str; }\n"
+        "string query_last_called() { return lastCalled; }\n"
+        "string query_last_line() { return lastLine; }\n");
+    auto loginObj = harness.objects.cloneObject("/login_closure");
+    assert(loginObj != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(loginObj);
+
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(loginObj, "start", {}); // registers input_to((: get_name :))
+    assert(conn.hasPendingInputTo());
+    // The registered handler is a real closure, not a string.
+    auto peeked = conn.takePendingInputTo();
+    assert(peeked.has_value());
+    assert(std::holds_alternative<std::shared_ptr<amlp::Closure>>(peeked->function.data));
+    conn.setPendingInputTo(loginObj, peeked->function, peeked->extraArgs); // put it back
+
+    amlp::Server::dispatchLine(harness.vm, conn, "Bob");
+    assert(!conn.hasPendingInputTo());
+
+    amlp::Value called = harness.vm.callFunction(loginObj, "query_last_called", {});
+    assert(std::get<std::string>(called.data) == "get_name");
+    amlp::Value lineVal = harness.vm.callFunction(loginObj, "query_last_line", {});
+    assert(std::get<std::string>(lineVal.data) == "Bob");
+    amlp::OutputContext::set(nullptr);
+
+    ::close(fds[1]);
+    std::cout << "testInputToWithClosureFormFiresThroughRealDispatch OK\n";
+}
+
 static void testInputToCanReRegisterFromWithinDispatchedHandler() {
     ObjectVarHarness harness;
     harness.writeFile("/login4.c",
@@ -10368,7 +10555,7 @@ static void testInputToCanReRegisterFromWithinDispatchedHandler() {
     // clear or stuck on the old registration.
     assert(conn.hasPendingInputTo());
     auto pending = conn.takePendingInputTo();
-    assert(pending->function == "get_password");
+    assert(functionNameIs(pending->function, "get_password"));
 
     amlp::Value step = harness.vm.callFunction(loginObj, "query_step", {});
     assert(std::get<std::string>(step.data) == "name:bob");
@@ -10402,7 +10589,7 @@ static void testLogonSendsBannerAndRegistersInputToPrompt() {
 
     assert(conn.hasPendingInputTo());
     auto pending = conn.takePendingInputTo();
-    assert(pending->function == "get_name");
+    assert(functionNameIs(pending->function, "get_name"));
 
     char buf[256];
     ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
@@ -18636,6 +18823,25 @@ static void testGetConfigReturnsMaxEvalCostForIndexTwentyThree() {
     std::cout << "testGetConfigReturnsMaxEvalCostForIndexTwentyThree OK\n";
 }
 
+// Real index 29 (__MAX_STRING_LENGTH__, this same bundled
+// runtime_config.h's own "CFG_INT(14)", 14+15=29) -- see
+// EfunTable.cpp's own get_config() comment and Config.hpp's own
+// maxStringLength() comment for the full derivation. Found live
+// continuing the same Dead Souls 3.8.2 boot attempt, past row 3.10's
+// own spread-operator work and the bare "array" keyword fix: secure/
+// sefun/sefun.c's own real read_file() sefun wrapper calls
+// get_config(__MAX_STRING_LENGTH__) from a top-level object-variable
+// initializer, blocking the simul_efun object from loading at all.
+static void testGetConfigReturnsMaxStringLengthForIndexTwentyNine() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> args{ amlp::Value(int64_t{29}) };
+    amlp::Value result = amlp::EfunTable::instance().call("get_config", harness.vm, args);
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == harness.config.maxStringLength());
+
+    std::cout << "testGetConfigReturnsMaxStringLengthForIndexTwentyNine OK\n";
+}
+
 static void testQueryLoadAverageReturnsAStringInRealFormat() {
     ObjectVarHarness harness;
     std::vector<amlp::Value> noArgs;
@@ -23466,7 +23672,7 @@ static void testInputToIgnoreBangFlagGrantedByRealPrivilegeViolationRegistersNor
     assert(std::get<int64_t>(startResult.data) == 1);
     assert(conn.hasPendingInputTo() == true);
     auto pending = conn.takePendingInputTo();
-    assert(pending.has_value() && pending->function == "get_pw");
+    assert(pending.has_value() && functionNameIs(pending->function, "get_pw"));
 
     std::cout << "testInputToIgnoreBangFlagGrantedByRealPrivilegeViolationRegistersNormally OK\n";
 }
@@ -27884,17 +28090,17 @@ static void testLoginAccountCreationFlowEndToEndCreatesRealAccountFile() {
     t.harness.vm.callFunction(loginObj, "got_account_name",
         {amlp::Value(std::string("newuser"))});
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_new_password");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_new_password"));
 
     t.harness.vm.callFunction(loginObj, "got_new_password",
         {amlp::Value(std::string("goodpass123"))});
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_confirm_password");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_confirm_password"));
 
     t.harness.vm.callFunction(loginObj, "got_confirm_password",
         {amlp::Value(std::string("goodpass123"))});
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_character_name"));
 
     // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 4: a brand-new
     // account now names its own character explicitly, rather than the
@@ -27954,7 +28160,7 @@ static void testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds()
     t.harness.vm.callFunction(loginObj, "got_account_name",
         {amlp::Value(std::string("returningplayer"))});
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_login_password"));
 
     t.harness.vm.callFunction(loginObj, "got_login_password",
         {amlp::Value(std::string("realpass1"))});
@@ -27984,7 +28190,7 @@ static void testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries() {
     amlp::OutputContext::set(&conn);
     t.harness.vm.callFunction(loginObj, "got_account_name",
         {amlp::Value(std::string("targetacct"))});
-    assert(conn.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_login_password"));
 
     // MAX_LOGIN_TRIES is 3: two wrong passwords must each leave the
     // connection alive with another password prompt pending, only the
@@ -27993,13 +28199,13 @@ static void testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries() {
         {amlp::Value(std::string("wrongpass1"))});
     assert(!loginObj->isDestructed());
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_login_password"));
 
     t.harness.vm.callFunction(loginObj, "got_login_password",
         {amlp::Value(std::string("wrongpass2"))});
     assert(!loginObj->isDestructed());
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_login_password"));
 
     t.harness.vm.callFunction(loginObj, "got_login_password",
         {amlp::Value(std::string("wrongpass3"))});
@@ -28037,7 +28243,7 @@ static void testLoginInvalidAccountNameWithSlashReprompts() {
     // account.
     assert(!loginObj->isDestructed());
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_account_name");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_account_name"));
 
     ::close(fds[1]);
     std::cout << "testLoginInvalidAccountNameWithSlashReprompts OK\n";
@@ -28073,13 +28279,13 @@ static void testCharacterLoginCountPersistsAcrossReconnectViaNetDead() {
     amlp::OutputContext::set(&conn1);
     t.harness.vm.callFunction(login1, "got_account_name",
         {amlp::Value(std::string("returningplayer"))});
-    assert(conn1.takePendingInputTo()->function == "got_new_password");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_new_password"));
     t.harness.vm.callFunction(login1, "got_new_password",
         {amlp::Value(std::string("goodpass123"))});
-    assert(conn1.takePendingInputTo()->function == "got_confirm_password");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_confirm_password"));
     t.harness.vm.callFunction(login1, "got_confirm_password",
         {amlp::Value(std::string("goodpass123"))});
-    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_character_name"));
     // Same string as the account name, item 4's own got_character_name()
     // step, so the rest of this test's own on-disk-path assertions below
     // (/characters/r/returningplayer.o) stay valid unchanged -- nothing
@@ -28123,7 +28329,7 @@ static void testCharacterLoginCountPersistsAcrossReconnectViaNetDead() {
     amlp::OutputContext::set(&conn2);
     t.harness.vm.callFunction(login2, "got_account_name",
         {amlp::Value(std::string("returningplayer"))});
-    assert(conn2.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn2.takePendingInputTo()->function, "got_login_password"));
     t.harness.vm.callFunction(login2, "got_login_password",
         {amlp::Value(std::string("goodpass123"))});
     amlp::OutputContext::set(nullptr);
@@ -28159,13 +28365,13 @@ static void testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead() {
     amlp::OutputContext::set(&conn1);
     t.harness.vm.callFunction(login1, "got_account_name",
         {amlp::Value(std::string("questsmith"))});
-    assert(conn1.takePendingInputTo()->function == "got_new_password");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_new_password"));
     t.harness.vm.callFunction(login1, "got_new_password",
         {amlp::Value(std::string("anotherpass1"))});
-    assert(conn1.takePendingInputTo()->function == "got_confirm_password");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_confirm_password"));
     t.harness.vm.callFunction(login1, "got_confirm_password",
         {amlp::Value(std::string("anotherpass1"))});
-    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_character_name"));
     t.harness.vm.callFunction(login1, "got_character_name",
         {amlp::Value(std::string("questsmith"))});
     amlp::OutputContext::set(nullptr);
@@ -28190,7 +28396,7 @@ static void testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead() {
     amlp::OutputContext::set(&conn2);
     t.harness.vm.callFunction(login2, "got_account_name",
         {amlp::Value(std::string("questsmith"))});
-    assert(conn2.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn2.takePendingInputTo()->function, "got_login_password"));
     t.harness.vm.callFunction(login2, "got_login_password",
         {amlp::Value(std::string("anotherpass1"))});
     amlp::OutputContext::set(nullptr);
@@ -28229,7 +28435,7 @@ static void testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount() {
         {amlp::Value(std::string("firstpass12"))});
     t.harness.vm.callFunction(login1, "got_confirm_password",
         {amlp::Value(std::string("firstpass12"))});
-    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_character_name"));
     t.harness.vm.callFunction(login1, "got_character_name",
         {amlp::Value(std::string("heroname"))});
     amlp::OutputContext::set(nullptr);
@@ -28257,7 +28463,7 @@ static void testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount() {
         {amlp::Value(std::string("secondpass1"))});
     t.harness.vm.callFunction(login2, "got_confirm_password",
         {amlp::Value(std::string("secondpass1"))});
-    assert(conn2.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn2.takePendingInputTo()->function, "got_character_name"));
 
     t.harness.vm.callFunction(login2, "got_character_name",
         {amlp::Value(std::string("heroname"))});
@@ -28265,7 +28471,7 @@ static void testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount() {
     // silently allowed to overwrite the first account's own character.
     assert(!login2->isDestructed());
     assert(conn2.hasPendingInputTo());
-    assert(conn2.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn2.takePendingInputTo()->function, "got_character_name"));
 
     // A genuinely different name succeeds normally.
     t.harness.vm.callFunction(login2, "got_character_name",
@@ -28303,7 +28509,7 @@ static void testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountN
         {amlp::Value(std::string("distinctpass"))});
     t.harness.vm.callFunction(login1, "got_confirm_password",
         {amlp::Value(std::string("distinctpass"))});
-    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_character_name"));
     // Deliberately a different string from the account name.
     t.harness.vm.callFunction(login1, "got_character_name",
         {amlp::Value(std::string("wanderingblade"))});
@@ -28341,7 +28547,7 @@ static void testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountN
     amlp::OutputContext::set(&conn2);
     t.harness.vm.callFunction(login2, "got_account_name",
         {amlp::Value(std::string("distinctaccount"))});
-    assert(conn2.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn2.takePendingInputTo()->function, "got_login_password"));
     t.harness.vm.callFunction(login2, "got_login_password",
         {amlp::Value(std::string("distinctpass"))});
     amlp::OutputContext::set(nullptr);
@@ -28398,14 +28604,14 @@ static void testGotLoginPasswordShowsMenuAndLoadsTheChosenCharacter() {
     amlp::OutputContext::set(&conn1);
     t.harness.vm.callFunction(login1, "got_account_name",
         {amlp::Value(std::string("multichar"))});
-    assert(conn1.takePendingInputTo()->function == "got_login_password");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_login_password"));
     t.harness.vm.callFunction(login1, "got_login_password",
         {amlp::Value(std::string("multipass1"))});
     // A real menu, not enter_game() directly: still connected, still
     // pending, a real new input_to registered for the choice itself.
     assert(!login1->isDestructed());
     assert(conn1.hasPendingInputTo());
-    assert(conn1.takePendingInputTo()->function == "got_character_selection");
+    assert(functionNameIs(conn1.takePendingInputTo()->function, "got_character_selection"));
 
     t.harness.vm.callFunction(login1, "got_character_selection",
         {amlp::Value(std::string("1"))});
@@ -28434,7 +28640,7 @@ static void testGotLoginPasswordShowsMenuAndLoadsTheChosenCharacter() {
         {amlp::Value(std::string("multichar"))});
     t.harness.vm.callFunction(login2, "got_login_password",
         {amlp::Value(std::string("multipass1"))});
-    assert(conn2.takePendingInputTo()->function == "got_character_selection");
+    assert(functionNameIs(conn2.takePendingInputTo()->function, "got_character_selection"));
 
     t.harness.vm.callFunction(login2, "got_character_selection",
         {amlp::Value(std::string("2"))});
@@ -28476,28 +28682,28 @@ static void testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices() {
         {amlp::Value(std::string("pickytest"))});
     t.harness.vm.callFunction(loginObj, "got_login_password",
         {amlp::Value(std::string("pickypass1"))});
-    assert(conn.takePendingInputTo()->function == "got_character_selection");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_character_selection"));
 
     // Zero: below range.
     t.harness.vm.callFunction(loginObj, "got_character_selection",
         {amlp::Value(std::string("0"))});
     assert(!loginObj->isDestructed());
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_character_selection");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_character_selection"));
 
     // Three: above range (only 2 characters exist).
     t.harness.vm.callFunction(loginObj, "got_character_selection",
         {amlp::Value(std::string("3"))});
     assert(!loginObj->isDestructed());
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_character_selection");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_character_selection"));
 
     // Non-numeric: sscanf() matches nothing at all.
     t.harness.vm.callFunction(loginObj, "got_character_selection",
         {amlp::Value(std::string("banana"))});
     assert(!loginObj->isDestructed());
     assert(conn.hasPendingInputTo());
-    assert(conn.takePendingInputTo()->function == "got_character_selection");
+    assert(functionNameIs(conn.takePendingInputTo()->function, "got_character_selection"));
 
     // A genuinely valid choice after all those rejections still works
     // normally -- the repeated invalid input did not corrupt
@@ -29075,6 +29281,233 @@ static void testParkedAsyncTaskAndAnOrdinaryCallOutCoexistAcrossTheSameTickSeque
     std::cout << "testParkedAsyncTaskAndAnOrdinaryCallOutCoexistAcrossTheSameTickSequence OK\n";
 }
 
+// Row 3.10's own array/call spread operator ("expr...") and its real
+// prerequisite, the varargs rest-parameter ("mixed args..." on a
+// declaration) -- scoped in full in this session's own prior scoping
+// report (real grammar.y:706-717/2488-2496, real interpret.c:1394-1410/
+// 2680-2724/icode.c:250-275) before any code was written. See Ast.hpp's
+// FunctionDecl::isVarargs/CallExpr::argIsSpread/ArrayLiteralExpr::
+// elementIsSpread and Bytecode.hpp's OpCode::ExpandVarargs for the full
+// citations this implementation rests on.
+//
+// Variant of runProbe() above for a test that needs more than the one
+// synthesized "probe()" function: fullSource defines every function
+// itself, including its own "probe()" entry point, called the same way
+// runProbe() calls its synthesized one.
+static amlp::Value runProbeMulti(const std::string& fullSource) {
+    amlp::Lexer lexer(fullSource);
+    amlp::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+    amlp::CodeGen codegen;
+    auto compiled = std::make_shared<amlp::CompiledProgram>(codegen.generate(*program));
+
+    auto obj = std::make_shared<amlp::LpcObject>("probe_multi_object", compiled);
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    return vm.callFunction(obj, "probe", {});
+}
+
+// Real interpret.c:1394-1410's own setup_varargs_variables(): a caller
+// that does not supply even enough arguments to reach the rest-
+// parameter's own position binds it to a real empty array (real
+// "arr = &the_null_array;"), not undefined/0.
+static void testVarargsRestParamCaptureWithZeroExtraArgumentsBindsEmptyArray() {
+    amlp::Value result = runProbeMulti(
+        "mixed rest(mixed first, mixed args...) {\n"
+        "    return sizeof(args);\n"
+        "}\n"
+        "int probe() {\n"
+        "    return rest(1);\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testVarargsRestParamCaptureWithZeroExtraArgumentsBindsEmptyArray OK\n";
+}
+
+// Real "n = actual - num_arg + 1" (interpret.c:1397): actual == num_arg
+// (exactly one argument lands at the rest-parameter's own position)
+// still wraps it in a real one-element array, not the bare value.
+static void testVarargsRestParamCaptureWithOneExtraArgumentBindsSingleElementArray() {
+    amlp::Value result = runProbeMulti(
+        "mixed rest(mixed first, mixed args...) {\n"
+        "    return sizeof(args);\n"
+        "}\n"
+        "int probe() {\n"
+        "    return rest(1, 2);\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    std::cout << "testVarargsRestParamCaptureWithOneExtraArgumentBindsSingleElementArray OK\n";
+}
+
+// Checks contents, not just count: every actual argument at or past the
+// rest-parameter's own position lands in it, in call order.
+static void testVarargsRestParamCaptureWithManyExtraArgumentsBindsThemInOrder() {
+    amlp::Value result = runProbeMulti(
+        "mixed rest(mixed first, mixed args...) {\n"
+        "    return args[0] + args[1] + args[2];\n"
+        "}\n"
+        "int probe() {\n"
+        "    return rest(1, 10, 20, 30);\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 60);
+
+    std::cout << "testVarargsRestParamCaptureWithManyExtraArgumentsBindsThemInOrder OK\n";
+}
+
+// Real interpret.c:2695-2701's own F_EXPAND_VARARGS empty-array case: a
+// spread element contributing zero elements removes that slot entirely
+// rather than leaving a hole or an undefined value.
+static void testArrayLiteralSpreadOfEmptyArrayContributesNoElements() {
+    amlp::Value result = runProbe(
+        "mixed *empty;\n"
+        "mixed *a;\n"
+        "empty = ({});\n"
+        "a = ({ 1, empty..., 2 });\n"
+        "return sizeof(a) * 100 + a[0] * 10 + a[1];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 212); // sizeof=2, a[0]=1, a[1]=2
+
+    std::cout << "testArrayLiteralSpreadOfEmptyArrayContributesNoElements OK\n";
+}
+
+// Real interpret.c:2702-2703's own F_EXPAND_VARARGS single-element case:
+// the one array element replaces the spread slot directly.
+static void testArrayLiteralSpreadOfSingleElementArraySplicesThatOneValue() {
+    amlp::Value result = runProbe(
+        "mixed *one;\n"
+        "mixed *a;\n"
+        "one = ({ 42 });\n"
+        "a = ({ 1, one..., 2 });\n"
+        "return sizeof(a) * 1000 + a[0] * 100 + a[1];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 3142); // sizeof=3, a=({1,42,2}), a[0]=1,a[1]=42
+
+    std::cout << "testArrayLiteralSpreadOfSingleElementArraySplicesThatOneValue OK\n";
+}
+
+// Real interpret.c:2704-2721's own F_EXPAND_VARARGS multi-element case:
+// the stack widens and every array element is spliced in, in order,
+// with the elements after the spread position shifted up correctly
+// (checked via a[4], the element that followed the spread in source
+// order, matching real generate_expr_list()'s own static-offset
+// invariant, see Bytecode.hpp's OpCode::ExpandVarargs comment).
+static void testArrayLiteralSpreadOfMultiElementArraySplicesAllInOrder() {
+    amlp::Value result = runProbe(
+        "mixed *xs;\n"
+        "mixed *a;\n"
+        "xs = ({ 5, 6, 7 });\n"
+        "a = ({ 1, xs..., 2 });\n"
+        "return sizeof(a) * 10000 + a[0] * 1000 + a[1] * 100 + a[3] * 10 + a[4];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    // a = ({1, 5, 6, 7, 2}): sizeof=5, a[0]=1, a[1]=5, a[3]=7, a[4]=2
+    assert(std::get<int64_t>(result.data) == 51572);
+
+    std::cout << "testArrayLiteralSpreadOfMultiElementArraySplicesAllInOrder OK\n";
+}
+
+// OpCode::Call's own delta consumption (VM.cpp): a plain, unqualified
+// call spreading a real array across a fixed-arity function's own
+// parameters.
+static void testCallArgumentSpreadThroughAPlainCallExpandsIntoParameters() {
+    amlp::Value result = runProbeMulti(
+        "int sum3(int a, int b, int c) {\n"
+        "    return a * 100 + b * 10 + c;\n"
+        "}\n"
+        "int probe() {\n"
+        "    mixed *xs;\n"
+        "    xs = ({ 1, 2, 3 });\n"
+        "    return sum3(xs...);\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 123);
+
+    std::cout << "testCallArgumentSpreadThroughAPlainCallExpandsIntoParameters OK\n";
+}
+
+// OpCode::CallEfun's own delta consumption (VM.cpp): the real
+// "efun::name(...)" forced-efun form, the exact call shape
+// secure/sefun/sefun.c's own real clone_object()/call_out()/input_to()
+// wrappers use to forward a captured varargs array (see the end-to-end
+// test below).
+static void testCallArgumentSpreadThroughEfunColonColonFormExpandsIntoEfunArgs() {
+    amlp::Value result = runProbe(
+        "mixed *xs;\n"
+        "string s;\n"
+        "xs = ({ \"%d-%d\", 7, 9 });\n"
+        "s = efun::sprintf(xs...);\n"
+        "return s == \"7-9\";\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    std::cout << "testCallArgumentSpreadThroughEfunColonColonFormExpandsIntoEfunArgs OK\n";
+}
+
+// OpCode::CallParent's own delta consumption is the mechanically
+// identical one-line "argc = argCount + delta; delta = 0;" pattern
+// Call/CallEfun above already exercise live end to end -- a real
+// "::name(...)"/"qualifier::name(...)" call additionally requires a
+// real multi-file inherit chain to run (VM::findParentFunction()), out
+// of proportion to what that one shared line needs re-proving. This
+// checks CodeGen's own emission instead: a spread argument through
+// "::name(...)" still emits ExpandVarargs immediately before
+// CallParent, with the correct static offset operand (0 -- the only,
+// and therefore topmost, argument).
+static void testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeCallParent() {
+    std::string src =
+        "int probe() {\n"
+        "    mixed *xs;\n"
+        "    xs = ({ 1, 2 });\n"
+        "    return ::probe(xs...);\n"
+        "}\n";
+    amlp::Lexer lexer(src);
+    amlp::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+    amlp::CodeGen codegen;
+    auto compiled = codegen.generate(*program);
+
+    bool sawExpandThenCallParent = false;
+    for (size_t i = 0; i + 1 < compiled.code.size(); ++i) {
+        if (compiled.code[i].op == amlp::OpCode::ExpandVarargs &&
+            compiled.code[i].operand == 0 &&
+            compiled.code[i + 1].op == amlp::OpCode::CallParent) {
+            sawExpandThenCallParent = true;
+        }
+    }
+    assert(sawExpandThenCallParent);
+
+    std::cout << "testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeCallParent OK\n";
+}
+
+// The exact real pattern blocking the Dead Souls 3.8.2 boot (real
+// secure/sefun/sefun.c:113/120: "varargs object clone_object(string
+// name, mixed args...) { ... return efun::clone_object(name,
+// args...); }"): a captured varargs rest-parameter immediately re-
+// spread into a forwarded call, combining both this session's real
+// prerequisite (Step 1) and the spread primitive itself (Steps 2/3)
+// end to end.
+static void testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesSefunCShape() {
+    amlp::Value result = runProbeMulti(
+        "int inner(int a, int b, int c) {\n"
+        "    return a * 100 + b * 10 + c;\n"
+        "}\n"
+        "int wrapper(mixed first, mixed args...) {\n"
+        "    return inner(args...);\n"
+        "}\n"
+        "int probe() {\n"
+        "    return wrapper(0, 1, 2, 3);\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 123);
+
+    std::cout << "testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesSefunCShape OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -29215,6 +29648,7 @@ int main() {
     testInheritStatementParsesPathAndConcatenation();
     testInheritStatementParsesAdjacentStringLiteralsWithNoOperator();
     testArrayReservedWordKeywordFormWorksInEveryPositionTheStarSuffixAlreadyDid();
+    testBareArrayKeywordWithNoPrecedingTypeWorksInEveryPositionIncludingForeach();
     testInheritedFunctionFallbackInvokedAtRuntime();
     testInheritedObjectVariableSlotsShareStorageWithParent();
     testInheritCycleDetectedAsCompileFailure();
@@ -29323,6 +29757,7 @@ int main() {
     testMapAliasCallsMethodOnTargetForEachElementSameAsMapArray();
     testQueryOnceInteractiveAliasMatchesUserp();
     testObjectsReturnsEveryLiveObjectAndOmitsDestructedOnes();
+    testGetGarbageExcludesStillReferencedClones();
     testObjectsWithStringFilterExcludesFalsyResultsAndAbortsOnMissingFunction();
     testLivingsReturnsOnlyObjectsWithCommandsEnabled();
     testShallowAndDeepInheritListWalkARealThreeLevelChain();
@@ -29440,7 +29875,7 @@ int main() {
     testSiblingForLoopsReusingTheSameInitDeclaredVariableNameVmExecution();
     testForeachLoopVariableIsUnresolvableAfterTheLoopEnds();
     testArrayUsableAsParameterNameNotReservedAsType();
-    testTrailingVarargsEllipsisParsesAndIsDiscarded();
+    testTrailingVarargsEllipsisParsesAndSetsIsVarargs();
     testOpenEndedRangeIndexVmExecution();
     testForLoopCommaExprChainInInitAndUpdateVmExecution();
     testStatementLevelCommaChainAfterIndexedAndPlainAssignmentVmExecution();
@@ -29456,6 +29891,7 @@ int main() {
     testInputToNumericFlagArgumentIsSkippedNotTreatedAsExtraArg();
     testInputToReturnsZeroWithNoActiveConnection();
     testDispatchLinePrefersPendingInputToHandlerOverProcessInput();
+    testInputToWithClosureFormFiresThroughRealDispatch();
     testInputToCanReRegisterFromWithinDispatchedHandler();
     testLogonSendsBannerAndRegistersInputToPrompt();
     testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection();
@@ -29733,6 +30169,7 @@ int main() {
     testInheritsMatchesTransitiveChainInBothDirections();
     testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative();
     testGetConfigReturnsMaxEvalCostForIndexTwentyThree();
+    testGetConfigReturnsMaxStringLengthForIndexTwentyNine();
     testQueryLoadAverageReturnsAStringInRealFormat();
     testSayBroadcastsToRoomSiblingsButNotOriginItself();
     testSayAvoidArgumentExcludesSpecifiedTarget();
@@ -29965,6 +30402,16 @@ int main() {
     testOrdinarySynchronousFunctionUnaffectedByAsyncMachineryExistingInTheSameBinary();
     testAwaitReachedThroughANestedPlainCallPropagatesSuspendCorrectly();
     testParkedAsyncTaskAndAnOrdinaryCallOutCoexistAcrossTheSameTickSequence();
+    testVarargsRestParamCaptureWithZeroExtraArgumentsBindsEmptyArray();
+    testVarargsRestParamCaptureWithOneExtraArgumentBindsSingleElementArray();
+    testVarargsRestParamCaptureWithManyExtraArgumentsBindsThemInOrder();
+    testArrayLiteralSpreadOfEmptyArrayContributesNoElements();
+    testArrayLiteralSpreadOfSingleElementArraySplicesThatOneValue();
+    testArrayLiteralSpreadOfMultiElementArraySplicesAllInOrder();
+    testCallArgumentSpreadThroughAPlainCallExpandsIntoParameters();
+    testCallArgumentSpreadThroughEfunColonColonFormExpandsIntoEfunArgs();
+    testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeCallParent();
+    testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesSefunCShape();
     std::cout << "all tests passed\n";
     return 0;
 }

@@ -83,6 +83,15 @@ struct TernaryExpr : AstNode {
 struct CallExpr : AstNode {
     std::string callee;
     std::vector<AstPtr> args;
+    // Real grammar.y:2488-2496's own "expr_list_node: expr0 |
+    // expr0 L_DOT_DOT_DOT" -- a trailing "..." on one call argument
+    // spreads a real array into that position at call time (real
+    // icode.c's F_EXPAND_VARARGS, see CodeGen::emitSpreadExpansions()'s
+    // own citation). Empty when no argument in this call is spread
+    // (the overwhelmingly common case), matching this codebase's usual
+    // "empty by default" contract for a parallel per-element flag
+    // vector; when non-empty it is always exactly args.size() long.
+    std::vector<bool> argIsSpread;
     // "efun::name(...)" (grammar.y's "efun_override: L_EFUN L_COLON_COLON
     // identifier"), real LPC's explicit escape hatch straight to the core
     // efun table, skipping local/inherited functions and the simul_efun
@@ -387,6 +396,11 @@ struct IncDecExpr : AstNode {
 
 struct ArrayLiteralExpr : AstNode {
     std::vector<AstPtr> elements;
+    // Real grammar.y:3197's own array literal ("L_ARRAY_OPEN expr_list
+    // '}' ')'") reuses the identical expr_list/expr_list_node production
+    // CallExpr::argIsSpread cites -- same "..." spread syntax, same
+    // empty-by-default contract, see that field's own comment.
+    std::vector<bool> elementIsSpread;
 };
 
 struct MappingLiteralExpr : AstNode {
@@ -605,6 +619,16 @@ struct FunctionDecl : AstNode {
     bool returnTypeIsArray = false;
     std::string name;
     std::vector<Param> params;
+    // Real grammar.y:706-717's own "argument_list L_DOT_DOT_DOT" -- the
+    // last declared parameter is a real varargs rest-parameter (real
+    // interpret.c:1394-1410's own setup_varargs_variables(), see VM.cpp's
+    // own VM::run() comment for the full citation): every caller argument
+    // at or past that parameter's own position is collected into a real
+    // array bound to it, a real empty array (not undefined/0) when the
+    // caller supplied too few arguments to reach it. Parser::parseParamList()
+    // used to parse and discard the trailing "..." (see its own prior
+    // comment, corrected); this field is what makes it real.
+    bool isVarargs = false;
     std::unique_ptr<Block> body;
 };
 
@@ -671,6 +695,10 @@ struct FunctionDecl : AstNode {
 // the corpus sample.
 struct AnonFunctionExpr : AstNode {
     std::vector<Param> params;
+    // See FunctionDecl::isVarargs's own citation -- parseParamList() is
+    // shared by both, so a "function(mixed args...) { ... }" body gets
+    // the identical real rest-parameter semantics.
+    bool isVarargs = false;
     std::unique_ptr<Block> body;
 };
 

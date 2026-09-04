@@ -4,7 +4,7 @@ Instructions for Claude Code when working in this repository.
 
 ## Non-negotiable rules
 
-These two rules have governed this project's entire development history and
+These rules have governed this project's entire development history and
 must continue unchanged.
 
 1. **Never run `git commit` or `git push`, under any circumstance, for any
@@ -16,6 +16,12 @@ must continue unchanged.
 2. **No em dashes and no emojis anywhere** in code, comments, commit
    messages, or documentation, unless there is an actual syntax or code
    reason. Use a period, comma, or start a new sentence instead.
+
+3. **Any real decision made in a chat reply must be written into
+   STATUS.md or ROADMAP.md in the same turn it is decided.** A license
+   choice, a "drop this" or "rewrite this" call, a scoping conclusion:
+   write it into the file immediately, not left to be relayed secondhand
+   in a later session.
 
 ## Orientation
 

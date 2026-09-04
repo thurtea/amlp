@@ -20,7 +20,17 @@ class LpcObject;
 // registration time (simulate.c's "command_giver->interactive->carryover").
 struct PendingInputTo {
     std::weak_ptr<LpcObject> object;
-    std::string function;
+    // string|function, real simulate.c's own input_to() accepting either
+    // a function name or a closure/function pointer as its first
+    // argument -- the same two-shape Value already used for
+    // notify_fail()'s own pending message/closure just below (see that
+    // struct's own comment) and for socket callbacks
+    // (Server.cpp's fireSocketCallback()). Real corpus: Dead Souls
+    // 3.8.2's own installer, secure/lib/connect.first.c's own
+    // "input_to((: InputName :), I_NOESC);", found live continuing the
+    // same boot-then-live-verification session -- this field used to be
+    // a plain std::string, rejecting every closure-form call outright.
+    Value function;
     std::vector<Value> extraArgs;
 };
 
@@ -164,7 +174,7 @@ public:
 
     // Registers/overwrites the pending input_to handler for this
     // connection (real FluffOS's set_call(), simulate.c).
-    void setPendingInputTo(std::shared_ptr<LpcObject> obj, std::string function,
+    void setPendingInputTo(std::shared_ptr<LpcObject> obj, Value function,
                             std::vector<Value> extraArgs);
     bool hasPendingInputTo() const { return pendingInputTo_.has_value(); }
 

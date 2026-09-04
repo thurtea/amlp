@@ -2696,8 +2696,23 @@ void registerCoreEfuns() {
     // efun exactly: silently returns 0, the same as any other input_to()
     // failure, no pending handler registered.
     t.registerEfun("input_to", [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
-            throw LpcRuntimeError("input_to: expected a string function name as the first argument");
+        // Real simulate.c's own input_to() accepts either a function
+        // name or a closure/function pointer as its first argument (the
+        // same string|function shape PendingInputTo::function now
+        // carries -- see Connection.hpp's own comment). Real corpus:
+        // Dead Souls 3.8.2's own installer, secure/lib/connect.first.c's
+        // own "input_to((: InputName :), I_NOESC);", found live
+        // continuing the same Dead Souls boot-then-live-verification
+        // session -- this efun previously rejected every closure-form
+        // call outright, breaking new-connection logon entirely for
+        // this mudlib.
+        bool isClosureArg = !args.empty() &&
+                             std::holds_alternative<std::shared_ptr<Closure>>(args[0].data) &&
+                             std::get<std::shared_ptr<Closure>>(args[0].data);
+        if (args.empty() ||
+            !(std::holds_alternative<std::string>(args[0].data) || isClosureArg)) {
+            throw LpcRuntimeError(
+                "input_to: expected a string function name or a closure as the first argument");
         }
 
         // "if (!command_giver || ...) return 0" -- simulate.c.
@@ -2707,7 +2722,7 @@ void registerCoreEfuns() {
         auto currentObj = vm.currentObject();
         if (!currentObj) return Value(int64_t{0});
 
-        const std::string& function = std::get<std::string>(args[0].data);
+        Value function = args[0];
 
         size_t extraStart = 1;
         int64_t flags = 0;
@@ -2726,7 +2741,7 @@ void registerCoreEfuns() {
             }
         }
 
-        conn->setPendingInputTo(currentObj, function, std::move(extraArgs));
+        conn->setPendingInputTo(currentObj, std::move(function), std::move(extraArgs));
         // Phase 0.8: real set_call()'s own "if (flags & I_NOECHO)
         // add_binary_message(ob, telnet_yes_echo, ...)" (comm.c) --
         // I_NOECHO is real bit 0x1 (comm.h), confirmed directly.
@@ -8513,6 +8528,75 @@ void registerCoreEfuns() {
     // batch (InteractiveRegistry only ever covered connected players) --
     // see LiveObjectRegistry.hpp's own comment and
     // src/efun/instruct.md's corrected Tier 1 table.
+    // object *get_garbage() -- real packages/contrib.c's own real
+    // f_get_garbage() (F_GET_GARBAGE, on in this exact bundled
+    // fluffos-2.23-ds03 build, confirmed via packages/contrib_spec.c's
+    // own "object *get_garbage();"). Every live object matching real
+    // garbage_check()'s own exact four-part condition (contrib.c:2320-
+    // 2327), ported directly rather than approximated: a real clone
+    // (O_CLONE, this driver's own isClone()), with no environment (real
+    // "!ob->super"), not shadowing another object (real
+    // "!ob->shadowing"), and exactly one real reference left (real
+    // "ob->ref == 1" -- nothing beyond the object table itself still
+    // holds it).
+    //
+    // "ob->ref == 1" has no direct C++ equivalent field, approximated
+    // via shared_ptr::use_count(): LiveObjectRegistry's own internal
+    // table stores weak_ptr, not shared_ptr (LiveObjectRegistry.cpp),
+    // so it contributes zero strong references of its own; all()
+    // returns a fresh std::vector<shared_ptr<LpcObject>> by value, one
+    // new strong reference per live object, moved (not copied) into it
+    // from each lock()'d weak_ptr. So the one structural reference this
+    // call itself holds is this loop's own copy, and "no other real
+    // LPC-visible reference exists" (real ref==1) is observed here as
+    // use_count() == 1 exactly, not 2 -- confirmed by reading both
+    // LiveObjectRegistry::add() (weak_ptr push_back) and ::all() (lock()
+    // + std::move into the result) directly rather than assumed.
+    //
+    // This condition is real code, correctly ported, but confirmed live
+    // (not assumed) to be effectively always-empty in this driver, for
+    // an architectural reason worth naming plainly rather than silently:
+    // real FluffOS's own object table is itself a strong holder, so
+    // "ref==1" describes a real object that keeps existing, genuinely
+    // orphaned but still resident, until something later finds and
+    // destructs it. LiveObjectRegistry deliberately holds only weak_ptr
+    // (its own header comment: needed so ordinary C++ RAII, not a
+    // manual sweep, frees an object once nothing else references it),
+    // so the instant an AMLP object would satisfy real "ref==1" here,
+    // its one remaining strong reference is the assignment/local-store
+    // that is about to overwrite or drop it -- the object is freed by
+    // that same statement, before any later get_garbage() call could
+    // ever observe it as still alive. Not a bug to fix: this driver's
+    // own memory model (auto-collect on last-reference-drop) and real
+    // LPC's own model (persist until explicit destruct()) are genuinely
+    // different lifecycle contracts, and get_garbage() is exactly the
+    // one place that difference becomes LPC-observable. The other three
+    // conditions (isClone/environment/shadowing) are real and do filter
+    // real, still-referenced clones correctly either way, tested below.
+    //
+    // The real max_array_size truncation (contrib.c:2335-2336) is not
+    // replicated: this driver has no config-backed __MAX_ARRAY_SIZE__
+    // yet and no corpus evidence the real cap is ever actually reached
+    // at boot -- a known simplification, named rather than silently
+    // dropped.
+    //
+    // Found live continuing the same Dead Souls 3.8.2 boot attempt:
+    // secure/sefun/sefun.c's own real call_out() wrapper calls this
+    // unconditionally on every real call_out(), needed for master.c's
+    // own create() to complete at all.
+    t.registerEfun("get_garbage", [](VM&, std::vector<Value>&) -> Value {
+        auto result = std::make_shared<Array>();
+        for (auto& ob : LiveObjectRegistry::all()) {
+            if (!ob) continue;
+            if (ob.use_count() != 1) continue;
+            if (!ob->isClone()) continue;
+            if (!ob->environment().expired()) continue;
+            if (!ob->shadowing().expired()) continue;
+            result->items.emplace_back(ob);
+        }
+        return Value(result);
+    });
+
     t.registerEfun("objects", [](VM& vm, std::vector<Value>& args) -> Value {
         auto all = LiveObjectRegistry::all();
         if (args.empty() || std::holds_alternative<std::monostate>(args[0].data)) {
@@ -11554,7 +11638,23 @@ void registerCoreEfuns() {
     // 3.8.2's own boot attempt): secure/daemon/master.c's own real
     // create() does "eval_threshold = (get_config(__MAX_EVAL_COST__) /
     // 1000000) + 1;", the required master object failing to load
-    // without it. Every other index -- including any negative index,
+    // without it.
+    //
+    // Index 29 (real __MAX_STRING_LENGTH__, this same bundled
+    // runtime_config.h's own "#define __MAX_STRING_LENGTH__
+    // CFG_INT(14)", so 14 + 15 = 29) added the same way: real rc.c's
+    // own get_config_item() reads this from config_int[], loaded from
+    // the real config file's own "maximum string length" line, the
+    // exact same real value this driver's own Config::maxStringLength()
+    // now tracks. Found live continuing the same Dead Souls 3.8.2 boot
+    // attempt: secure/sefun/sefun.c's own real read_file() sefun
+    // wrapper does "if(sz < 1 || sz >= get_config(__MAX_STRING_LENGTH__))
+    // return \"\";", called from this same file's own $objvarinit (a
+    // top-level "= read_file(...)" object-variable initializer), so
+    // this blocked the simul_efun object from loading at all, before
+    // even reaching master.c.
+    //
+    // Every other index -- including any negative index,
     // real get_config_item()'s own explicit "num < 0" failure branch --
     // still throws a clear error rather than fabricating a value this
     // codebase has no real source for, same as before.
@@ -11565,6 +11665,7 @@ void registerCoreEfuns() {
         int64_t what = std::get<int64_t>(args[0].data);
         if (what == 0) return Value(vm.mudName());
         if (what == 23) return Value(static_cast<int64_t>(vm.config().maxEvalCost()));
+        if (what == 29) return Value(static_cast<int64_t>(vm.config().maxStringLength()));
         throw LpcRuntimeError("get_config: unsupported or invalid config index");
     });
 

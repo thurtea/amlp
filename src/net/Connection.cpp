@@ -323,7 +323,7 @@ void Connection::handleSubnegotiation() {
     windowSizeUpdated_ = true;
 }
 
-void Connection::setPendingInputTo(std::shared_ptr<LpcObject> obj, std::string function,
+void Connection::setPendingInputTo(std::shared_ptr<LpcObject> obj, Value function,
                                     std::vector<Value> extraArgs) {
     pendingInputTo_ = PendingInputTo{std::move(obj), std::move(function), std::move(extraArgs)};
 }

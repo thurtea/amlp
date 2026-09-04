@@ -276,8 +276,19 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
             // VM::callClosure()'s own tiered resolution already handles for
             // free, no explicit origin needed at this driver's own
             // equivalent -- notify_no_command()'s function-form dispatch
-            // just below in this same file works the same way).
-            vm.callFunction(target, pending->function, std::move(callArgs), Origin::Internal);
+            // just below in this same file works the same way). This
+            // branch used to call vm.callFunction() unconditionally,
+            // treating pending->function as always a string -- fixed to
+            // actually dispatch on its real Value kind (see
+            // PendingInputTo::function's own comment), found live via
+            // Dead Souls 3.8.2's own installer, which registers its
+            // every prompt as a closure ("input_to((: InputName :),
+            // I_NOESC);", secure/lib/connect.first.c).
+            if (auto* closure = std::get_if<std::shared_ptr<Closure>>(&pending->function.data)) {
+                if (*closure) vm.callClosure(*closure, std::move(callArgs));
+            } else if (auto* name = std::get_if<std::string>(&pending->function.data)) {
+                vm.callFunction(target, *name, std::move(callArgs), Origin::Internal);
+            }
         }
         return;
     }

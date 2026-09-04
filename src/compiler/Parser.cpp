@@ -90,6 +90,20 @@ bool Parser::consumeArrayMarker() {
     return false;
 }
 
+bool Parser::startsType() const {
+    if (check(TokenType::Keyword) && isTypeKeyword(peek())) return true;
+    return check(TokenType::Ident) && peek().text == "array";
+}
+
+Parser::TypeToken Parser::parseTypeToken(const std::string& context) {
+    if (check(TokenType::Ident) && peek().text == "array") {
+        advance();
+        return TypeToken{"mixed", true};
+    }
+    Token tok = expect(TokenType::Keyword, context);
+    return TypeToken{tok.text, consumeArrayMarker()};
+}
+
 const Token& Parser::expect(TokenType type, const std::string& context) {
     if (!check(type)) {
         throw LpcRuntimeError("parse error: expected token type in " + context +
@@ -162,11 +176,26 @@ bool Parser::isModifierKeyword(const Token& tok) const {
     return false;
 }
 
-std::vector<AstPtr> Parser::parseArgList() {
-    std::vector<AstPtr> args;
-    if (checkText(")")) return args;
+Parser::ArgListResult Parser::parseArgList() {
+    ArgListResult result;
+    if (checkText(")")) return result;
+    std::vector<bool> spreadFlags;
+    bool anySpread = false;
     for (;;) {
-        args.push_back(parseExpr());
+        result.args.push_back(parseExpr());
+
+        // Real grammar.y:2488-2496's own "expr_list_node: expr0 |
+        // expr0 L_DOT_DOT_DOT" -- checked right after the element itself,
+        // before the comma/close that ends this element (matching real
+        // grammar's own production order).
+        bool spread = false;
+        if (checkText("...")) {
+            advance();
+            spread = true;
+            anySpread = true;
+        }
+        spreadFlags.push_back(spread);
+
         if (checkText(",")) {
             advance();
             // Real grammar.y's own "expr_list2 ','" production: a
@@ -192,7 +221,10 @@ std::vector<AstPtr> Parser::parseArgList() {
         }
         break;
     }
-    return args;
+    if (anySpread) {
+        result.isSpread = std::move(spreadFlags);
+    }
+    return result;
 }
 
 AstPtr Parser::parsePrimary() {
@@ -513,7 +545,7 @@ AstPtr Parser::parsePrimary() {
         advance(); // function
         advance(); // (
         auto anonFn = std::make_unique<AnonFunctionExpr>();
-        anonFn->params = parseParamList();
+        anonFn->params = parseParamList(&anonFn->isVarargs);
         expectText(")", "anonymous function parameters");
         anonFn->body = parseBlock();
         return anonFn;
@@ -545,8 +577,16 @@ AstPtr Parser::parsePrimary() {
         call->callee = "evaluate";
         call->forceEfun = true;
         call->args.push_back(std::move(fpExpr));
-        for (auto& arg : parseArgList()) {
+        auto fpArgs = parseArgList();
+        for (auto& arg : fpArgs.args) {
             call->args.push_back(std::move(arg));
+        }
+        if (!fpArgs.isSpread.empty()) {
+            // fpExpr itself (already pushed above) is never spread; pad
+            // its own slot with false so argIsSpread stays aligned with
+            // call->args (see CallExpr::argIsSpread's own contract).
+            call->argIsSpread.assign(1, false);
+            for (bool s : fpArgs.isSpread) call->argIsSpread.push_back(s);
         }
         expectText(")", "function pointer call");
         return call;
@@ -556,9 +596,22 @@ AstPtr Parser::parsePrimary() {
         advance(); // (
         advance(); // {
         auto lit = std::make_unique<ArrayLiteralExpr>();
+        std::vector<bool> elemSpread;
+        bool anyElemSpread = false;
         if (!checkText("}")) {
             for (;;) {
                 lit->elements.push_back(parseExpr());
+                // Real grammar.y:2488-2496's own "expr0 L_DOT_DOT_DOT"
+                // spread element, identical production array literals and
+                // call argument lists both reuse (see Ast.hpp's
+                // ArrayLiteralExpr::elementIsSpread comment).
+                bool spread = false;
+                if (checkText("...")) {
+                    advance();
+                    spread = true;
+                    anyElemSpread = true;
+                }
+                elemSpread.push_back(spread);
                 if (checkText(",")) {
                     advance();
                     // Trailing comma before the closing "}" (real LPC
@@ -572,6 +625,9 @@ AstPtr Parser::parsePrimary() {
                 }
                 break;
             }
+        }
+        if (anyElemSpread) {
+            lit->elementIsSpread = std::move(elemSpread);
         }
         expectText("}", "array literal");
         expectText(")", "array literal");
@@ -601,7 +657,8 @@ AstPtr Parser::parsePrimary() {
 
         auto call = std::make_unique<CallExpr>();
         call->callee = fnNameTok.text;
-        call->args = std::move(parentArgs);
+        call->args = std::move(parentArgs.args);
+        call->argIsSpread = std::move(parentArgs.isSpread);
         call->parentCall = true;
         return call;
     }
@@ -647,7 +704,8 @@ AstPtr Parser::parsePrimary() {
 
             auto call = std::make_unique<CallExpr>();
             call->callee = fnNameTok.text;
-            call->args = std::move(forcedArgs);
+            call->args = std::move(forcedArgs.args);
+            call->argIsSpread = std::move(forcedArgs.isSpread);
             call->forceEfun = true;
             return call;
         }
@@ -667,7 +725,8 @@ AstPtr Parser::parsePrimary() {
 
             auto call = std::make_unique<CallExpr>();
             call->callee = fnNameTok.text;
-            call->args = std::move(qualifiedArgs);
+            call->args = std::move(qualifiedArgs.args);
+            call->argIsSpread = std::move(qualifiedArgs.isSpread);
             call->parentCall = true;
             call->parentQualifier = name;
             return call;
@@ -715,12 +774,24 @@ AstPtr Parser::parsePrimary() {
         }
 
         advance();
-        auto args = parseArgList();
+        auto parsed = parseArgList();
+        auto& args = parsed.args;
         expectText(")", "call arguments");
 
         if (name == "sscanf") {
             if (args.size() < 2) {
                 throw LpcRuntimeError("sscanf requires at least (string, format) arguments");
+            }
+            // sscanf's own trailing arguments are implicit lvalues (real
+            // grammar.y's own dedicated "lvalue_list" production, not
+            // expr_list at all), not ordinary by-value expressions -- a
+            // spread here has no real meaning and no real corpus use, so
+            // it is rejected outright rather than silently ignored.
+            for (bool s : parsed.isSpread) {
+                if (s) {
+                    throw LpcRuntimeError(
+                        "sscanf: argument spread (\"...\") is not valid on an lvalue output list");
+                }
             }
             auto sscanfExpr = std::make_unique<SscanfExpr>();
             sscanfExpr->target = std::move(args[0]);
@@ -761,6 +832,16 @@ AstPtr Parser::parsePrimary() {
             if (args.size() < 2) {
                 throw LpcRuntimeError("call_other requires at least (target, function) arguments");
             }
+            // CallOtherExpr has no argIsSpread field this slice (only
+            // CallExpr/ArrayLiteralExpr do -- see their own comments):
+            // rejected outright rather than silently compiled as a plain,
+            // unexpanded array argument, which would parse but run wrong.
+            for (bool s : parsed.isSpread) {
+                if (s) {
+                    throw LpcRuntimeError(
+                        "call_other: argument spread (\"...\") is not implemented yet");
+                }
+            }
             auto callOther = std::make_unique<CallOtherExpr>();
             callOther->target = std::move(args[0]);
             callOther->function = std::move(args[1]);
@@ -773,6 +854,7 @@ AstPtr Parser::parsePrimary() {
         auto call = std::make_unique<CallExpr>();
         call->callee = name;
         call->args = std::move(args);
+        call->argIsSpread = std::move(parsed.isSpread);
         return call;
     }
 
@@ -799,8 +881,16 @@ AstPtr Parser::parsePostfix() {
             advance();
             Token nameTok = expect(TokenType::Ident, "call_other operator function name");
             expectText("(", "call_other operator arguments");
-            auto args = parseArgList();
+            auto parsed = parseArgList();
             expectText(")", "call_other operator arguments");
+            // See the plain call_other(...) branch above's identical
+            // comment: CallOtherExpr has no argIsSpread field this slice.
+            for (bool s : parsed.isSpread) {
+                if (s) {
+                    throw LpcRuntimeError(
+                        "->: argument spread (\"...\") is not implemented yet");
+                }
+            }
 
             // "->" always names its function literally in the syntax
             // (there is no "target->(expr)(...)" dynamic-dispatch form),
@@ -812,7 +902,7 @@ AstPtr Parser::parsePostfix() {
             auto callOther = std::make_unique<CallOtherExpr>();
             callOther->target = std::move(expr);
             callOther->function = std::move(funcNameLit);
-            callOther->args = std::move(args);
+            callOther->args = std::move(parsed.args);
             expr = std::move(callOther);
             continue;
         }
@@ -1403,18 +1493,16 @@ AstPtr Parser::parseReturnStatement() {
 // Parses one "type name [= expr]" declaration, without consuming a
 // trailing ';' or handling comma-separated follow-on names -- the two
 // callers below (a plain statement, and a for-loop init clause) each want
-// different tail handling, so that part is left to them.
-std::unique_ptr<VarDeclStmt> Parser::parseSingleVarDecl(const Token& typeTok) {
-    // An optional '*' (or, real ARRAY_RESERVED_WORD builds, the bare
-    // word "array" -- see consumeArrayMarker()'s own comment) marks an
-    // array-typed local, e.g. "mixed *items;"/"mixed array items;",
-    // same pattern as the parameter/return type array marker.
-    bool isArray = consumeArrayMarker();
-
+// different tail handling, so that part is left to them. The type and
+// its array-ness are already resolved by the caller's own
+// parseTypeToken() call (startsType()'s own bare "array" needs to be
+// told apart from an ordinary type keyword before this function is
+// even reached, not after).
+std::unique_ptr<VarDeclStmt> Parser::parseSingleVarDecl(const std::string& typeText, bool isArray) {
     Token nameTok = expect(TokenType::Ident, "variable declaration name");
 
     auto decl = std::make_unique<VarDeclStmt>();
-    decl->type = typeTok.text;
+    decl->type = typeText;
     decl->isArray = isArray;
     decl->name = nameTok.text;
 
@@ -1427,8 +1515,8 @@ std::unique_ptr<VarDeclStmt> Parser::parseSingleVarDecl(const Token& typeTok) {
 }
 
 AstPtr Parser::parseVarDeclStatement() {
-    Token typeTok = expect(TokenType::Keyword, "variable declaration type");
-    auto first = parseSingleVarDecl(typeTok);
+    TypeToken typeTok = parseTypeToken("variable declaration type");
+    auto first = parseSingleVarDecl(typeTok.type, typeTok.isArray);
 
     // Real LPC allows comma-separated local declarations sharing one type,
     // e.g. "string file, fl, ac;" (confirmed live in the mudlib's
@@ -1447,7 +1535,16 @@ AstPtr Parser::parseVarDeclStatement() {
     block->statements.push_back(std::move(first));
     while (checkText(",")) {
         advance();
-        block->statements.push_back(parseSingleVarDecl(typeTok));
+        // Each comma-continued name gets its own independent array
+        // marker, not the first name's -- real corpus: master.c's own
+        // "mixed *privs, *ok;" (both starred), and this driver's own
+        // pre-existing testBitAndVmExecutionOnArraysIsIntersection.
+        // (Regression note: an earlier version of this refactor checked
+        // the marker only once, before the loop, reusing the first
+        // name's isArray for every subsequent name -- caught by that
+        // exact test, fixed before landing.)
+        bool isArray = consumeArrayMarker();
+        block->statements.push_back(parseSingleVarDecl(typeTok.type, isArray));
     }
     expectText(";", "variable declaration");
     return block;
@@ -1531,9 +1628,9 @@ AstPtr Parser::parseForStatement() {
     auto stmt = std::make_unique<ForStmt>();
 
     if (!checkText(";")) {
-        if (check(TokenType::Keyword) && isTypeKeyword(peek())) {
-            Token typeTok = advance();
-            stmt->init = parseSingleVarDecl(typeTok);
+        if (startsType()) {
+            TypeToken typeTok = parseTypeToken("for statement init clause");
+            stmt->init = parseSingleVarDecl(typeTok.type, typeTok.isArray);
         } else {
             stmt->init = parseCommaExprChain();
         }
@@ -1569,13 +1666,17 @@ AstPtr Parser::parseContinueStatement() {
 // A foreach loop variable is either a pre-existing name (a plain
 // identifier, resolved like any other variable reference at codegen
 // time) or a new inline declaration ("type name", the same shape a
-// parameter or local var decl uses). The optional array-star marker
-// ("mixed *item", seen live in secure/SimulEfun/misc.c) is consumed and
-// ignored, same as everywhere else in this parser.
+// parameter or local var decl uses, including startsType()'s own bare
+// "array" -- real corpus: secure/sefun/sockets.c's own "foreach (array
+// item in finalsocks)", this file's own OpCode::ExpandVarargs blocker's
+// immediate successor, found continuing the same Dead Souls 3.8.2 boot
+// attempt). The type itself (and any array marker, "mixed *item" seen
+// live in secure/SimulEfun/misc.c, or "mixed array item") is consumed
+// via parseTypeToken() and discarded -- ForeachVarSpec never tracked a
+// type or array-ness at all, only whether this is a new declaration.
 Parser::ForeachVarSpec Parser::parseForeachVar() {
-    if (check(TokenType::Keyword) && isTypeKeyword(peek())) {
-        advance(); // type
-        if (checkText("*")) advance();
+    if (startsType()) {
+        parseTypeToken("foreach variable type");
         Token nameTok = expect(TokenType::Ident, "foreach variable name");
         return ForeachVarSpec{nameTok.text, true};
     }
@@ -1717,7 +1818,7 @@ AstPtr Parser::parseStatement() {
         return parseContinueStatement();
     }
 
-    if (check(TokenType::Keyword) && isTypeKeyword(peek())) {
+    if (startsType()) {
         return parseVarDeclStatement();
     }
 
@@ -1796,18 +1897,19 @@ std::unique_ptr<Block> Parser::parseBlock() {
     return block;
 }
 
-std::vector<Param> Parser::parseParamList() {
+std::vector<Param> Parser::parseParamList(bool* isVarargsOut) {
     std::vector<Param> params;
     if (checkText(")")) return params;
     for (;;) {
-        Token typeTok = expect(TokenType::Keyword, "function parameter type");
-
-        // An optional '*' (or, real ARRAY_RESERVED_WORD builds, the bare
-        // word "array") marks an array/pointer type, e.g. "mixed *info"
-        // or "object array e" -- see consumeArrayMarker()'s own comment.
-        // No array semantics are implemented, this only records the flag
-        // so the syntax parses instead of erroring or losing the marker.
-        bool isArray = consumeArrayMarker();
+        // parseTypeToken() covers both the two-word "<type> array"/
+        // "<type> *" marker (e.g. "mixed *info"/"object array e") and a
+        // completely bare "array" with no preceding type at all (real
+        // corpus: lib/std/bane.c's own "int SetBane(array arr)") -- see
+        // its own comment for the real grammar citation. No array
+        // semantics are implemented, this only records the flag so the
+        // syntax parses instead of erroring or losing the marker.
+        TypeToken typeTok = parseTypeToken("function parameter type");
+        bool isArray = typeTok.isArray;
 
         // The name itself is optional -- real LPC allows a parameter to
         // be declared with just its type, no identifier at all (real
@@ -1826,21 +1928,23 @@ std::vector<Param> Parser::parseParamList() {
         if (check(TokenType::Ident)) {
             paramName = advance().text;
         }
-        params.push_back(Param{typeTok.text, paramName, isArray});
+        params.push_back(Param{typeTok.type, paramName, isArray});
         if (checkText(",")) { advance(); continue; }
         break;
     }
 
-    // Trailing "..." marks the function as accepting more actual
-    // arguments than declared here (real LPC varargs, e.g.
-    // secure/SimulEfun/misc.c's "int true(mixed args...)"). This driver's
-    // calling convention already tolerates a call with fewer or more
-    // arguments than a function declares -- extra ones are simply
-    // ignored, missing ones read as 0 -- so, like the "varargs" modifier
-    // keyword before the return type, this is parsed and discarded
-    // rather than actually collecting the extra arguments into "args".
+    // Trailing "..." marks the last declared parameter as a real varargs
+    // rest-parameter (real grammar.y:706-717's own "argument_list
+    // L_DOT_DOT_DOT", e.g. secure/SimulEfun/misc.c's "int true(mixed
+    // args...)" -- real interpret.c:1394-1410's own
+    // setup_varargs_variables(), see Ast.hpp's FunctionDecl::isVarargs
+    // and VM.cpp's VM::run() for the full real-semantics citation and
+    // this driver's own implementation). Previously parsed and silently
+    // discarded here (this comment used to say so); now recorded via
+    // isVarargsOut so the caller can wire real capture semantics.
     if (checkText("...")) {
         advance();
+        if (isVarargsOut) *isVarargsOut = true;
     }
 
     return params;
@@ -1864,13 +1968,27 @@ Parser::DeclPrefix Parser::parseDeclPrefix(const std::string& context) {
     std::string type;
     bool isArray = false;
 
-    if (check(TokenType::Keyword)) {
+    if (check(TokenType::Ident) && peek().text == "array") {
+        // A completely bare "array" (startsType()'s own citation, real
+        // grammar.y.pre:697-715) is real here too, e.g. lib/std/story.c's
+        // own "array GetTaleKeys()" (return type) and lib/guard.c's
+        // "private static array PendingGuard" (object var) -- checked
+        // before the ordinary TokenType::Keyword branch below since
+        // "array" lexes as a plain Ident (consumeArrayMarker()'s own
+        // comment), not a Keyword, so without this check it would fall
+        // straight into the "omitted entirely" branch and be misread as
+        // the declaration's own *name* instead of its type.
+        advance();
+        type = "mixed";
+        isArray = true;
+    } else if (check(TokenType::Keyword)) {
         type = advance().text;
 
         // An optional '*' (or, real ARRAY_RESERVED_WORD builds, the
-        // bare word "array") marks an array/pointer type, e.g. "string
-        // *epilog(int x)"/"string array GetTeachingLanguages()" or
-        // "mixed *items;" -- see consumeArrayMarker()'s own comment.
+        // bare word "array" immediately after a real type keyword, the
+        // two-word form -- see consumeArrayMarker()'s own comment)
+        // marks an array/pointer type, e.g. "string *epilog(int x)"/
+        // "string array GetTeachingLanguages()" or "mixed *items;".
         // This only records the flag, no array semantics implemented.
         isArray = consumeArrayMarker();
     } else {
@@ -1883,10 +2001,11 @@ Parser::DeclPrefix Parser::parseDeclPrefix(const std::string& context) {
         // definition), neither naming a return type at all. This driver
         // has no static type checking for the omitted type to feed
         // into anyway, so "mixed" here is just a placeholder label; the
-        // next token is the declaration's name, not a type, since a
-        // type keyword and a name are different token types
-        // (TokenType::Keyword vs. TokenType::Ident) and can never be
-        // confused for each other.
+        // next token is the declaration's name, not a type. A bare
+        // "array" is the one real Ident-typed exception to that (see
+        // the branch above); every other Ident reaching here really is
+        // just the name, per the same corpus-checked reasoning
+        // consumeArrayMarker()'s own comment already established.
         type = "mixed";
     }
 
@@ -1902,7 +2021,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunctionRest(DeclPrefix prefix) {
     fn->name = std::move(prefix.name);
 
     expectText("(", "function declaration parameters");
-    fn->params = parseParamList();
+    fn->params = parseParamList(&fn->isVarargs);
     expectText(")", "function declaration parameters");
 
     if (checkText(";")) {

@@ -13,6 +13,15 @@ public:
     int port() const { return port_; }
     int heartbeatIntervalMs() const { return heartbeatIntervalMs_; }
     int maxEvalCost() const { return maxEvalCost_; }
+    // Real rc.c's own __MAX_STRING_LENGTH__ config entry (CFG_INT(14),
+    // BASE_CONFIG_INT 15, so 14+15=29 -- see EfunTable.cpp's own
+    // get_config() comment for the derivation), loaded from the real
+    // config file's own "maximum string length" line the same way
+    // maxEvalCost_ tracks "max_eval_cost" above. Default matches Dead
+    // Souls 3.8.2's own real bundled bin/mudos.cfg ("maximum string
+    // length : 200000"), the only real value this driver has a citation
+    // for; etc/driver_ds3.cfg also sets it explicitly.
+    int maxStringLength() const { return maxStringLength_; }
     const std::string& includeDir() const { return includeDir_; }
     // Empty means "not configured" -- no simul_efun tier at all, matching
     // this being genuinely optional infrastructure (real FluffOS treats
@@ -76,6 +85,7 @@ private:
     int port_ = 1129;
     int heartbeatIntervalMs_ = 2000;
     int maxEvalCost_ = 10000000;
+    int maxStringLength_ = 200000;
     std::string includeDir_ = "secure/include";
     std::string simulEfunFile_ = "";
     std::string mudName_ = "AMLP";

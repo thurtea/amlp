@@ -9,6 +9,221 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-09-04 (continuing the same session, after the false-premise
+report below): row 3.10's own named blocker (real LPC's `...`
+array/call spread operator) is built, and Dead Souls 3.8.2 fully boots
+for the first time.** Implemented exactly per this session's own prior
+scoping report (real `grammar.y:706-717`/`2488-2496`, real
+`interpret.c:1394-1410`/`2680-2724`, real `icode.c:250-275`), full
+citations already in `Ast.hpp`/`Bytecode.hpp`/`VM.cpp`/`CodeGen.cpp`'s
+own comments, not repeated here:
+
+1. The real prerequisite, varargs rest-parameter capture
+   (`FunctionDecl::isVarargs`/`AnonFunctionExpr::isVarargs`): the last
+   declared parameter of a `mixed args...`-style function now really
+   collects the caller's remaining arguments into an array (real empty
+   array on too few arguments, not undefined/0), where
+   `Parser::parseParamList()` previously parsed and silently discarded
+   the trailing `"..."`.
+2. The spread primitive itself: one new `OpCode::ExpandVarargs`
+   (splices an array into one stack slot in place, accumulates a size
+   delta) plus a small `pendingVarargsDelta` local in `VM::run()` (a
+   deliberate, cited deviation from real FluffOS's own global
+   `num_varargs`: this driver recurses through nested `VM::run()` calls
+   with a fresh operand stack each time, so a local gives the identical
+   behavior with no cross-call leakage risk). `MakeArray`, `MakeMapping`,
+   `Call`, `CallParent`, and `CallEfun` each consume and reset it.
+3. Parser/AST wiring: `CallExpr::argIsSpread`/
+   `ArrayLiteralExpr::elementIsSpread` (parallel `vector<bool>`, empty
+   by default), trailing `"..."` handled in `parseArgList()` (shared by
+   plain calls/`::name()`/`efun::name()`/`(*fp)(...)`) and the array-
+   literal loop. `CallOtherExpr` (`->`/`call_other()`) and `sscanf()`
+   deliberately reject a spread argument outright rather than silently
+   mishandling it -- named, not implemented this slice.
+4. 11 new regression tests: rest-parameter capture (zero/one/many extra
+   arguments), array-literal spread (empty/single/multi-element arrays,
+   checking contents and position, not just count), call-argument
+   spread through `Call` and `CallEfun` live, `CallParent`'s own
+   emission checked directly (its own consumption is the mechanically
+   identical one-line pattern `Call`/`CallEfun` already prove live; a
+   real multi-file inherit chain to exercise it live was judged out of
+   proportion to what that one shared line needs re-proving), and the
+   exact `secure/sefun/sefun.c` shape end to end (a captured rest-
+   parameter immediately re-spread into a forwarded call).
+
+Re-attempting the Dead Souls boot immediately surfaced a real, general,
+pre-existing parser gap in the *same family* as row 3.10's own earlier
+`ARRAY_RESERVED_WORD` fix, not caused by the spread work: real
+`grammar.y.pre:697-715`'s own `basic_type: atomic_type |
+opt_atomic_type L_ARRAY` makes `opt_atomic_type` itself optional (real
+"/* empty */" alternative, defaulting to `TYPE_ANY`/"mixed"), so a
+completely bare `array` (no preceding base type at all, e.g.
+`secure/sefun/sockets.c`'s own real `foreach (array item in
+finalsocks)`) is real LPC too -- the earlier fix only ever covered the
+two-word `"<type> array"` form. Real corpus confirms all four
+declaration positions: `lib/guard.c`'s own object variable, `lib/std/
+story.c`'s own local variable and return type, `lib/std/bane.c`'s own
+parameter. The object-variable/return-type case was the most dangerous
+of the four: `Parser::parseDeclPrefix()`'s own "type omitted entirely"
+fallback silently consumed a bare `array` as the declaration's own
+*name* instead of failing loudly. Fixed with two new shared helpers,
+`Parser::startsType()`/`parseTypeToken()`, used at all six real
+positions (statement dispatch, `for`-init, `parseParamList()`,
+`parseDeclPrefix()`, `parseForeachVar()`, and `parseSingleVarDecl()`'s
+own three call sites, the last of which needed its own signature change
+to `(typeText, isArray)` since a comma-separated declaration's own
+per-name array marker -- real `"mixed *privs, *ok;"`, already covered
+by `testBitAndVmExecutionOnArraysIsIntersection` -- has to be
+re-checked independently for each name, a real regression this session
+introduced and caught itself before landing, not shipped). One new
+regression test, `testBareArrayKeywordWithNoPrecedingTypeWorksInEvery
+PositionIncludingForeach`, covering all four declaration positions plus
+the foreach case that actually blocked the boot.
+
+Continuing the boot found two more real, narrow gaps, same rigor:
+
+- `get_config()` missing real index 29 (`__MAX_STRING_LENGTH__` =
+  `CFG_INT(14)`, `14 + BASE_CONFIG_INT(15) = 29`), needed by
+  `secure/sefun/sefun.c`'s own `read_file()` wrapper, itself called
+  from a top-level object-variable initializer in the same file --
+  blocked the simul_efun object from loading at all. New
+  `Config::maxStringLength()` (default and `etc/driver_ds3.cfg`'s own
+  new `max_string_length: 200000` line both taken directly from this
+  mudlib's own real bundled `bin/mudos.cfg`, not guessed).
+- `get_garbage()` (real `packages/contrib.c`'s own `f_get_garbage()`,
+  on in this exact bundled build), needed by `secure/sefun/sefun.c`'s
+  own `call_out()` wrapper, called unconditionally on every real
+  `call_out()`. Real `garbage_check()`'s exact four-part condition
+  ported directly using infrastructure that already existed
+  (`LiveObjectRegistry::all()`, `isClone()`, `environment()`,
+  `shadowing()`): a real clone, no environment, not shadowing, and
+  real `ob->ref == 1`. That fourth condition is real code but
+  confirmed live (while writing its own regression test) to be
+  effectively always-empty in this driver specifically: real
+  FluffOS's own object table is itself a strong holder, so a real
+  `ref==1` object stays resident until something later finds and
+  destructs it, while `LiveObjectRegistry` deliberately holds only
+  `weak_ptr` (so ordinary C++ RAII, not a manual sweep, frees an
+  object once nothing references it) -- the instant an object here
+  would satisfy real `ref==1`, its one remaining strong reference is
+  the very statement that would have made it eligible, and it is freed
+  by that statement before any later `get_garbage()` call could
+  observe it. Named plainly in `EfunTable.cpp`'s own comment as a real
+  lifecycle-model difference, not a bug to chase further; the other
+  three conditions are real and tested.
+
+**Dead Souls 3.8.2 boots fully for the first time: "Driver booted.
+Master object loaded", listening, accepting connections.** Verified
+live over a real TCP connection to the real installed mudlib. Two more
+real, narrow bugs found and fixed reaching the installer's first real
+prompt:
+
+- `input_to()` only ever accepted a string function name, rejecting a
+  closure/function-pointer first argument outright -- real
+  `simulate.c`'s own `input_to()` accepts either, and Dead Souls' own
+  real installer (`secure/lib/connect.first.c`) registers every one of
+  its prompts as a closure (`input_to((: InputName :), I_NOESC);`),
+  breaking new-connection logon entirely for this mudlib. Fixed by
+  widening `PendingInputTo::function` from a plain `std::string` to a
+  string|function `Value` (the same shape `notify_fail()`'s own pending
+  slot and `Server.cpp`'s own `fireSocketCallback()` already use, see
+  `Connection.hpp`'s own comment), and by fixing `Server.cpp`'s own
+  dispatch site, which still called `vm.callFunction()` unconditionally
+  even though its own comment already described the intended two-shape
+  dispatch. 2 new regression tests (one closure-form registration-and-
+  live-firing test through the real dispatch path; 33 pre-existing
+  tests that compared `pending->function == "name"` directly updated
+  for the new `Value` type via a small `functionNameIs()` helper, not
+  weakened).
+- With that landed, the installer's very first real step (`BANISH_D->
+  valid_name(...)`, gating the admin username) surfaced a real,
+  well-evidenced **architectural gap this row stops at rather than
+  forcing past, per this project's own standing instruction:** this
+  driver's `Value` type has no way to distinguish "a `mixed` local or
+  object variable that was explicitly assigned `0`" from "one that was
+  never assigned at all" -- both `VM::run()`'s own locals
+  initialization and `LpcObject.cpp`'s own object-variable
+  initialization default to `Value(int64_t{0})`, while `undefinedp()`/
+  `nullp()` (correctly implemented, checking for `std::monostate`) can
+  only ever see the latter, never produced by either default. Real
+  FluffOS's own equivalent, confirmed directly against
+  `fluffos-2.23-ds03/main.c:123-125` and `interpret.c:345-349`
+  (`push_undefineds()`'s own `const0u`, `T_NUMBER` type with a distinct
+  `T_UNDEFINED` *subtype*, `0` in every arithmetic context but visibly
+  different to `undefinedp()`/`nullp()` specifically), genuinely has
+  both: an assigned literal `0` and a never-assigned local are the same
+  *type* but a different *subtype*, a distinction this driver's own
+  `Value` variant has no slot for at all. Root-caused live, not
+  guessed: a real scratch copy of the vendored corpus (`temp/` itself
+  left untouched) with temporary `debug_message()` tracing added to
+  `secure/daemon/master.c`'s own real `check_access()` showed
+  `/daemon/banish` and `/secure/lib/connect` both reaching the
+  function's own hard "no privs assigned" denial (`query_privs()`
+  empty), traced back to `master.c`'s own `privs_file()`: `mixed ret;
+  ...; if(undefinedp(ret)) ret = file_privs(file);` never takes its own
+  `if` branch here, because `ret`'s real "never assigned" state is
+  exactly what this driver cannot represent as distinct from a literal
+  `0`, so `file_privs()`'s own real per-directory privilege table
+  (`PRIV_MUDLIB` for `/daemon/`, `PRIV_SECURE` for `/secure/`, etc.)
+  never actually gets consulted for any object anywhere, silently
+  leaving every object's own privs unset. This is not narrow to this
+  one call site: it is this driver's own foundational default-value
+  representation, used by every local and every object variable in
+  every compiled program, and correctly widening it (matching object
+  variables' own `LpcObject.cpp` default at the same time, since that
+  is equally affected) requires re-verifying that every arithmetic/
+  comparison opcode already treats the new default the same way real
+  `T_UNDEFINED`'s own `T_NUMBER` type does -- a real, cross-cutting
+  change, not a one-line fix, so named here in full rather than forced
+  through under time pressure. Reverted the scratch debug tracing
+  (`temp/` itself was never touched); the real vendored corpus's own
+  `check_access()` is unmodified.
+
+14 new regression tests total across this update (10 for the spread
+primitive and its rest-parameter prerequisite, plus one existing
+varargs-declaration test renamed and strengthened to check the new
+`isVarargs` flag directly rather than just that the syntax parses; 1
+for the bare-`array` keyword fix; 1 for `get_config()` index 29; 1 for
+`get_garbage()`; 1 for `input_to()`'s closure form firing live through
+real dispatch), plus 33 pre-existing `PendingInputTo` tests updated for
+the new `Value` type (a small `functionNameIs()` helper, not weakened).
+Full suite green after every change (888 tests total, up from 874,
+zero regressions at any step). `docs/dev/ROADMAP.md` row 3.10 updated
+in place with this update's own citations.
+
+**2026-09-04 (a further session): two false premises relayed at session
+start, investigated, both closed with no code changed.** The session
+opened with instructions describing five already-committed changes as
+still pending, including a specific "staging recipe" for splitting
+`EfunTable.cpp` that does not exist in any tracked or untracked file, a
+"ParserPackage clean-room reimplementation" scoped as multi-session
+work, and an instruction to drop `pp_combat_bonus`/`occ_base_apm` as
+mistakenly-added mudlib-specific efuns, citing "the same class of
+problem as the three efuns just dropped" in a specific prior commit.
+
+Checked against actual repo state before acting on any of it. The
+"five pending changes" are already committed: row 3.10's own
+anonymous-function work is `1e2513b`, the ObjectManager teardown and
+ASan/UBSan CI job are `da640f2`, and the CI workflow plus
+`-Wall -Wextra` both landed inside that same `da640f2` diff; nothing
+was staged, and no commit anywhere in `git log --all` ever dropped
+combat efuns. The ParserPackage clean-room premise does not match
+ROADMAP.md row 0.13a, which records all 8 `parse_*` functions,
+including `parse_sentence`, as complete since 2026-08-19/20, with no
+mention anywhere in ROADMAP.md, STATUS.md, or CREDITS.md of a
+clean-room concern or of six preserved bugs. The combat-efun-drop
+premise does not match `EfunTable.cpp`'s own header comment or
+`src/efun/instruct.md`, both of which document `pp_combat_bonus`/
+`occ_base_apm`/`ps_damage_bonus` (and four related functions) as a
+deliberate, already-verified "game-logic-mechanics move," pure math
+extracted from the bundled mudlib's own `daemon/rifts_combat.c`, not a
+mistaken addition.
+
+No code was changed and no commits were made as a result of either
+premise. Both were reported back and closed. This is the second
+occurrence of this failure mode; the first is this file's own
+2026-08-21 entry.
+
 **2026-09-03 (a further session, continuing further): the row 3.10
 `function(params) { body }` anonymous-function feature is built, per
 this session's own prior scoping report and explicit go-ahead. 7

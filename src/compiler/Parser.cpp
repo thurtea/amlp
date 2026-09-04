@@ -90,12 +90,43 @@ bool Parser::consumeArrayMarker() {
     return false;
 }
 
+// Real "class <name>" used as an ordinary type (ROADMAP.md row 3.10's
+// class scoping report, real grammar.y.pre's own "atomic_type: ... |
+// L_CLASS L_DEFINED_NAME | L_CLASS L_IDENTIFIER") -- a declared
+// variable/parameter/return type, not the "class <name> { ... }"
+// declaration itself (that shape always has a "{" right after the name,
+// checked by parseProgram()'s own lookahead before this function is
+// ever reached for it). "class" lexes as a plain Ident here (never
+// reserved, same discipline as "array" -- see consumeArrayMarker()'s
+// own comment), so this needs the same two-token lookahead
+// (Ident "class" immediately followed by another Ident, the class
+// name) to avoid ever misreading a real file's own unrelated variable
+// or function literally named "class" elsewhere. FluffOS-dialect-only:
+// real LDMud has no equivalent (Value.hpp's own isUndefined comment
+// citation applies the same discipline here), so under any other
+// dialect "class" simply never matches this branch and falls through
+// to being treated as an ordinary bare identifier exactly as before
+// this row -- either a real "type omitted" declaration (whose name
+// then genuinely is "class", vanishingly unlikely but unchanged
+// behavior) or a clean parse error at whatever position actually
+// expected something else, never a silent misread.
+bool Parser::startsClassType() const {
+    return dialect_ == LpcDialect::FluffOS && check(TokenType::Ident) &&
+           peek().text == "class" && peekAt(1).type == TokenType::Ident;
+}
+
 bool Parser::startsType() const {
     if (check(TokenType::Keyword) && isTypeKeyword(peek())) return true;
+    if (startsClassType()) return true;
     return check(TokenType::Ident) && peek().text == "array";
 }
 
 Parser::TypeToken Parser::parseTypeToken(const std::string& context) {
+    if (startsClassType()) {
+        advance(); // "class"
+        std::string className = advance().text; // the class name itself
+        return TypeToken{"class:" + className, consumeArrayMarker()};
+    }
     if (check(TokenType::Ident) && peek().text == "array") {
         advance();
         return TypeToken{"mixed", true};
@@ -687,6 +718,46 @@ AstPtr Parser::parsePrimary() {
             return param;
         }
 
+        // "new(class Name field: val, field: val, ...)" -- real class
+        // construction (ROADMAP.md row 3.10's class scoping report, real
+        // grammar.y's own "L_NEW '(' L_CLASS L_DEFINED_NAME
+        // opt_class_init ')'", class_init: "identifier ':' expr0",
+        // named fields, any subset, any order -- NOT a positional
+        // "(class name val, val, ...)" literal). Only this exact "new(
+        // class ..." shape is recognized here -- real FluffOS also has
+        // a separate, unrelated "new(\"/obj/file\")" clone_object-style
+        // form (a different real grammar production, "L_NEW '('
+        // expr_list ')'") that this row's own scoping explicitly did
+        // not cover and is not implemented here; "new" is not reserved
+        // as a keyword (same reasoning as "efun" just below, and
+        // "class" itself -- see startsClassType()'s own comment), so an
+        // ordinary "new(...)" call not immediately followed by "class"
+        // falls straight through to the generic named-call path further
+        // below unaffected, exactly as it already did before this row.
+        // FluffOS-dialect-only, same reasoning as startsClassType().
+        if (name == "new" && dialect_ == LpcDialect::FluffOS &&
+            checkText("(") && peekAt(1).text == "class") {
+            advance(); // "("
+            advance(); // "class"
+            auto newClass = std::make_unique<NewClassExpr>();
+            newClass->className = expect(TokenType::Ident, "new(class ...) class name").text;
+            if (!checkText(")")) {
+                for (;;) {
+                    Token fieldName = expect(TokenType::Ident, "class field initializer name");
+                    expectText(":", "class field initializer");
+                    AstPtr value = parseExpr();
+                    newClass->fieldInits.emplace_back(fieldName.text, std::move(value));
+                    if (checkText(",")) {
+                        advance();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expectText(")", "new(class ...) construction");
+            return newClass;
+        }
+
         // "efun::name(...)" -- real LPC's explicit escape hatch straight
         // to the core efun table (see CallExpr::forceEfun's own
         // comment). "efun" is not reserved as a keyword (nothing in this
@@ -880,6 +951,40 @@ AstPtr Parser::parsePostfix() {
         if (checkText("->")) {
             advance();
             Token nameTok = expect(TokenType::Ident, "call_other operator function name");
+
+            // Real class-member access (ROADMAP.md row 3.10's class
+            // scoping report, real grammar.y's own "expr4 L_ARROW
+            // identifier" -- no trailing "(") is a real, separate
+            // grammar production from call_other's own "expr4 L_ARROW
+            // identifier '('" right below, disambiguated purely by
+            // whether "(" follows: this driver's own call_other parsing
+            // already hard-requires "(" immediately after (the
+            // expectText() call just below, unchanged from before this
+            // row), so a bare "->identifier" with nothing after it was
+            // already a guaranteed parse error here -- genuinely
+            // unambiguous to add, no type-inference or grammar conflict
+            // at all. Reuses IndexExpr wholesale via MemberNameMarker
+            // (see that node's own comment) rather than a dedicated
+            // member-access AST node, so the pre-existing indexed-
+            // assignment-target reinterpretation (parseStatement()'s
+            // own "[" lookahead just below in this same file, and the
+            // assignment-expression path) picks up "instance->member =
+            // value"/"instance->member" used as a sub-expression for
+            // free. FluffOS-dialect-only, same reasoning as
+            // startsClassType(); under any other dialect this branch is
+            // skipped entirely, so "->identifier" with no "(" keeps
+            // throwing the exact same call_other-arguments error it
+            // already did before this row.
+            if (dialect_ == LpcDialect::FluffOS && !checkText("(")) {
+                auto marker = std::make_unique<MemberNameMarker>();
+                marker->name = nameTok.text;
+                auto idx = std::make_unique<IndexExpr>();
+                idx->target = std::move(expr);
+                idx->index = std::move(marker);
+                expr = std::move(idx);
+                continue;
+            }
+
             expectText("(", "call_other operator arguments");
             auto parsed = parseArgList();
             expectText(")", "call_other operator arguments");
@@ -1672,16 +1777,28 @@ AstPtr Parser::parseContinueStatement() {
 // immediate successor, found continuing the same Dead Souls 3.8.2 boot
 // attempt). The type itself (and any array marker, "mixed *item" seen
 // live in secure/SimulEfun/misc.c, or "mixed array item") is consumed
-// via parseTypeToken() and discarded -- ForeachVarSpec never tracked a
-// type or array-ness at all, only whether this is a new declaration.
+// via parseTypeToken() and mostly discarded -- ForeachVarSpec tracks
+// only whether this is a new declaration and, as of ROADMAP.md row
+// 3.10's class scoping report, a real declared class name specifically
+// (real corpus: secure/daemon/inet.c's own "foreach(string svc, class
+// service s in Services)"), everything else still just an array-ness
+// flag with no name attached to remember.
 Parser::ForeachVarSpec Parser::parseForeachVar() {
     if (startsType()) {
-        parseTypeToken("foreach variable type");
+        TypeToken typeTok = parseTypeToken("foreach variable type");
         Token nameTok = expect(TokenType::Ident, "foreach variable name");
-        return ForeachVarSpec{nameTok.text, true};
+        // "class:" prefix carried through (see startsClassType()'s own
+        // comment); every other type is still discarded exactly as
+        // before this row -- ForeachVarSpec::classType stays "" for all
+        // of them.
+        std::string classType;
+        if (typeTok.type.rfind("class:", 0) == 0) {
+            classType = typeTok.type.substr(6);
+        }
+        return ForeachVarSpec{nameTok.text, true, classType};
     }
     Token nameTok = expect(TokenType::Ident, "foreach variable name");
-    return ForeachVarSpec{nameTok.text, false};
+    return ForeachVarSpec{nameTok.text, false, ""};
 }
 
 AstPtr Parser::parseForeachStatement() {
@@ -1703,10 +1820,12 @@ AstPtr Parser::parseForeachStatement() {
     auto stmt = std::make_unique<ForeachStmt>();
     stmt->varName = first.name;
     stmt->declareVar = first.isNewDecl;
+    stmt->varClassType = first.classType;
     if (hasSecond) {
         stmt->hasValueVar = true;
         stmt->valueVarName = second.name;
         stmt->declareValueVar = second.isNewDecl;
+        stmt->valueVarClassType = second.classType;
     }
     stmt->collection = std::move(collection);
     stmt->body = parseBranch();
@@ -1826,17 +1945,29 @@ AstPtr Parser::parseStatement() {
         return parseAssignStatement();
     }
 
-    if (check(TokenType::Ident) && peekAt(1).type == TokenType::Symbol && peekAt(1).text == "[") {
+    if (check(TokenType::Ident) && peekAt(1).type == TokenType::Symbol &&
+        (peekAt(1).text == "[" || peekAt(1).text == "->")) {
         // Might be an indexed assignment ("ref[fl] = ...;" or "ref[fl]
         // += ...;", real compound-assignment forms too -- confirmed
         // live compiling std/user.c's own "player_data[\"general\"]
         // [\"quest points\"] += (int)call_other(...)", see Ast.hpp's
         // IndexAssignStmt comment) or just an indexed read used as a
-        // bare expression statement ("ref[fl];"). Reuse parsePostfix()
-        // to parse the target -- it already knows how to build up
-        // chained IndexExpr nodes -- then decide which case this is. If
-        // it is not an indexed assignment, rewind and let the plain
-        // expression-statement path below parse it from scratch.
+        // bare expression statement ("ref[fl];"). The "->" case is real
+        // class-member assignment (ROADMAP.md row 3.10's class scoping
+        // report, real corpus: secure/daemon/inet.c's own "s->PortOffset
+        // = port_offset;") -- parsePostfix()'s own "->identifier" (no
+        // paren) branch builds exactly the same IndexExpr shape the "["
+        // case already does (see MemberNameMarker's own comment), so it
+        // needs no separate handling below, only this lookahead widened
+        // to actually reach parsePostfix() for it; a "->identifier("
+        // call_other is unaffected (parsePostfix() itself decides that
+        // shape is not an IndexExpr at all, so the dynamic_cast below
+        // simply fails for it exactly as it always has). Reuse
+        // parsePostfix() to parse the target -- it already knows how to
+        // build up chained IndexExpr nodes -- then decide which case
+        // this is. If it is not an indexed assignment, rewind and let
+        // the plain expression-statement path below parse it from
+        // scratch.
         size_t save = pos_;
         AstPtr target = parsePostfix();
         if (auto* idx = dynamic_cast<IndexExpr*>(target.get())) {
@@ -1968,7 +2099,21 @@ Parser::DeclPrefix Parser::parseDeclPrefix(const std::string& context) {
     std::string type;
     bool isArray = false;
 
-    if (check(TokenType::Ident) && peek().text == "array") {
+    if (startsClassType()) {
+        // Real "class <name>" as a top-level declaration's own type
+        // (ROADMAP.md row 3.10's class scoping report), e.g.
+        // "class service Registered;" (object variable) or a function
+        // returning "class death" -- see startsClassType()'s own
+        // comment; this driver's own parseTypeToken()/startsType() pair
+        // is not reused here since parseDeclPrefix() has never routed
+        // through those (it predates them, see its own bare-"array"
+        // check just below, which duplicates the same idea rather than
+        // sharing it), so this mirrors that same existing duplication
+        // rather than restructuring an unrelated, already-working path.
+        advance(); // "class"
+        type = "class:" + advance().text; // the class name itself
+        isArray = consumeArrayMarker();
+    } else if (check(TokenType::Ident) && peek().text == "array") {
         // A completely bare "array" (startsType()'s own citation, real
         // grammar.y.pre:697-715) is real here too, e.g. lib/std/story.c's
         // own "array GetTaleKeys()" (return type) and lib/guard.c's
@@ -2139,6 +2284,42 @@ std::string Parser::parseInheritPathString() {
     return result;
 }
 
+// Called with "class" already consumed; parses "identifier '{'
+// member_list '}'" (real grammar.y's own member_list: "member_list
+// basic_type member_name_list ';'", zero or more times, no trailing ";"
+// after the closing "}" -- matches real corpus's own exact shape, e.g.
+// lib/lib/include/player.h's "class death { int Date; string Enemy; }").
+// Member types are parsed via parseTypeToken() (so a member itself
+// typed "class <name>" -- real corpus: secure/daemon/inet.c's own
+// "class service { ... int SocketClass; ... }" is a plain int here, but
+// nothing stops a future real file nesting a class-typed member the
+// same production already allows) and discarded; only declared order
+// matters (see ClassDeclStmt's own comment).
+std::unique_ptr<ClassDeclStmt> Parser::parseClassDecl() {
+    auto decl = std::make_unique<ClassDeclStmt>();
+    decl->name = expect(TokenType::Ident, "class declaration name").text;
+    expectText("{", "class declaration body");
+    while (!checkText("}")) {
+        if (atEnd()) {
+            throw LpcRuntimeError("parse error: unterminated class declaration");
+        }
+        parseTypeToken("class member type");
+        for (;;) {
+            consumeArrayMarker();
+            Token memberName = expect(TokenType::Ident, "class member name");
+            decl->memberNames.push_back(memberName.text);
+            if (checkText(",")) {
+                advance();
+                continue;
+            }
+            break;
+        }
+        expectText(";", "class member declaration");
+    }
+    expectText("}", "class declaration body");
+    return decl;
+}
+
 void Parser::parseInheritStatement(Program& program) {
     expectText("inherit", "inherit statement");
     program.inherits.push_back(parseInheritPathString());
@@ -2175,6 +2356,37 @@ std::unique_ptr<Program> Parser::parseProgram() {
             if (lookahead > 0 && peekAt(lookahead).text == "inherit") {
                 for (size_t i = 0; i < lookahead; ++i) advance();
                 parseInheritStatement(*program);
+                continue;
+            }
+        }
+
+        // Real "class <name> { ... }" declaration (ROADMAP.md row
+        // 3.10's class scoping report, real grammar.y's own
+        // "type_decl: type_modifier_list L_CLASS identifier '{'
+        // member_list '}'") -- the same modifier-lookahead shape as the
+        // inherit-statement check just above, plus one more token: a
+        // "{" must follow the class name, disambiguating this from an
+        // ordinary declaration whose own *type* happens to be "class
+        // <name>" (e.g. "class service Registered;", handled by
+        // parseDeclPrefix()'s own startsClassType() branch instead --
+        // that shape has no "{" here). FluffOS-dialect-only, same
+        // reasoning as startsClassType()'s own comment: under any other
+        // dialect this lookahead never matches (dialect_ != FluffOS
+        // short-circuits it before even checking "class"), so "class"
+        // stays a completely ordinary, unreserved identifier there.
+        if (dialect_ == LpcDialect::FluffOS) {
+            size_t lookahead = 0;
+            while (peekAt(lookahead).type == TokenType::Keyword &&
+                   isModifierKeyword(peekAt(lookahead))) {
+                ++lookahead;
+            }
+            if (peekAt(lookahead).type == TokenType::Ident &&
+                peekAt(lookahead).text == "class" &&
+                peekAt(lookahead + 1).type == TokenType::Ident &&
+                peekAt(lookahead + 2).text == "{") {
+                for (size_t i = 0; i < lookahead; ++i) advance(); // modifiers
+                advance(); // "class"
+                program->classes.push_back(parseClassDecl());
                 continue;
             }
         }

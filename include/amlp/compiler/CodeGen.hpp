@@ -68,7 +68,13 @@ private:
     void emitContinueStmt();
     void emitBlock(const Block& block);
 
-    int declareLocal(const std::string& name);
+    // typeText is the same string Param::type/VarDeclStmt::type/etc
+    // already carry -- a "class:<Name>" prefix (see Parser.cpp's own
+    // startsClassType() comment) records this local's declared class
+    // type into localClassTypes_; anything else (the overwhelmingly
+    // common case) is a no-op here, matching every pre-existing call
+    // site's behavior exactly via the default argument.
+    int declareLocal(const std::string& name, const std::string& typeText = "");
 
     size_t emitJumpPlaceholder(OpCode op);
     void patchJumpTo(size_t jumpInstrIndex, size_t target);
@@ -128,6 +134,81 @@ private:
     // Program::objectVars before any function body is compiled, and left
     // untouched afterward (unlike locals_, which is per-function).
     std::unordered_map<std::string, int> objectVars_;
+
+    // Real class_def_t/class_member_entry_t analog (ROADMAP.md row
+    // 3.10's class scoping report, class.c/interpret.c's own real
+    // per-*program* member-name table -- member resolution is 100%
+    // compile time in real FluffOS, never at runtime, see
+    // MemberNameMarker's own comment): every "class <name> { ... }"
+    // declared in this program, mapped to its declared member names in
+    // order. Populated once per generate() call from Program::classes,
+    // before any function body is compiled (same timing as objectVars_
+    // just above), and never cleared afterward. Empty under every
+    // dialect but FluffOS.
+    std::unordered_map<std::string, std::vector<std::string>> classDefs_;
+
+    // Declared static class type for a local/parameter (name -> class
+    // name, no "class:" prefix here), block-scoped exactly like
+    // locals_/localScopeStack_ -- declareLocal() populates an entry
+    // only when its own typeText argument carries "class:", and
+    // emitBlock() erases the same name from here alongside locals_ on
+    // scope exit. Absence (the overwhelmingly common case) means "not
+    // known to be class-typed", not "known to be untyped" -- see
+    // staticClassTypeOf()'s own comment for how that absence is
+    // actually used (only a bare declared-class-typed identifier
+    // target resolves; anything else throws a clear error rather than
+    // guessing, per this row's own scoping report and this codebase's
+    // established "throw rather than silently mishandle" convention).
+    std::unordered_map<std::string, std::string> localClassTypes_;
+    // Same idea as localClassTypes_, for object variables: populated
+    // once per generate() call from Program::objectVars (same loop and
+    // timing as objectVars_ itself), never cleared afterward.
+    std::unordered_map<std::string, std::string> objectVarClassTypes_;
+
+    // Real class_def_t lookup (class.c's own real "Undefined class"/
+    // "Class ... has no member ..." compile errors, see
+    // lookup_class_member()'s own citation in this row's scoping
+    // report) -- throws a clear LpcRuntimeError for either failure
+    // rather than guessing. Returns the member's 0-based index within
+    // className's own declared member order.
+    int resolveClassMemberIndex(const std::string& className, const std::string& memberName) const;
+
+    // The static (compile-time-known) class type of expr, or "" if none
+    // is known -- real FluffOS itself only ever resolves "instance->
+    // member" against a statically-known type too (real IS_CLASS($1->
+    // type) check, grammar.y:2803-2827, or its own TYPE_ANY fallback
+    // via lookup_any_class_member(), a real, documented ambiguity-prone
+    // shortcut this driver deliberately does not replicate -- no real
+    // corpus site found needing it, see this row's own scoping report).
+    // Only recognizes a bare VarRefExpr naming a locally- or object-
+    // variable-declared class type (localClassTypes_ shadows
+    // objectVarClassTypes_, matching resolveVariable()'s own local-
+    // wins-over-global precedence); anything else (a call result, a
+    // nested index/member expression, ...) returns "", and the caller
+    // (emitIndexValue()) throws a clear error naming exactly what could
+    // not be resolved, rather than misreading it as an ordinary
+    // integer/string index. No real corpus site needs anything richer
+    // (every real "->member" site found is a directly class-declared
+    // variable, never a chained "a->b->c" or an indexed result) -- see
+    // this row's own scoping report and STATUS.md entry.
+    std::string staticClassTypeOf(const AstNode& expr) const;
+
+    // Shared by emitExpr()'s own IndexExpr case and
+    // emitIndexAssignStmt()/emitIndexAssignExpr(), every place that
+    // used to just call emitExpr(*index) directly: indexNode is either
+    // an ordinary index expression (emitted exactly as before this
+    // row) or a MemberNameMarker (real "instance->member" access, see
+    // that node's own comment), in which case this resolves the
+    // member's compile-time index against targetExpr's own static
+    // class type (staticClassTypeOf()/resolveClassMemberIndex() above)
+    // and emits a plain PushInt for it instead -- the actual "no new
+    // VM opcode" reuse of OpCode::Index/IndexAssign this row's own
+    // scoping report promised. targetExpr is only actually read when
+    // indexNode is a MemberNameMarker (an ordinary index never needs
+    // its own target's type), so this does not force resolving/
+    // emitting a target twice in the ordinary case -- callers already
+    // emit the target separately, exactly as before this row.
+    void emitIndexValue(const AstNode& targetExpr, const AstNode& indexNode);
 
     // An InlineLambdaExpr (see Ast.hpp) encountered while compiling some
     // enclosing function's body cannot have its own bytecode emitted

@@ -1,5 +1,299 @@
 # STATUS
 
+**2026-09-04 (a further session, continuing further yet again): the
+`class <name> { <member decls> }` struct-type declaration is built,
+exactly per this session's own prior scoping report, full slice
+(declaration, type usage, both construction forms, member read, member
+write) together, no further staging.** 899 tests total, up from 892,
+full suite green throughout (direct binary run and `ctest` both confirm
+0 failures), zero regressions at any step.
+
+1. `Value::isClassInstance` (`Value.hpp`): a plain `bool`, default
+   `false`, sibling to `data`, matching real FluffOS's own T_CLASS-
+   reuses-array_t shape exactly (and this session's own prior
+   `Value::isUndefined`, the identical pattern) rather than a new
+   `ValueVariant` alternative -- a class instance is, underneath,
+   `std::shared_ptr<Array>`, the same alternative an ordinary array
+   literal already uses. Set only by `OpCode::MakeArray`'s own operand
+   (repurposed: 0 for an ordinary array literal, unchanged; 1 for real
+   `new(class Name ...)` construction) -- no new VM opcode, matching
+   this row's own scoping report exactly.
+2. `MemberNameMarker` (`Ast.hpp`): the actual "no new VM opcode" reuse
+   -- a placeholder AST node standing in for `IndexExpr::index`/
+   `IndexAssignStmt::index`/`IndexAssignExpr::index` wherever the
+   source used `instance->member` (no paren) instead of an ordinary
+   index expression. `CodeGen::emitIndexValue()` (new, shared by all
+   three of `emitExpr()`'s own `IndexExpr` case,
+   `emitIndexAssignStmt()`, and `emitIndexAssignExpr()`, replacing
+   their own direct `emitExpr(*index)` calls) recognizes it and emits a
+   compile-time-resolved `PushInt` instead, then falls straight through
+   to the same, completely unchanged `OpCode::Index`/`IndexAssign`
+   every ordinary array index already uses. Member *write* needed no
+   separate parser-level work at all: `parseStatement()`'s own pre-
+   existing indexed-assignment-target lookahead (previously keyed only
+   on a following `[`) was widened to also fire on `->`, and the
+   expression-level `IndexAssignExpr` path already dispatches on
+   whatever `dynamic_cast<IndexExpr*>` the parsed operand is -- both
+   picked up member-access targets for free once `parsePostfix()`'s own
+   `->identifier` (no paren) branch started building the identical
+   `IndexExpr` shape the paren'd call_other branch already does.
+3. Parser: `->identifier` with no following `(` is member access;
+   `(` still means call_other, completely unchanged -- genuinely
+   unambiguous, confirmed live (not just asserted): this driver's own
+   call_other parsing already hard-required `(` immediately after, so
+   a bare `->identifier` was already a guaranteed parse error before
+   this row. `startsClassType()` (new, `class <identifier>` recognized
+   as a type, two-token lookahead, "class" never reserved) is threaded
+   through both real type-parsing paths this codebase has --
+   `startsType()`/`parseTypeToken()` (already shared by
+   `parseVarDeclStatement()`/`parseParamList()`/`parseForeachVar()`/
+   the `for`-init clause) and `parseDeclPrefix()`'s own separate,
+   pre-existing duplicate type-parsing logic (top-level function/
+   object-variable declarations) -- confirmed by reading both directly
+   rather than assuming one covers the other. `new(class Name field:
+   val, ...)` recognized narrowly (`name == "new" && checkText("(") &&
+   peekAt(1).text == "class"`), leaving a real, unrelated, unimplemented
+   `new("/obj/file")` clone-style call (a different real grammar
+   production, out of this row's own scope) to fall through to the
+   ordinary named-call path exactly as before. `ForeachVarSpec`/
+   `ForeachStmt` gained a `classType` field (previously discarded
+   entirely) for the real `foreach(string svc, class service s in
+   Services)` shape.
+4. Compile-time-only member resolution, matching real
+   `reorder_class_values()`/`lookup_class_member()` exactly: `classDefs_`
+   (class name to ordered member names, real `class_def_t` analog) and
+   `localClassTypes_`/`objectVarClassTypes_` (declared variable to its
+   class name, block-scoped for locals via the same `localScopeStack_`/
+   `emitBlock()` cleanup `locals_` itself already uses) are the only new
+   CodeGen-side state. `staticClassTypeOf()` only ever resolves a bare
+   declared-class-typed variable (`VarRefExpr`); anything else --
+   confirmed live by a dedicated regression test, not just designed in
+   the abstract -- throws a clear "cannot resolve ... static class type
+   is not known here" compile error rather than replicating real
+   FluffOS's own documented ambiguity-prone `TYPE_ANY` fallback
+   (`lookup_any_class_member()`), matching this codebase's established
+   "throw rather than silently mishandle" convention; no real corpus
+   site needs anything richer (confirmed in the prior scoping session,
+   re-confirmed here by this exact test).
+5. Partial-field construction matches real `reorder_class_values()`
+   (`compiler.c:417-465`) exactly: every omitted field becomes a plain
+   `PushInt 0`, never `isUndefined`/monostate -- confirmed by a
+   regression test checking the omitted-field value specifically, not
+   just that construction succeeds.
+6. `classp()` (real `efuns_main.c`'s `f_classp()`) was already
+   registered as an always-false stub (this driver had no class
+   representation at all yet); now checks
+   `holds_alternative<shared_ptr<Array>> && isClassInstance` together,
+   matching real `sp->type == T_CLASS` exactly. Every ordinary array-
+   oriented efun/opcode needed no changes at all (confirmed by reading,
+   not assumed): `isTruthy()`/`valuesEqual()`/`sizeof()`/`foreach`/
+   arithmetic array concatenation all key only on `data`'s own
+   `shared_ptr<Array>` alternative, exactly like real FluffOS's own
+   ordinary array opcodes, which do not special-case `T_CLASS` either.
+7. FluffOS-dialect-only throughout, confirmed a clean parse error under
+   LDMud, not a silent misbehavior (a dedicated regression test, not
+   just reasoned about): every new recognition point
+   (`startsClassType()`, the top-level class-declaration lookahead,
+   `new(class ...)`, the no-paren `->member` branch) gates on
+   `dialect_ == LpcDialect::FluffOS`. Under LDMud, `class death { int
+   Date; }` parses exactly as it would have before this row existed --
+   `class` consumed as an ordinary declaration's own name
+   (`parseDeclPrefix()`'s "type omitted" branch), then failing with the
+   literal same real `"expected \";\" ... (got \"death\")"` error the
+   original, pre-this-row Dead Souls boot blocker itself produced.
+8. 7 new regression tests: declaration + full-field-list construction +
+   partial-field-list construction (checking the omitted-field value
+   specifically) + member read together; a `mixed`-declared variable's
+   member access throwing rather than guessing; the exact real
+   `secure/daemon/inet.c` idiom (class-typed variable, empty
+   construction, member write, member read); `classp()` distinguishing
+   a class instance from a plain array and a number; the real
+   `daemon/soul.c` shape (a class instance holding a mapping-typed
+   member of class instances, retrieved through a member-then-index
+   chain into a class-typed local); the real `secure/daemon/inet.c`
+   class-typed `foreach` value variable; and the LDMud clean-error case.
+9. **Dead Souls 3.8.2 boot re-attempted against `etc/driver_ds3.cfg`,
+   live over a real TCP connection, same method as before.** Confirmed
+   real progress: `lib/lib/include/player.h`'s own `class death { int
+   Date; string Enemy; }` no longer blocks compilation at all --
+   `player.c` (which includes it) now compiles further than before and
+   reaches a different file entirely, one of its own real `inherit`
+   targets. Boot now reaches a new, different, previously-undocumented
+   blocker: `lib/lib/interactive.c:115`'s real `autosave::Setup();` --
+   real LPC's explicit *named*-inherited-parent call syntax
+   (`<ParentName>::function(args)`, distinct from the bare `::function()`
+   parent-call form this driver already implements), needed here because
+   `interactive.c` multiply-inherits and this specific call must reach
+   one particular parent's own `Setup()` by name. This driver's parser
+   currently misreads `autosave` as an attempted declaration's own type
+   and chokes on the following `::` ("parse error: expected token type
+   in variable declaration name at line 116 (got \"::\")" -- the real
+   file's own line 115 one-indexed off by the parser's own line-
+   counting convention, not misattributed). Named here and stopped at,
+   not investigated further or forced past, per this project's own
+   standing "no half-built subsystems" discipline -- scoping named-
+   inherited-parent calls is its own, separate future session's work.
+   `docs/dev/ROADMAP.md` row 3.10 updated in place with this outcome.
+
+**2026-09-04 (a further session, continuing further still): CLAUDE.md's
+Orientation section updated with the second vendored-tree pointer
+(approved, applied directly), and the `class <name> { <member decls> }`
+struct-type declaration blocking Dead Souls 3.8.2's boot scoped in full
+against real FluffOS source and this driver's own current code, no code
+written yet.** CLAUDE.md gained one new Orientation paragraph, right
+after the existing `temp/reference/fluffos-2.9-ds2.08/` one, naming
+`temp/ds3.8.2_extracted/ds3.8.2/fluffos-2.23-ds03/` as a second real,
+on-disk, gitignored FluffOS tree narrower in scope (Dead Souls 3.8.2's
+own bundled driver version specifically) than the canonical one.
+
+1. **Real grammar, both vendored trees agree (same productions, close
+   line numbers):** declaration is `type_decl: type_modifier_list
+   L_CLASS identifier '{' member_list '}'` (2.9-ds2.08 `grammar.y:
+   532-560`; 2.23-ds03 `grammar.y.pre:568-`), no trailing `;` after
+   `}` -- matches `player.h`'s own exact shape. `member_list:
+   member_list basic_type member_name_list ';'` (`grammar.y:522-530`)
+   allows any `basic_type`, including a nested `class <name>` (see
+   item 6). Construction is `new(class Name field: val, field: val,
+   ...)` -- **not** a positional `(class name val, val, ...)` literal
+   -- production `L_NEW '(' L_CLASS L_DEFINED_NAME opt_class_init ')'`
+   (`grammar.y:3383-3418`; identical shape at `grammar.y.pre:3391-`),
+   built from `class_init: identifier ':' expr0` /
+   `opt_class_init: /*empty*/ | opt_class_init ',' class_init`
+   (`grammar.y:3327-3349`). `class <name>` is also a real usable
+   *type* anywhere `atomic_type` appears (`atomic_type: L_BASIC_TYPE |
+   L_CLASS L_DEFINED_NAME | L_CLASS L_IDENTIFIER`, `grammar.y.pre:
+   665-695`) -- variable/parameter/return-type declarations, not just
+   construction.
+2. **Runtime representation, confirmed directly against `class.c`/
+   `interpret.c`, not assumed:** `T_CLASS` (`lpc.h:66`, `0x200`) is a
+   real, distinct top-level svalue *type tag* -- but its storage is a
+   plain, ordinary `array_t*` reused wholesale (`push_class()`/
+   `push_refed_class()`, `interpret.c:1301-1316`: `sp->type = T_CLASS;
+   sp->u.arr = v;`, the identical union field an ordinary array uses).
+   `allocate_class()` (`class.c:20-37`) fills an empty instance
+   (`new(class Name)`, no field initializers) with plain `const0` per
+   member -- **not** `const0u`/`T_UNDEFINED` -- so a freshly
+   constructed empty class instance's members read `undefinedp()`
+   false, unlike an ordinary declared-but-unassigned local/object
+   variable (this session's own prior T_UNDEFINED work). A partial
+   field list (`new(class Name field1: val1)`, some members omitted)
+   is resolved entirely at *compile time*: `reorder_class_values()`
+   (`compiler.c:417-465`) synthesizes a literal `0` constant for every
+   omitted member, so by the time codegen runs, construction is always
+   "push exactly `cd->size` values in declared-member order" -- no
+   partial-field logic exists at runtime at all.
+3. **Member access is `->`, not dot notation** (correcting this
+   session's own initial framing): real FluffOS reuses the *same*
+   `L_ARROW` token as call_other, but as two entirely separate, non-
+   conflicting grammar productions disambiguated purely by whether a
+   `(` follows -- `expr4 L_ARROW identifier` (no paren, `grammar.y:
+   2803-2827`, member access, `F_MEMBER`/`F_MEMBER_LVALUE`) versus
+   `expr4 L_ARROW identifier '('` (paren required, `grammar.y:3580`,
+   call_other). `F_MEMBER` (`interpret.c:3070-3087`) is a plain
+   `arr->item[i]` read where `i` is a *compile-time-resolved* member
+   index (`lookup_class_member()`, an `EXTRACT_UCHAR(pc++)` byte
+   operand baked in by the compiler, never resolved at runtime);
+   `F_MEMBER_LVALUE` (`interpret.c:3088-3105`) is the identical shape
+   producing an lvalue for a member *write* (`instance->member =
+   value`). A class instance is by-reference on assignment (it is a
+   refcounted `array_t*`, `push_refed_class()`/`free_class()`, exactly
+   like an ordinary array). `save_object()`/`save_svalue()`
+   (`object.c`, confirmed by the same subtype/type-only switch this
+   session's T_UNDEFINED work already read) has no `T_CLASS` case at
+   all -- a class instance cannot be saved, matching this driver's own
+   real "not implemented" convention for other unsaveable kinds rather
+   than a silent misrepresentation.
+4. **This driver's own scope, and a significant reuse opportunity
+   confirmed, not assumed:** entirely new AST/CodeGen/VM surface --
+   no `classDef`/`ClassDecl`/`structDef` symbol exists anywhere in
+   `include/`/`src/compiler/`/`src/vm/` today (checked directly), and
+   `class` is not yet a lexed keyword (checked `Lexer.cpp` directly --
+   lexes as a plain identifier now, so needs the same contextual,
+   non-blanket-reservation discipline row 3.10's own earlier
+   `ARRAY_RESERVED_WORD` fix already established, not a hard keyword
+   that could misread a real file's own unrelated `class`-named
+   identifier). Confirmed this driver's *own* `Array`
+   (`std::vector<Value> items`) and `OpCode::Index`/`IndexAssign` (its
+   existing array-indexing opcodes) already provide everything real
+   `F_MEMBER`/`F_MEMBER_LVALUE` need: since real member-index
+   resolution is 100% compile-time (item 2), `instance->member` and
+   `instance->member = value` can desugar directly to this driver's
+   *existing* `Index`/`IndexAssign` opcodes with a compile-time-
+   resolved constant index, needing no new VM opcode at all -- the new
+   AST nodes are a `ClassDeclStmt` (recorded into a new CodeGen-side
+   compile-time symbol table, class name to ordered member-name list,
+   the direct analog of real `class_def_t`/`class_member_entry_t`) and
+   a `NewClassExpr` (desugars named/partial field initializers into
+   positional order at compile time, mirroring real
+   `reorder_class_values()` exactly, then emits an ordinary
+   `MakeArray`-shaped sequence). Real corpus evidence closes an open
+   question: `classp()` (real `func_spec.c:181`/`182`, both trees) is
+   live in this exact corpus (`secure/sefun/identify.c`,
+   `secure/lib/net/client.c`, `daemon/intermud.c`), so a class instance
+   cannot be *indistinguishable* from a plain array at the Value level
+   the way a naive "just reuse Array with zero marking" reading might
+   suggest -- real FluffOS itself only needs a single is-a-class-
+   instance bit for this (`f_classp()`, `efuns_main.c:409-418`, checks
+   `sp->type == T_CLASS` only, no per-class identity), so the natural
+   fix is one small marker on `Array` (an `isClassInstance` bool, or
+   `optional<string> className` if per-class `classp()`-style identity
+   is ever needed beyond real FluffOS's own coarser bool), the same
+   sibling-flag shape this session's own `Value::isUndefined` already
+   established as this codebase's working pattern for "type stays the
+   same, one bit distinguishes it" -- not a new `ValueVariant`
+   alternative.
+5. **Smallest real first slice: the user's own proposed split
+   (declaration + construction + member read, before member write) is
+   not real, corrected by direct corpus evidence, not assumed.**
+   `secure/daemon/inet.c:76-83` constructs an *empty* instance
+   (`new(class service)`, no field initializers) then writes three
+   members via `->` assignment before ever reading any of them
+   (`s->PortOffset = port_offset; s->SocketClass = socket_class;
+   s->SocketType = type;`), a real, load-bearing "construct empty,
+   fill in fields one at a time" idiom distinct from the named-
+   initializer construction form -- so member *write* is not a safely
+   deferrable edge case, it is required by the same file that needs
+   empty construction at all. The real minimal complete slice is:
+   declaration, `class <name>` as a usable type (variable/parameter/
+   return-type positions), both construction forms (named-field and
+   empty), member read, and member write, together -- `classp()`
+   (item 4) and array-literal-compatibility/`foreach`-over-a-class-
+   valued-mapping (item 6) are the genuinely deferrable edges, not
+   member write.
+6. **Corpus evidence: 21 real files in Dead Souls 3.8.2 declare a
+   `class` type, 15 real files (2 more are doc pages, not code)
+   construct one via `new(class ...)`.** `player.h`'s own `class death
+   { int Date; string Enemy; }` is representative of most
+   *declaration* shapes (`daemon/include/classes.h`'s `Skill`/`Class`,
+   `daemon/include/party.h`, etc. -- plain basic-type members, 1-3
+   members, no nesting) but is not representative of real *usage*
+   depth: `player.c` itself never actually constructs or accesses a
+   `class death` value anywhere (`Deaths` is a plain array-of-mappings
+   instead, confirmed by reading `player.c` directly -- `class death`
+   is vestigial header scaffolding for this one file specifically), so
+   the bare declaration grammar alone is sufficient to clear *this
+   specific* boot blocker. `daemon/soul.c` (the emote/social-command
+   system) and `secure/daemon/inet.c` (the service/socket daemon) are
+   real, heavier, more representative consumers found in the same
+   corpus: class-typed local-variable declarations (`class emote e;`,
+   `class rule r;`, `class service s;`), member-chained access
+   (`e->Rules[rle]`), class instances stored as mapping values with a
+   class-typed `foreach` loop variable
+   (`foreach(string svc, class service s in Services)`,
+   `secure/daemon/inet.c:164`), and the empty-construct-then-write
+   idiom (item 5). Both files are real modules this mudlib loads
+   during ordinary operation, not deep edge-case content -- building
+   only the declaration (the minimum to pass the immediate blocker)
+   would just relocate the real blocker to one of these two files
+   shortly after, not resolve the feature.
+
+Scoped as a FluffOS-dialect feature specifically, matching
+`etc/driver_ds3.cfg`'s own `dialect: fluffos`; real LDMud has an
+analogous but not necessarily identical `struct` construct, out of
+scope for this investigation and not read here.
+
+Not yet implemented; waiting on explicit go-ahead before writing code.
+
 **2026-09-04 (a further session, continuing further): T_UNDEFINED gap
 built exactly per this session's own prior scoping report below, and
 Dead Souls 3.8.2's boot re-attempted past the installer's `privs_file()`

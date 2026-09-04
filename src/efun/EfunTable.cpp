@@ -4246,18 +4246,26 @@ void registerCoreEfuns() {
     t.registerEfun("pointerp", pointerpImpl);
     t.registerEfun("arrayp", pointerpImpl);
 
-    // int classp(mixed) -- real efuns_main.c's f_classp(): true only for
-    // a T_CLASS value (real LPC's struct-like "class" literal, "(/ ...
-    // /)"). This driver has no class/struct type anywhere in its own
-    // Value variant (same gap the save_object Known Stubs note already
-    // documents), so nothing this driver can ever produce is a class --
-    // always false. Confirmed real, live-reachable: secure/std/
-    // client.c's own socket-argument dispatch calls it twice
-    // ("if(classp(arg)) sock = arg; if(!classp(arg)){...}"), both
-    // branches correctly falling to the "not a class" path here, which
-    // is the real answer for every value this driver can construct.
-    t.registerEfun("classp", [](VM&, std::vector<Value>&) -> Value {
-        return Value(static_cast<int64_t>(0));
+    // int classp(mixed) -- real efuns_main.c's f_classp(): "if (sp->type
+    // == T_CLASS) { ...; *sp = const1; } else { ...; *sp = const0; }" --
+    // true only for a real class instance (real LPC's "class <name> { }"
+    // struct-type declaration, ROADMAP.md row 3.10's class scoping
+    // report and its own follow-up implementation), never for a plain
+    // array or any other type, no per-class identity check. This
+    // driver's own analog of that same T_CLASS/T_ARRAY reuse is
+    // Value::isClassInstance (see its own comment) -- a class instance
+    // is still, underneath, a shared_ptr<Array> the same way real
+    // FluffOS's own T_CLASS svalue still stores a plain array_t*, so
+    // this checks both the alternative and the flag together, not the
+    // flag alone. Previously an always-false stub (this driver had no
+    // class representation at all yet). Confirmed real, live-reachable:
+    // secure/std/client.c's own socket-argument dispatch calls it twice
+    // ("if(classp(arg)) sock = arg; if(!classp(arg)){...}").
+    t.registerEfun("classp", [](VM&, std::vector<Value>& args) -> Value {
+        bool isClass = !args.empty() &&
+            std::holds_alternative<std::shared_ptr<Array>>(args[0].data) &&
+            args[0].isClassInstance;
+        return Value(static_cast<int64_t>(isClass ? 1 : 0));
     });
 
     // ---------------------------------------------------------------------

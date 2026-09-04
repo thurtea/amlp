@@ -2237,7 +2237,15 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 auto arr = std::make_shared<Array>();
                 arr->items.assign(localStack.end() - argc, localStack.end());
                 localStack.erase(localStack.end() - argc, localStack.end());
-                localStack.emplace_back(Value(arr));
+                // operand is unused by an ordinary array literal (always
+                // 0 there); CodeGen's own NewClassExpr codegen ("new(
+                // class Name ...)", ROADMAP.md row 3.10's class scoping
+                // report) is the one caller that sets it to 1, real
+                // FluffOS's own T_CLASS-vs-T_ARRAY distinction -- see
+                // Value.hpp's own isClassInstance comment.
+                Value result(arr);
+                result.isClassInstance = (instr.operand != 0);
+                localStack.emplace_back(std::move(result));
                 ++ip;
                 break;
             }

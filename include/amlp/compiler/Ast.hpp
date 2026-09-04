@@ -421,6 +421,68 @@ struct MappingLiteralExpr : AstNode {
 // time. indexFromEnd/rangeEndFromEnd record which bound(s), if any,
 // used this form; see VM.cpp's OpCode::Index/RangeIndex handling for
 // where the actual "length - N" conversion happens.
+// Real FluffOS's "class <name> { <member decls> }" struct-type member
+// access, "instance->member" (ROADMAP.md row 3.10's own class scoping
+// report: grammar.y's "expr4 L_ARROW identifier" with no trailing "(",
+// F_MEMBER/F_MEMBER_LVALUE, both resolved to a plain compile-time-known
+// array index against the target's declared class -- real member
+// resolution is 100% compile time, never at runtime). Placeholder value
+// for IndexExpr::index/IndexAssignStmt::index/IndexAssignExpr::index
+// specifically -- never emitted as an ordinary sub-expression via
+// emitExpr(); CodeGen recognizes this node type wherever it would
+// otherwise call emitExpr() on an index, and substitutes a compile-
+// time-resolved literal index push instead (see CodeGen::emitIndexValue()).
+// This reuses IndexExpr/IndexAssignStmt/IndexAssignExpr and the existing
+// Index/IndexAssign opcodes wholesale rather than adding a new AST
+// statement/expression kind or a new VM opcode for member access --
+// parsePostfix()'s own "->identifier" (no paren) branch builds exactly
+// the same IndexExpr shape "->identifier(" (call_other) already does,
+// just with this node as the index instead of a parsed expression, so
+// the pre-existing indexed-assignment-target reinterpretation in
+// parseStatement()/the assignment-expression path (both already keyed
+// on "is this operand an IndexExpr") pick up a member-access target for
+// free, with zero additional statement/expression-level parsing code.
+struct MemberNameMarker : AstNode {
+    std::string name;
+};
+
+// "class <name> { <member decls> }" -- the declaration itself (real
+// grammar.y's own "type_decl: type_modifier_list L_CLASS identifier '{'
+// member_list '}'", no trailing ";"). Member types are parsed and
+// discarded, matching this driver's existing convention for every other
+// declared type (int/string/mixed/... are already cosmetic at runtime
+// throughout this codebase -- see ObjectVarDecl::type's own comment);
+// only declared member order matters, the real class_def_t/
+// class_member_entry_t analog (see CodeGen.hpp's own classDefs_
+// comment). FluffOS-dialect-only: real LDMud has no equivalent concept
+// (confirmed against temp/ldmud/src/svalue.h in this row's own scoping
+// report), so Parser::parseProgram() only ever recognizes this shape
+// under LpcDialect::FluffOS -- under any other dialect "class" simply
+// stays an ordinary, unreserved identifier, matching the same double-
+// gating discipline this codebase already uses for "nil"/"atomic"
+// (DGD) and "array" (ARRAY_RESERVED_WORD).
+struct ClassDeclStmt : AstNode {
+    std::string name;
+    std::vector<std::string> memberNames;
+};
+
+// "new(class Name field: val, field: val, ...)" -- the construction
+// literal (real grammar.y's own "L_NEW '(' L_CLASS L_DEFINED_NAME
+// opt_class_init ')'", NOT a positional "(class name val, val, ...)"
+// literal -- real class_init is "identifier ':' expr0", named fields,
+// any subset, any order). fieldInits holds exactly what was written in
+// source order (possibly a subset of the class's real declared
+// members, possibly empty for "new(class Name)"); CodeGen::emitExpr()'s
+// own NewClassExpr case reorders these into the class's real declared-
+// member order and synthesizes a literal 0 for every omitted member,
+// mirroring real reorder_class_values() (compiler.c) exactly -- see
+// that function's own citation in CodeGen.cpp. FluffOS-dialect-only,
+// same reasoning as ClassDeclStmt above.
+struct NewClassExpr : AstNode {
+    std::string className;
+    std::vector<std::pair<std::string, AstPtr>> fieldInits;
+};
+
 struct IndexExpr : AstNode {
     AstPtr target;
     AstPtr index;
@@ -606,6 +668,16 @@ struct ForeachStmt : AstNode {
     bool declareValueVar = false;
     AstPtr collection;
     std::unique_ptr<Block> body;
+    // Real corpus: secure/daemon/inet.c's own "foreach(string svc, class
+    // service s in Services)" (ROADMAP.md row 3.10's class scoping
+    // report). Empty means "not declared with a class type" (the
+    // overwhelmingly common case, and the only shape before this row);
+    // a declared class name here lets CodeGen resolve a later
+    // "s->member" inside the loop body the same way any other class-
+    // typed local declaration does -- see Parser::parseForeachVar()'s
+    // own comment for why this previously had nowhere to go.
+    std::string varClassType;
+    std::string valueVarClassType;
 };
 
 struct Param {
@@ -734,6 +806,11 @@ struct Program : AstNode {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<ObjectVarDecl>> objectVars;
     std::vector<std::string> inherits;
+    // Real "class <name> { ... }" declarations at this file's own top
+    // level (ROADMAP.md row 3.10's class scoping report) -- see
+    // ClassDeclStmt's own comment. Empty under every dialect but
+    // FluffOS, and under FluffOS whenever this file declares none.
+    std::vector<std::unique_ptr<ClassDeclStmt>> classes;
 };
 
 } // namespace amlp

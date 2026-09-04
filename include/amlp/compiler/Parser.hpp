@@ -42,6 +42,10 @@ private:
     // lib/guard.c's "private static array PendingGuard"). Used wherever
     // a lookahead decides whether a declaration starts here at all.
     bool startsType() const;
+    // True when "class <identifier>" starts reading here as a *type*
+    // (not the "class <name> { ... }" declaration itself) -- see
+    // startsClassType()'s own comment in Parser.cpp.
+    bool startsClassType() const;
     struct TypeToken { std::string type; bool isArray; };
     // Consumes one type: startsType()'s bare "array" (synthesized as
     // {"mixed", true}), or an ordinary type keyword followed by
@@ -94,8 +98,19 @@ private:
     AstPtr parseContinueStatement();
     AstPtr parseForeachStatement();
     AstPtr parseSwitchStatement();
-    struct ForeachVarSpec { std::string name; bool isNewDecl; };
+    // classType is "" for every ordinary declared/pre-existing variable
+    // (the overwhelmingly common case); a "class:<Name>" TypeToken (see
+    // startsType()/parseTypeToken()'s own comment) sets it to "<Name>" --
+    // see ForeachStmt::varClassType/valueVarClassType's own comment for
+    // why this previously had nowhere to go.
+    struct ForeachVarSpec { std::string name; bool isNewDecl; std::string classType; };
     ForeachVarSpec parseForeachVar();
+    // "class <name> { <member decls> }" (ROADMAP.md row 3.10's class
+    // scoping report, see Ast.hpp's ClassDeclStmt comment). Called from
+    // parseProgram() once its own lookahead confirms this exact shape
+    // (modifiers already consumed, "class identifier {" all present) --
+    // this only parses from the "identifier" onward.
+    std::unique_ptr<ClassDeclStmt> parseClassDecl();
     std::unique_ptr<VarDeclStmt> parseSingleVarDecl(const std::string& typeText, bool isArray);
     AstPtr parseVarDeclStatement();
     AstPtr parseAssignStatement();

@@ -29664,6 +29664,211 @@ static void testNeverAssignedObjectVariableIsUndefinedpTrueUnderFluffosFalseUnde
     std::cout << "testNeverAssignedObjectVariableIsUndefinedpTrueUnderFluffosFalseUnderLdmud OK\n";
 }
 
+// ROADMAP.md row 3.10's real "class <name> { <member decls> }" struct-
+// type declaration, scoped in full then built exactly per this
+// session's own prior scoping report -- see Ast.hpp's ClassDeclStmt/
+// NewClassExpr/MemberNameMarker and Value.hpp's isClassInstance for the
+// full real-source citations, not repeated per test below.
+
+// Declaration, full-field-list construction, partial-field-list
+// construction (real reorder_class_values(), compiler.c:417-465: an
+// omitted field becomes a plain 0, not undefined), and member read, all
+// together -- matching player.h's own real "class death { int Date;
+// string Enemy; }" shape exactly.
+static void testClassDeclarationFullAndPartialConstructionAndMemberRead() {
+    // full/partial are declared with the real "class death" type, not
+    // "mixed" -- member resolution is 100% compile-time (see
+    // MemberNameMarker's own comment), so only a variable whose own
+    // declared static type is actually known to be this class can have
+    // "->member" resolved against it at all; see
+    // testMemberAccessOnAMixedTypedVariableThrowsRatherThanGuessing
+    // below for the "mixed"-declared case's own confirmed, deliberate
+    // clear-error behavior instead of a silent guess.
+    amlp::Value result = runProbeMulti(
+        "class death { int Date; string Enemy; }\n"
+        "mixed *probe() {\n"
+        "    class death full;\n"
+        "    class death partial;\n"
+        "    full = new(class death Date: 5, Enemy: \"orc\");\n"
+        "    partial = new(class death Enemy: \"goblin\");\n"
+        "    return ({ full->Date, full->Enemy, partial->Date, partial->Enemy });\n"
+        "}\n");
+    assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr != nullptr && arr->items.size() == 4);
+    assert(std::get<int64_t>(arr->items[0].data) == 5);
+    assert(std::get<std::string>(arr->items[1].data) == "orc");
+    assert(std::get<int64_t>(arr->items[2].data) == 0);       // omitted Date -> plain 0
+    assert(std::get<std::string>(arr->items[3].data) == "goblin");
+
+    std::cout << "testClassDeclarationFullAndPartialConstructionAndMemberRead OK\n";
+}
+
+// A "mixed"-declared variable holding a class instance cannot have its
+// members read through "->": real FluffOS's own fallback for this case
+// (lookup_any_class_member(), grammar.y:2803-2827) is a real, documented
+// ambiguity-prone shortcut -- it guesses a member index by name against
+// every declared class, which can silently misresolve when two classes
+// share a member name. No real corpus site was found needing it (this
+// session's own scoping report); this driver throws a clear compile
+// error instead of guessing, matching its own established convention
+// throughout ("throw rather than silently mishandle"). Caught live: an
+// earlier draft of testClassDeclarationFullAndPartialConstructionAndMemberRead
+// declared its own local "mixed", not "class death", and hit exactly
+// this throw uncaught before being fixed -- confirming this is real,
+// reachable behavior, not just a theoretical code path.
+static void testMemberAccessOnAMixedTypedVariableThrowsRatherThanGuessing() {
+    bool threw = false;
+    try {
+        runProbeMulti(
+            "class death { int Date; }\n"
+            "mixed *probe() {\n"
+            "    mixed inst;\n"
+            "    inst = new(class death Date: 5);\n"
+            "    return ({ inst->Date });\n"
+            "}\n");
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("cannot resolve \"->Date\"") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testMemberAccessOnAMixedTypedVariableThrowsRatherThanGuessing OK\n";
+}
+
+// The exact real secure/daemon/inet.c idiom (this session's own prior
+// scoping report, item 5: the corrected "member write is not
+// deferrable" finding): a class-typed local variable declaration, empty
+// construction ("new(class Name)", no field initializers), then member
+// *write* filling in fields one at a time, read back afterward.
+static void testClassTypedVariableEmptyConstructionThenMemberWrite() {
+    amlp::Value result = runProbeMulti(
+        "class service { int PortOffset; int SocketType; string SocketClass; }\n"
+        "mixed *probe() {\n"
+        "    class service s;\n"
+        "    s = new(class service);\n"
+        "    s->PortOffset = 5;\n"
+        "    s->SocketClass = \"tcp\";\n"
+        "    return ({ s->PortOffset, s->SocketClass, s->SocketType });\n"
+        "}\n");
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr != nullptr && arr->items.size() == 3);
+    assert(std::get<int64_t>(arr->items[0].data) == 5);
+    assert(std::get<std::string>(arr->items[1].data) == "tcp");
+    assert(std::get<int64_t>(arr->items[2].data) == 0); // never written, real empty-construct default
+
+    std::cout << "testClassTypedVariableEmptyConstructionThenMemberWrite OK\n";
+}
+
+// classp() (real efuns_main.c's f_classp(), previously an always-false
+// stub -- see EfunTable.cpp's own updated comment): true only for a
+// real class instance, false for a plain array of the same shape and
+// for an ordinary number, matching real "sp->type == T_CLASS" exactly
+// (this driver's own Value::isClassInstance).
+static void testClasspDistinguishesAClassInstanceFromAPlainArrayAndANumber() {
+    amlp::Value result = runProbeMulti(
+        "class death { int Date; }\n"
+        "mixed *probe() {\n"
+        "    mixed inst;\n"
+        "    mixed arr;\n"
+        "    inst = new(class death Date: 1);\n"
+        "    arr = ({ 1 });\n"
+        "    return ({ classp(inst), classp(arr), classp(5) });\n"
+        "}\n");
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr != nullptr && arr->items.size() == 3);
+    assert(std::get<int64_t>(arr->items[0].data) == 1);
+    assert(std::get<int64_t>(arr->items[1].data) == 0);
+    assert(std::get<int64_t>(arr->items[2].data) == 0);
+
+    std::cout << "testClasspDistinguishesAClassInstanceFromAPlainArrayAndANumber OK\n";
+}
+
+// The real daemon/soul.c shape: a class instance holding a mapping-
+// typed member whose values are themselves class instances, retrieved
+// via a member-then-index chain ("e->Rules[\"wave\"]") into a class-
+// typed local, then read through that local's own declared type --
+// confirming this driver's own deliberately-scoped "no a->b->c
+// chaining" limitation (CodeGen.hpp's own staticClassTypeOf() comment)
+// does not actually block this exact real pattern, since the real
+// corpus always assigns the chained lookup into a class-typed variable
+// first rather than chaining a second "->" directly off the index
+// result.
+static void testClassInstanceStoredAsMappingValueRetrievedThroughMemberThenIndexChain() {
+    amlp::Value result = runProbeMulti(
+        "class rule { string cmd; int cost; }\n"
+        "class emote { mapping Rules; }\n"
+        "mixed *probe() {\n"
+        "    class emote e;\n"
+        "    mapping rules;\n"
+        "    class rule r;\n"
+        "    rules = ([ \"wave\": new(class rule cmd: \"wave hand\", cost: 1) ]);\n"
+        "    e = new(class emote Rules: rules);\n"
+        "    r = e->Rules[\"wave\"];\n"
+        "    return ({ r->cmd, r->cost });\n"
+        "}\n");
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr != nullptr && arr->items.size() == 2);
+    assert(std::get<std::string>(arr->items[0].data) == "wave hand");
+    assert(std::get<int64_t>(arr->items[1].data) == 1);
+
+    std::cout << "testClassInstanceStoredAsMappingValueRetrievedThroughMemberThenIndexChain OK\n";
+}
+
+// The real secure/daemon/inet.c shape: "foreach(string svc, class
+// service s in Services)" -- a class-typed foreach value variable,
+// member-read inside the loop body.
+static void testClassTypedForeachValueVariableMemberReadInsideLoopBody() {
+    // The class declaration and probe() must be compiled together (one
+    // program, like every other test above) so probe()'s own "class
+    // service s" reference resolves against a real, populated
+    // classDefs_ entry -- runProbeMulti(), not runProbe() (which only
+    // ever synthesizes a bare "int probe() { ... }" alone).
+    amlp::Value result = runProbeMulti(
+        "class service { int PortOffset; }\n"
+        "int probe() {\n"
+        "    mapping services;\n"
+        "    int total;\n"
+        "    services = ([ \"ftp\": new(class service PortOffset: 21),\n"
+        "                   \"http\": new(class service PortOffset: 80) ]);\n"
+        "    total = 0;\n"
+        "    foreach(string name, class service s in services) {\n"
+        "        total = total + s->PortOffset;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 101);
+
+    std::cout << "testClassTypedForeachValueVariableMemberReadInsideLoopBody OK\n";
+}
+
+// FluffOS-dialect-only, confirmed a clean parse error under LDMud, not
+// a silent misbehavior or a crash (this session's own scoping report,
+// item 6): under LpcDialect::LdMud, "class" is never specially
+// recognized at all (every check gates on dialect_ == LpcDialect::
+// FluffOS), so "class death { int Date; }" parses exactly as it would
+// have before this row ever existed -- "class" consumed as an ordinary
+// declaration's own name (parseDeclPrefix()'s "type omitted, defaults
+// to mixed" branch), then failing with the same real "expected \";\""
+// error the original, pre-this-row Dead Souls boot blocker itself
+// produced (see this row's own scoping report). loadObject() catches
+// the compile error internally (ObjectManager.cpp's own real "[object]
+// compile error in ..." logging) and returns nullptr rather than
+// throwing out of this test or crashing.
+static void testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisbehavior() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/tclass_ldmud.c",
+        "void create() {}\n"
+        "class death { int Date; }\n"
+        "int probe() { return 1; }\n");
+    auto ob = harness.objects.loadObject("/tclass_ldmud");
+    assert(ob == nullptr);
+
+    std::cout << "testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisbehavior OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -30572,6 +30777,13 @@ int main() {
     testExplicitlyAssignedZeroLocalIsUndefinedpFalseUnderFluffosAndLdmud();
     testUndefinedLocalArithmeticComparisonAndTruthinessAllMatchPlainZeroUnderFluffos();
     testNeverAssignedObjectVariableIsUndefinedpTrueUnderFluffosFalseUnderLdmud();
+    testClassDeclarationFullAndPartialConstructionAndMemberRead();
+    testMemberAccessOnAMixedTypedVariableThrowsRatherThanGuessing();
+    testClassTypedVariableEmptyConstructionThenMemberWrite();
+    testClasspDistinguishesAClassInstanceFromAPlainArrayAndANumber();
+    testClassInstanceStoredAsMappingValueRetrievedThroughMemberThenIndexChain();
+    testClassTypedForeachValueVariableMemberReadInsideLoopBody();
+    testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisbehavior();
     std::cout << "all tests passed\n";
     return 0;
 }

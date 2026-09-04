@@ -31,7 +31,50 @@ CodeGen::ResolvedVar CodeGen::resolveVariable(const std::string& name) const {
     throw LpcRuntimeError("codegen: undeclared variable \"" + name + "\"");
 }
 
-int CodeGen::declareLocal(const std::string& name) {
+int CodeGen::resolveClassMemberIndex(const std::string& className,
+                                      const std::string& memberName) const {
+    auto classIt = classDefs_.find(className);
+    if (classIt == classDefs_.end()) {
+        throw LpcRuntimeError("codegen: undefined class \"" + className + "\"");
+    }
+    const auto& members = classIt->second;
+    for (size_t i = 0; i < members.size(); ++i) {
+        if (members[i] == memberName) {
+            return static_cast<int>(i);
+        }
+    }
+    throw LpcRuntimeError("codegen: class \"" + className + "\" has no member \"" +
+                           memberName + "\"");
+}
+
+std::string CodeGen::staticClassTypeOf(const AstNode& expr) const {
+    auto* ref = dynamic_cast<const VarRefExpr*>(&expr);
+    if (!ref) return "";
+    auto localIt = localClassTypes_.find(ref->name);
+    if (localIt != localClassTypes_.end()) return localIt->second;
+    auto objIt = objectVarClassTypes_.find(ref->name);
+    if (objIt != objectVarClassTypes_.end()) return objIt->second;
+    return "";
+}
+
+void CodeGen::emitIndexValue(const AstNode& targetExpr, const AstNode& indexNode) {
+    auto* marker = dynamic_cast<const MemberNameMarker*>(&indexNode);
+    if (!marker) {
+        emitExpr(indexNode);
+        return;
+    }
+    std::string className = staticClassTypeOf(targetExpr);
+    if (className.empty()) {
+        throw LpcRuntimeError(
+            "codegen: cannot resolve \"->" + marker->name +
+            "\": the target's static class type is not known here "
+            "(only a variable declared with a real \"class <Name>\" type resolves)");
+    }
+    int memberIndex = resolveClassMemberIndex(className, marker->name);
+    out_->code.push_back(Instruction{OpCode::PushInt, memberIndex, 0});
+}
+
+int CodeGen::declareLocal(const std::string& name, const std::string& typeText) {
     // An empty name is real LPC's own unnamed function parameter (e.g.
     // "string crash(string, object, object)" -- confirmed against
     // grammar.y's own "new_arg: arg_type optional_star { ...
@@ -58,6 +101,13 @@ int CodeGen::declareLocal(const std::string& name) {
     }
     int slot = nextLocalSlot_++;
     locals_[name] = slot;
+    // Real class-typed declaration (ROADMAP.md row 3.10's class scoping
+    // report, see CodeGen.hpp's own localClassTypes_ comment) -- every
+    // other typeText value (the overwhelmingly common case) is a no-op
+    // here.
+    if (typeText.rfind("class:", 0) == 0) {
+        localClassTypes_[name] = typeText.substr(6);
+    }
     // Record this name against the innermost open block scope (if any --
     // function parameters and locals declared directly in a function's
     // own top-level body, before emitBlock() has pushed anything, simply
@@ -410,6 +460,61 @@ void CodeGen::emitExpr(const AstNode& expr) {
             Instruction{OpCode::MakeArray, 0, static_cast<int32_t>(arrLit->elements.size())});
         return;
     }
+    if (auto* newClass = dynamic_cast<const NewClassExpr*>(&expr)) {
+        // "new(class Name field: val, ...)" (ROADMAP.md row 3.10's class
+        // scoping report) -- reorders the (possibly partial, possibly
+        // empty, any order) named field inits into the class's own real
+        // declared-member order, synthesizing a plain PushInt 0 for
+        // every omitted member, exactly mirroring real
+        // reorder_class_values() (compiler.c:417-465, cited in full in
+        // this row's own scoping report): every omitted field becomes a
+        // literal 0 there too, never undefined/monostate. Then reuses
+        // the identical OpCode::MakeArray an ordinary array literal
+        // already uses -- operand 1 (unused by an ordinary array
+        // literal, always 0 there) is the one new bit: it tells
+        // OpCode::MakeArray's own VM.cpp handler to set the resulting
+        // Value's isClassInstance flag, the real T_CLASS-vs-T_ARRAY
+        // distinction (see Value.hpp's own isClassInstance comment) --
+        // no new VM opcode, matching this row's own scoping report
+        // exactly.
+        auto classIt = classDefs_.find(newClass->className);
+        if (classIt == classDefs_.end()) {
+            throw LpcRuntimeError("codegen: undefined class \"" + newClass->className + "\"");
+        }
+        const auto& members = classIt->second;
+        for (const auto& memberName : members) {
+            const AstNode* fieldValue = nullptr;
+            for (const auto& [fname, fexpr] : newClass->fieldInits) {
+                if (fname == memberName) {
+                    fieldValue = fexpr.get();
+                    break;
+                }
+            }
+            if (fieldValue) {
+                emitExpr(*fieldValue);
+            } else {
+                out_->code.push_back(Instruction{OpCode::PushInt, 0, 0});
+            }
+        }
+        // Every fieldInits entry must name a real declared member --
+        // real reorder_class_values() (compiler.c:429-446) reports
+        // "Class '...' has no member '...'" for exactly this case, a
+        // compile error, not a silently dropped initializer.
+        for (const auto& [fname, fexpr] : newClass->fieldInits) {
+            (void)fexpr;
+            bool found = false;
+            for (const auto& memberName : members) {
+                if (memberName == fname) { found = true; break; }
+            }
+            if (!found) {
+                throw LpcRuntimeError("codegen: class \"" + newClass->className +
+                                       "\" has no member \"" + fname + "\"");
+            }
+        }
+        out_->code.push_back(
+            Instruction{OpCode::MakeArray, 1, static_cast<int32_t>(members.size())});
+        return;
+    }
     if (auto* mapLit = dynamic_cast<const MappingLiteralExpr*>(&expr)) {
         int width = 1;
         if (!mapLit->entries.empty()) {
@@ -440,7 +545,11 @@ void CodeGen::emitExpr(const AstNode& expr) {
     }
     if (auto* idx = dynamic_cast<const IndexExpr*>(&expr)) {
         emitExpr(*idx->target);
-        emitExpr(*idx->index);
+        // emitIndexValue() covers both the ordinary case (an unchanged
+        // emitExpr(*idx->index)) and real "instance->member" access
+        // (MemberNameMarker, ROADMAP.md row 3.10's class scoping
+        // report) -- see its own comment.
+        emitIndexValue(*idx->target, *idx->index);
         // Index/RangeIndex never take a real argument count (their
         // operands are already fully described by the values pushed
         // above), so argCount is repurposed here as a small "from the
@@ -719,7 +828,7 @@ void CodeGen::emitReturnStmt(const ReturnStmt& stmt) {
 }
 
 void CodeGen::emitVarDeclStmt(const VarDeclStmt& stmt) {
-    int slot = declareLocal(stmt.name);
+    int slot = declareLocal(stmt.name, stmt.type);
     if (stmt.initializer) {
         emitExpr(*stmt.initializer);
         out_->code.push_back(Instruction{OpCode::StoreLocal, slot, 0});
@@ -748,10 +857,10 @@ void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
     int32_t flags = stmt.mapColumn ? 0x4 : 0;
     if (stmt.isCompound) {
         emitExpr(*stmt.target);
-        emitExpr(*stmt.index);
+        emitIndexValue(*stmt.target, *stmt.index);
         if (stmt.mapColumn) emitExpr(*stmt.mapColumn);
         emitExpr(*stmt.target);
-        emitExpr(*stmt.index);
+        emitIndexValue(*stmt.target, *stmt.index);
         if (stmt.mapColumn) emitExpr(*stmt.mapColumn);
         out_->code.push_back(Instruction{OpCode::Index, 0, flags});
         emitExpr(*stmt.value);
@@ -781,7 +890,7 @@ void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
     }
 
     emitExpr(*stmt.target);
-    emitExpr(*stmt.index);
+    emitIndexValue(*stmt.target, *stmt.index);
     if (stmt.mapColumn) emitExpr(*stmt.mapColumn);
     emitExpr(*stmt.value);
     out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});
@@ -805,7 +914,7 @@ void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
 
     if (assign.isCompound) {
         emitExpr(*assign.target);
-        emitExpr(*assign.index);
+        emitIndexValue(*assign.target, *assign.index);
         int32_t flags = assign.mapColumn ? 0x4 : 0;
         if (assign.mapColumn) emitExpr(*assign.mapColumn);
         out_->code.push_back(Instruction{OpCode::Index, 0, flags});
@@ -837,7 +946,7 @@ void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
     out_->code.push_back(Instruction{OpCode::StoreLocal, tempSlot, 0});
 
     emitExpr(*assign.target);
-    emitExpr(*assign.index);
+    emitIndexValue(*assign.target, *assign.index);
     int32_t flags = assign.mapColumn ? 0x4 : 0;
     if (assign.mapColumn) emitExpr(*assign.mapColumn);
     out_->code.push_back(Instruction{OpCode::PushLocal, tempSlot, 0});
@@ -990,6 +1099,11 @@ void CodeGen::emitForStmt(const ForStmt& stmt) {
 
     for (const auto& name : localScopeStack_.back()) {
         locals_.erase(name);
+        // See CodeGen.hpp's localClassTypes_ comment -- erased alongside
+        // locals_ so a class-typed local going out of scope cannot
+        // leave a stale entry a later, unrelated same-named local (or
+        // one in a sibling scope) would wrongly inherit.
+        localClassTypes_.erase(name);
     }
     localScopeStack_.pop_back();
 }
@@ -1050,7 +1164,9 @@ void CodeGen::emitForeachStmt(const ForeachStmt& stmt) {
     size_t jumpIfFalseIdx = emitJumpPlaceholder(OpCode::JumpIfFalse);
 
     ResolvedVar keyVar = stmt.declareVar
-        ? ResolvedVar{VarKind::Local, declareLocal(stmt.varName)}
+        ? ResolvedVar{VarKind::Local,
+                       declareLocal(stmt.varName,
+                                    stmt.varClassType.empty() ? "" : "class:" + stmt.varClassType)}
         : resolveVariable(stmt.varName);
     OpCode keyStoreOp = (keyVar.kind == VarKind::Local) ? OpCode::StoreLocal : OpCode::StoreObjectVar;
     out_->code.push_back(Instruction{OpCode::PushLocal, iterSlot, 0});
@@ -1066,7 +1182,11 @@ void CodeGen::emitForeachStmt(const ForeachStmt& stmt) {
         // over a bare array is not supported (every real use of the
         // two-variable form in this mudlib is over a mapping).
         ResolvedVar valVar = stmt.declareValueVar
-            ? ResolvedVar{VarKind::Local, declareLocal(stmt.valueVarName)}
+            ? ResolvedVar{VarKind::Local,
+                           declareLocal(stmt.valueVarName,
+                                        stmt.valueVarClassType.empty()
+                                            ? ""
+                                            : "class:" + stmt.valueVarClassType)}
             : resolveVariable(stmt.valueVarName);
         OpCode valStoreOp = (valVar.kind == VarKind::Local) ? OpCode::StoreLocal : OpCode::StoreObjectVar;
         OpCode keyPushOp = (keyVar.kind == VarKind::Local) ? OpCode::PushLocal : OpCode::PushObjectVar;
@@ -1095,6 +1215,11 @@ void CodeGen::emitForeachStmt(const ForeachStmt& stmt) {
 
     for (const auto& name : localScopeStack_.back()) {
         locals_.erase(name);
+        // See CodeGen.hpp's localClassTypes_ comment -- erased alongside
+        // locals_ so a class-typed local going out of scope cannot
+        // leave a stale entry a later, unrelated same-named local (or
+        // one in a sibling scope) would wrongly inherit.
+        localClassTypes_.erase(name);
     }
     localScopeStack_.pop_back();
 }
@@ -1312,6 +1437,11 @@ void CodeGen::emitBlock(const Block& block) {
     }
     for (const auto& name : localScopeStack_.back()) {
         locals_.erase(name);
+        // See CodeGen.hpp's localClassTypes_ comment -- erased alongside
+        // locals_ so a class-typed local going out of scope cannot
+        // leave a stale entry a later, unrelated same-named local (or
+        // one in a sibling scope) would wrongly inherit.
+        localClassTypes_.erase(name);
     }
     localScopeStack_.pop_back();
 }
@@ -1328,6 +1458,20 @@ CompiledProgram CodeGen::generate(const Program& program,
     // function's, running via the parent's own bytecode against this same
     // object's variables() vector -- agree on what each slot means.
     objectVars_.clear();
+    // Real class_def_t table (ROADMAP.md row 3.10's class scoping
+    // report, see CodeGen.hpp's own classDefs_ comment) -- built before
+    // any function body compiles, same timing as objectVars_ itself, so
+    // declaration order relative to first use within this file does not
+    // matter (this driver already fully separates parsing from codegen,
+    // the same deliberate simplification the object-variable loop just
+    // below already documents). Cleared here too, matching objectVars_,
+    // in case this CodeGen instance is reused across more than one
+    // generate() call.
+    classDefs_.clear();
+    objectVarClassTypes_.clear();
+    for (const auto& classDecl : program.classes) {
+        classDefs_[classDecl->name] = classDecl->memberNames;
+    }
     result.objectVarNames = inheritedObjectVarNames;
     for (size_t i = 0; i < inheritedObjectVarNames.size(); ++i) {
         objectVars_[inheritedObjectVarNames[i]] = static_cast<int>(i);
@@ -1411,6 +1555,10 @@ CompiledProgram CodeGen::generate(const Program& program,
         // own "static private int __Locked, __LastAged;" and
         // std/user.c's separate, unrelated "static int __LastAged;".
         objectVars_[varDecl->name] = slot;
+        // See CodeGen.hpp's objectVarClassTypes_ comment.
+        if (varDecl->type.rfind("class:", 0) == 0) {
+            objectVarClassTypes_[varDecl->name] = varDecl->type.substr(6);
+        }
         result.objectVarNames.push_back(
             varDecl->isPrivate ? "$private#" + std::to_string(slot) : varDecl->name);
         if (varDecl->initializer) {
@@ -1475,7 +1623,7 @@ CompiledProgram CodeGen::generate(const Program& program,
         switchCounter_ = 0;
         indexAssignCounter_ = 0;
         for (const auto& param : fn->params) {
-            declareLocal(param.name);
+            declareLocal(param.name, param.type);
         }
 
         FunctionEntry entry;
@@ -1610,7 +1758,7 @@ void CodeGen::emitPendingAnonFuncs() {
         switchCounter_ = 0;
         indexAssignCounter_ = 0;
         for (const auto& param : pending.expr->params) {
-            declareLocal(param.name);
+            declareLocal(param.name, param.type);
         }
 
         FunctionEntry entry;

@@ -96,6 +96,36 @@ struct Value {
     // no dialect awareness.
     bool isUndefined = false;
 
+    // Real FluffOS's T_CLASS (ROADMAP.md row 3.10's class scoping
+    // report, lpc.h: "#define T_CLASS 0x200") -- a real, distinct
+    // top-level svalue type tag in real FluffOS, but its storage is a
+    // plain, reused array_t* (class.c's own allocate_class(),
+    // interpret.c's own push_class()/push_refed_class(): "sp->type =
+    // T_CLASS; sp->u.arr = v;", the identical union field an ordinary
+    // T_ARRAY svalue uses). This field mirrors that reuse the same way
+    // isUndefined above mirrors real T_UNDEFINED: a plain bool sibling
+    // to `data`, not a new ValueVariant alternative, so every ordinary
+    // array-oriented efun/opcode (sizeof(), foreach, "+"/"-"
+    // concatenation, save_object's own lack of a T_CLASS case, ...)
+    // keeps reading `data` exactly as before and needs no changes --
+    // matching real FluffOS's own behavior, where an ordinary array
+    // opcode does not special-case T_CLASS either. Only ever true when
+    // `data` holds a shared_ptr<Array> constructed by a real "new(class
+    // Name ...)" construction (CodeGen's own NewClassExpr codegen,
+    // OpCode::MakeArray's operand-1 case); meaningless (and never set)
+    // on any other alternative or on an ordinary array literal. Exists
+    // because classp() (real func_spec.c's own "int classp(mixed);",
+    // live in this exact corpus: secure/sefun/identify.c,
+    // secure/lib/net/client.c, daemon/intermud.c) needs a real way to
+    // tell a class instance apart from a plain array -- real FluffOS
+    // itself only needs this same single bool (f_classp(): "sp->type ==
+    // T_CLASS", efuns_main.c, no per-class identity check at all), not
+    // a per-class name; real member access itself never reads this
+    // field either, since member resolution is 100% compile-time (see
+    // CodeGen's own resolveClassMemberIndex()/staticClassTypeOf()).
+    // FluffOS-dialect-only, same reasoning as isUndefined above.
+    bool isClassInstance = false;
+
     Value() = default;
     template <typename T>
     Value(T v) : data(std::move(v)) {}

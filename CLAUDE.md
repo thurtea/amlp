@@ -54,3 +54,12 @@ must continue unchanged.
   -- never re-downloaded or re-derived, so its own internal `README.md`/
   `LLM_BREADCRUMB.md` still describe themselves in terms of even earlier
   locations and are stale prose, not a provenance concern.
+- `temp/ds3.8.2_extracted/ds3.8.2/fluffos-2.23-ds03/` is a second real,
+  on-disk, gitignored FluffOS source tree, narrower in scope than the
+  canonical `temp/reference/fluffos-2.9-ds2.08/` above: it is the exact
+  driver version Dead Souls 3.8.2 itself ships with, bundled inside
+  that mudlib's own extracted archive rather than placed under `temp/
+  reference/`. Citations against it are tied specifically to Dead Souls
+  3.8.2's own bundled driver version, not general cross-repo citations
+  -- a missing-file check against only the canonical path above must
+  not conclude this tree does not exist on disk; check this path too.

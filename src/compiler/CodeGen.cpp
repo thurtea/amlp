@@ -51,6 +51,31 @@ std::string CodeGen::staticClassTypeOf(const AstNode& expr) const {
     if (auto* cast = dynamic_cast<const TypeCastExpr*>(&expr)) {
         return cast->className;
     }
+    // "class Name *arr" declares an array whose elements are statically
+    // class Name, same as real grammar.y's own arr[i] type computation
+    // ($$->type = $1->type & ~TYPE_MOD_ARRAY, grammar.y:2901/2956):
+    // indexing only strips the array bit, the class id rides along
+    // unchanged. This driver's own declareLocal()/objectVarClassTypes_
+    // already store one class name per variable regardless of the
+    // array marker (Parser.cpp's TypeToken discards it the same way),
+    // so an ordinary single-element index (Protection[i]) resolves to
+    // the same class name as the array variable itself. Excluded: a
+    // range slice (arr[a..b]) stays an array, not an element, so it is
+    // left unresolved rather than guessed at; and an index whose own
+    // index is a MemberNameMarker is a chained "->member" result
+    // (x->a->b), whose static type this driver does not track, so that
+    // also stays unresolved rather than silently wrong. Real corpus:
+    // Dead Souls 3.8.2 lib/lib/body.c:317's "Protection[i]->time"
+    // (Protection declared "private static class MagicProtection
+    // *Protection", body.c:48), no cast, the case the class-cast slice
+    // (STATUS.md 2026-09-04) explicitly left out for lack of a real
+    // corpus site until this one turned up.
+    if (auto* idx = dynamic_cast<const IndexExpr*>(&expr)) {
+        if (idx->rangeEnd || dynamic_cast<const MemberNameMarker*>(idx->index.get())) {
+            return "";
+        }
+        return staticClassTypeOf(*idx->target);
+    }
     auto* ref = dynamic_cast<const VarRefExpr*>(&expr);
     if (!ref) return "";
     auto localIt = localClassTypes_.find(ref->name);
@@ -325,6 +350,22 @@ void CodeGen::emitIncDecExpr(const IncDecExpr& incDec) {
         // indexKey already are -- see emitIndexAssignStmt()'s own comment
         // on why that is harmless for every real target/index/column this
         // mudlib's own call sites actually use.
+        //
+        // indexKey goes through emitIndexValue(), not a bare emitExpr(),
+        // for the same reason emitExpr()'s own IndexExpr case does
+        // (above): "--Protection[i]->time" (Dead Souls 3.8.2
+        // lib/lib/body.c:317) parses indexKey as a MemberNameMarker, and
+        // only emitIndexValue() resolves that against indexTarget's
+        // static class type into the member's PushInt index. Before this
+        // fix this branch always called emitExpr(*incDec.indexKey)
+        // directly, so a plain "arr[i]++" worked but "instance[i]->
+        // field++" fell through to emitExpr()'s generic "unsupported
+        // expression kind" throw on the bare MemberNameMarker -- a
+        // separate gap from staticClassTypeOf() not walking IndexExpr
+        // (this row's own named blocker): that gap is about resolving
+        // *what class* an indexed element is, this one is about a
+        // second, independent code path that never consulted the
+        // resolution at all.
         std::string oldName = "$idxassign#" + std::to_string(indexAssignCounter_++);
         int oldSlot = declareLocal(oldName);
         std::string newName = "$idxassign#" + std::to_string(indexAssignCounter_++);
@@ -332,7 +373,7 @@ void CodeGen::emitIncDecExpr(const IncDecExpr& incDec) {
         int32_t flags = incDec.mapColumn ? 0x4 : 0;
 
         emitExpr(*incDec.indexTarget);
-        emitExpr(*incDec.indexKey);
+        emitIndexValue(*incDec.indexTarget, *incDec.indexKey);
         if (incDec.mapColumn) emitExpr(*incDec.mapColumn);
         out_->code.push_back(Instruction{OpCode::Index, 0, flags});
         out_->code.push_back(Instruction{OpCode::StoreLocal, oldSlot, 0});
@@ -343,7 +384,7 @@ void CodeGen::emitIncDecExpr(const IncDecExpr& incDec) {
         out_->code.push_back(Instruction{OpCode::StoreLocal, newSlot, 0});
 
         emitExpr(*incDec.indexTarget);
-        emitExpr(*incDec.indexKey);
+        emitIndexValue(*incDec.indexTarget, *incDec.indexKey);
         if (incDec.mapColumn) emitExpr(*incDec.mapColumn);
         out_->code.push_back(Instruction{OpCode::PushLocal, newSlot, 0});
         out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});

@@ -29954,6 +29954,70 @@ static void testClassStarCastIsARuntimeNoOpLikeStringStarCast() {
     std::cout << "testClassStarCastIsARuntimeNoOpLikeStringStarCast OK\n";
 }
 
+// grammar.y:2901/2956 arr[i] type computation ($1->type & ~TYPE_MOD_ARRAY,
+// class id rides along): a "class Name *" array element is statically
+// class Name with no cast needed. Exact Dead Souls 3.8.2 body.c:317
+// shape ("Protection[i]->time", Protection declared "private static
+// class MagicProtection *Protection", body.c:48), the blocker named in
+// STATUS.md 2026-09-04 after the class-cast slice explicitly left this
+// case (no cast, plain indexed array element) out for lack of a real
+// corpus site.
+static void testIndexedClassArrayElementMemberReadWithNoCast() {
+    amlp::Value result = runProbeMulti(
+        "class protection { int time; int absorb; }\n"
+        "int probe() {\n"
+        "    class protection *Protection;\n"
+        "    Protection = ({ new(class protection time: 9, absorb: 2) });\n"
+        "    return Protection[0]->time;\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 9);
+
+    std::cout << "testIndexedClassArrayElementMemberReadWithNoCast OK\n";
+}
+
+// Same shape, write side: body.c:1839's real RemoveMagicProtection()
+// pattern also mutates a field through the indexed element
+// ("Protection[i]->absorb -= damage", body.c:721) rather than only
+// reading one.
+static void testIndexedClassArrayElementMemberWriteWithNoCast() {
+    amlp::Value result = runProbeMulti(
+        "class protection { int time; }\n"
+        "int probe() {\n"
+        "    class protection *Protection;\n"
+        "    Protection = ({ new(class protection time: 9) });\n"
+        "    Protection[0]->time = 3;\n"
+        "    return Protection[0]->time;\n"
+        "}\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 3);
+
+    std::cout << "testIndexedClassArrayElementMemberWriteWithNoCast OK\n";
+}
+
+// A plain (non-class) array's indexed element still has no static class
+// type, so "->member" on it must still throw exactly as before this
+// row -- staticClassTypeOf()'s new IndexExpr walk only ever recurses
+// into a target that itself resolves to a real class name.
+static void testIndexedPlainArrayElementMemberAccessStillThrows() {
+    bool threw = false;
+    try {
+        runProbeMulti(
+            "mixed *probe() {\n"
+            "    mixed *plain;\n"
+            "    plain = ({ 1, 2, 3 });\n"
+            "    return ({ plain[0]->time });\n"
+            "}\n");
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("cannot resolve \"->time\"") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testIndexedPlainArrayElementMemberAccessStillThrows OK\n";
+}
+
 // grammar.y:2450 L_RETURN comma_expr, race.c:206
 // "return (Race = extra), race;" -- last expr0 is the returned value.
 static void testReturnCommaExprYieldsRightmostValueAfterAssignmentSideEffect() {
@@ -30914,6 +30978,9 @@ int main() {
     testClassDeclarationUnderLdmudFailsWithACleanParseErrorNotSilentMisbehavior();
     testClassCastOnIndexedArrayElementThenMemberRead();
     testClassStarCastIsARuntimeNoOpLikeStringStarCast();
+    testIndexedClassArrayElementMemberReadWithNoCast();
+    testIndexedClassArrayElementMemberWriteWithNoCast();
+    testIndexedPlainArrayElementMemberAccessStillThrows();
     testReturnCommaExprYieldsRightmostValueAfterAssignmentSideEffect();
     testCallArgsStaySeparateWhileParenthesizedCommaExprIsOneArg();
     std::cout << "all tests passed\n";

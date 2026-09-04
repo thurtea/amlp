@@ -1,5 +1,120 @@
 # STATUS
 
+**2026-09-04 (a further session, continuing further yet again): `staticClassTypeOf()`
+walks an `IndexExpr`, the named leftover on Dead Souls 3.8.2's
+`lib/lib/body.c:317` `Protection[i]->time`.** 908 tests total (905 plus
+3), full suite green (direct `build/test/amlp_tests` and `ctest` both 0
+failures).
+
+1. **Real semantics confirmed against grammar first, not assumed.**
+   `expr4 '[' comma_expr ']'` (real array/string index, `grammar.y:2913-
+   2956`) computes `$$->type = $1->type & ~TYPE_MOD_ARRAY;` in the
+   `default:` case whenever `$1->type & TYPE_MOD_ARRAY` -- the array bit
+   is stripped, every other bit (including `TYPE_MOD_CLASS` and the
+   packed class id, `grammar.y:648`'s own `$2->dn.class_num |
+   TYPE_MOD_CLASS`) rides through unchanged. So `Protection[i]` genuinely
+   has real static type "class MagicProtection", the identical type a
+   plain `class MagicProtection x` variable has, resolved the same
+   generic way any other array's element type is (no class-specific
+   special case in real grammar at all). The later `expr4 L_ARROW
+   identifier` production's `CLASS_IDX($1->type)` then resolves `->time`
+   off that stripped type exactly as it would off a scalar. Confirmed
+   this is a real static-type fact, not something resolved differently
+   for arrays vs. scalars.
+
+2. **This driver's own gap, confirmed narrow.** `CodeGen::
+   staticClassTypeOf()` only ever walked a bare `VarRefExpr` (a
+   variable's own declared class) or a `TypeCastExpr` (an explicit
+   `(class Name)` cast) -- never an `IndexExpr`. STATUS.md's own prior
+   2026-09-04 entry (the `(class Name)` cast slice) explicitly scoped
+   this out at the time: "Not in this slice: walking an `IndexExpr` of a
+   `class Name *` variable so `Marriages[0]->Spouse` would work *without*
+   a cast. No real corpus site does that; they all write the cast." That
+   premise is now overturned by `body.c:317` itself, a real corpus site
+   with no cast. This driver's own `objectVarClassTypes_`/
+   `localClassTypes_` symbol tables already store one class name per
+   variable regardless of the array marker (`Parser.cpp`'s own
+   `TypeToken` drops the array-ness flag the same way, `CodeGen.cpp:1575`
+   stores the same string for both a scalar and an array declaration of
+   the same class), so this was a real, narrow gap in the AST walk
+   itself, not a wider representation problem -- exactly the scope
+   boundary check called for before touching anything.
+
+3. **Fix.** `staticClassTypeOf()` now recurses into `IndexExpr::target`
+   when the index is an ordinary single-element index (not a range
+   slice, which stays an array rather than an element; not a
+   `MemberNameMarker`, which is a chained `->member` result whose own
+   type this driver does not track, so it stays unresolved rather than
+   silently guessed). No VM/opcode change: `emitIndexValue()` already
+   did the real work (resolving a `MemberNameMarker` against a static
+   class name into the member's `PushInt` index) for a bare `class Name`
+   variable; this only widens what `staticClassTypeOf()` will accept as
+   the target expression feeding it.
+
+4. **A second, independent gap found live at the same real line, fixed
+   the same session.** Re-attempting the boot after (3) still failed at
+   the same statement with a generic `codegen: unsupported expression
+   kind` (no file/line, this driver's AST carries none). Bisected by
+   compiling `body.c` standalone against a scratch mudlib root
+   (symlinked to the real `temp/ds3.8.2_extracted/ds3.8.2/lib` tree,
+   `secure`/`include` shared, `lib/body.c` swapped for a truncated copy)
+   through a throwaway `compile_one` CMake target linked straight against
+   this driver's own compiler/object/vm libraries, no full-mudlib-boot
+   restart needed per attempt -- narrowed to `heart_beat()`
+   (`body.c:311-327`)'s own `(--Protection[i]->time < 1)`: a prefix
+   decrement whose *target* is the same member-access-via-index shape.
+   Root cause: `emitIncDecExpr()`'s indexed-target branch called
+   `emitExpr(*incDec.indexKey)` directly, twice, never through
+   `emitIndexValue()` -- the one remaining member-access-via-index
+   consumer never wired to it at all, unlike `emitExpr()`'s own
+   `IndexExpr` case and every `IndexAssignExpr`/`IndexAssignStmt` site.
+   Fixed by routing both re-evaluations through `emitIndexValue()`
+   instead, matching the exact call shape `emitExpr()`'s own `IndexExpr`
+   case already uses. This is not a static-type-resolution issue (item 3
+   above already resolves what class `Protection[i]` is); it is a
+   second, separate code path that never consulted that resolution.
+   Named and fixed in the same turn rather than left half-done, since it
+   is equally narrow (a two-line swap reusing the existing shared
+   helper) and blocks the identical real statement item 3 was built for.
+   The scratch `compile_one` CMake target and its scratch mudlib root
+   were both removed again before this session's work was staged;
+   `CMakeLists.txt` is unchanged from HEAD.
+
+5. **Tests.** The exact `body.c:317` shape (indexed class-array element,
+   member read, no cast); the same shape as a member *write*
+   (`body.c:721`'s own `Protection[i]->absorb -= damage` pattern, a
+   plain indexed member assignment); and confirmation that a plain
+   (non-class) array's indexed element still throws the same
+   `cannot resolve "->..."` error as before this row, unaffected by the
+   new `IndexExpr` walk. The `--Protection[i]->time` shape itself is
+   exercised live by the real `body.c:317` boot re-attempt below rather
+   than a separate synthetic regression test, since it is exactly the
+   real corpus statement in question.
+
+6. **Dead Souls 3.8.2 boot re-attempted, live TCP, same method.** Both
+   fixes together: `body.c` now compiles completely (confirmed directly
+   too, via the same standalone `compile_one` harness item 4 used to
+   bisect). Boot progresses through `body.c`, `race.c`, `combat.c`, and
+   `living.c`'s own inherits, past every construct named as a blocker in
+   this row's own history to date. New blocker reached, already named
+   rather than newly discovered: `lib/lib/living.c` inherits
+   `lib/lib/magic.c`, whose `magic.c:85`/`:96` real
+   `spell->eventParse(this_object(), args...)` /
+   `spell->GetTargets(this_object(), args...)` hit `Parser.cpp:1003`'s own
+   pre-existing `"->: argument spread (\"...\") is not implemented yet"`
+   guard (committed on HEAD at 5355afb, the same session that built the
+   *array-literal* spread use, `({ exclude..., targets })`) -- a
+   deliberate, clean, already-scoped-out restriction on the *call-other
+   argument* spread specifically (real `expr_list_node: expr0 | expr0
+   L_DOT_DOT_DOT`, the same production, used at a structurally different
+   call site than the array-literal one that slice actually built), not
+   a crash or a new discovery. A different, unrelated feature from this
+   row's own class-array-index work; named here rather than investigated
+   further, per this row's own standing "name it, don't force past it"
+   discipline.
+
+`docs/dev/ROADMAP.md` row 3.10 updated in place with this outcome.
+
 **2026-09-04 (a further session, continuing further yet): value-producing
 `comma_expr`, the named leftover on Dead Souls 3.8.2's
 `lib/lib/race.c:206` `return (Race = extra), race;`.** Scoped against

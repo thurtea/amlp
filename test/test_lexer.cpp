@@ -11907,6 +11907,54 @@ static void testQualifiedParentCallMatchesInheritPathBasename() {
     std::cout << "testQualifiedParentCallMatchesInheritPathBasename OK\n";
 }
 
+// grammar.y L_BASIC_TYPE L_COLON_COLON identifier: qualifier is a type
+// keyword ("object"), not an Ident. Same basename resolution as above.
+static void testTypeKeywordQualifiedParentCallResolvesTheKeywordNamedParentAmongMultipleInherits() {
+    ObjectVarHarness harness;
+    harness.writeFile("/object.c",
+        "string probe() { return \"object\"; }\n");
+    harness.writeFile("/other_parent2.c",
+        "string probe() { return \"other_parent2\"; }\n");
+    harness.writeFile("/child3.c",
+        "inherit \"/object\";\n"
+        "inherit \"/other_parent2\";\n"
+        "string run() { return object::probe(); }\n");
+    auto obj = harness.objects.cloneObject("/child3");
+    assert(obj != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(obj, "run", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "object");
+    std::cout << "testTypeKeywordQualifiedParentCallResolvesTheKeywordNamedParentAmongMultipleInherits OK\n";
+}
+
+// interactive.c shape: several inherits, named parent::Setup() from
+// the child's own Setup().
+static void testRealAutosaveSetupPatternFromInteractiveCEndToEnd() {
+    ObjectVarHarness harness;
+    harness.writeFile("/autosave.c",
+        "string tag;\n"
+        "void Setup() { tag = \"autosave-setup-ran\"; }\n");
+    harness.writeFile("/interface.c",
+        "void Setup() { }\n");
+    harness.writeFile("/interactive_probe.c",
+        "inherit \"/autosave\";\n"
+        "inherit \"/interface\";\n"
+        "void Setup() {\n"
+        "    interface::Setup();\n"
+        "    autosave::Setup();\n"
+        "}\n"
+        "string query_tag() { return tag; }\n");
+    auto obj = harness.objects.cloneObject("/interactive_probe");
+    assert(obj != nullptr);
+    harness.vm.callFunction(obj, "Setup", {});
+
+    amlp::Value result = harness.vm.callFunction(obj, "query_tag", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "autosave-setup-ran");
+    std::cout << "testRealAutosaveSetupPatternFromInteractiveCEndToEnd OK\n";
+}
+
 static void testParentCallOnFileWithNoInheritThrows() {
     ObjectVarHarness harness;
     harness.writeFile("/lonely.c",
@@ -30302,6 +30350,8 @@ int main() {
     testCryptWithExplicitSaltIsDeterministicAndSaltIsThePrefix();
     testBareParentCallInvokesInheritedFunctionNotLocalOverride();
     testQualifiedParentCallMatchesInheritPathBasename();
+    testTypeKeywordQualifiedParentCallResolvesTheKeywordNamedParentAmongMultipleInherits();
+    testRealAutosaveSetupPatternFromInteractiveCEndToEnd();
     testParentCallOnFileWithNoInheritThrows();
     testClosureLiteralParsesToClosureLiteralExprBareForm();
     testClosureLiteralParsesToClosureLiteralExprWithBoundArgs();

@@ -116,6 +116,9 @@ bool Parser::startsClassType() const {
 }
 
 bool Parser::startsType() const {
+    // "object::create()" is a qualified parent call, not a declaration
+    // (grammar.y L_BASIC_TYPE L_COLON_COLON identifier).
+    if (check(TokenType::Keyword) && isTypeKeyword(peek()) && peekAt(1).text == "::") return false;
     if (check(TokenType::Keyword) && isTypeKeyword(peek())) return true;
     if (startsClassType()) return true;
     return check(TokenType::Ident) && peek().text == "array";
@@ -256,6 +259,24 @@ Parser::ArgListResult Parser::parseArgList() {
         result.isSpread = std::move(spreadFlags);
     }
     return result;
+}
+
+// "qualifier::name(...)": identifier or L_BASIC_TYPE then L_COLON_COLON.
+// Qualifier already consumed; this starts at "::".
+AstPtr Parser::parseQualifiedParentCall(const std::string& qualifier) {
+    advance(); // "::"
+    Token fnNameTok = expect(TokenType::Ident, "qualifier:: function name");
+    expectText("(", "qualifier:: call arguments");
+    auto qualifiedArgs = parseArgList();
+    expectText(")", "qualifier:: call arguments");
+
+    auto call = std::make_unique<CallExpr>();
+    call->callee = fnNameTok.text;
+    call->args = std::move(qualifiedArgs.args);
+    call->argIsSpread = std::move(qualifiedArgs.isSpread);
+    call->parentCall = true;
+    call->parentQualifier = qualifier;
+    return call;
 }
 
 AstPtr Parser::parsePrimary() {
@@ -582,6 +603,12 @@ AstPtr Parser::parsePrimary() {
         return anonFn;
     }
 
+    // "object::create()" (grammar.y L_BASIC_TYPE L_COLON_COLON identifier).
+    if (check(TokenType::Keyword) && isTypeKeyword(peek()) && peekAt(1).text == "::") {
+        std::string qualifier = advance().text;
+        return parseQualifiedParentCall(qualifier);
+    }
+
     // "(*fp)(args...)" -- call-through-a-function-pointer-value syntax
     // (grammar.y: "'(' '*' comma_expr ')' '(' expr_list ')'", confirmed
     // by direct reading, not guessed). Real LPC desugars this straight
@@ -781,26 +808,11 @@ AstPtr Parser::parsePrimary() {
             return call;
         }
 
-        // "qualifier::name(...)" -- e.g. "daemon::create()" -- the named
-        // form of the same explicit inherited-call syntax as bare
-        // "::name(...)" above (see Ast.hpp's CallExpr::parentCall
-        // comment; grammar.y's "identifier L_COLON_COLON identifier").
-        // "efun" is excluded here since that specific identifier was
-        // already handled by its own dedicated branch just above.
+        // "qualifier::name(...)" (grammar.y identifier L_COLON_COLON
+        // identifier). "efun" is handled above. Type-keyword form is
+        // earlier in this function.
         if (name != "efun" && checkText("::")) {
-            advance(); // "::"
-            Token fnNameTok = expect(TokenType::Ident, "qualifier:: function name");
-            expectText("(", "qualifier:: call arguments");
-            auto qualifiedArgs = parseArgList();
-            expectText(")", "qualifier:: call arguments");
-
-            auto call = std::make_unique<CallExpr>();
-            call->callee = fnNameTok.text;
-            call->args = std::move(qualifiedArgs.args);
-            call->argIsSpread = std::move(qualifiedArgs.isSpread);
-            call->parentCall = true;
-            call->parentQualifier = name;
-            return call;
+            return parseQualifiedParentCall(name);
         }
 
         // "catch(expr)" -- real LPC's own control-flow construct, not a

@@ -1,5 +1,68 @@
 # STATUS
 
+**2026-09-04 (comment-density cleanup, continuing an interrupted pass):
+inline source comments trimmed on the remaining worst-offending
+`src/**/*.cpp` files, comments only, plus the type-keyword qualified
+parent-call form that was already sitting unstaged from the interrupted
+working tree.** Nothing was staged when this session started. The
+working tree already had a partial ObjectManager.cpp comment trim (HEAD
+44.0% to 34.7%) plus CLAUDE.md's new comment-density rule, mixed with
+unrelated Parser/test work for grammar.y's `L_BASIC_TYPE L_COLON_COLON
+identifier` form (`object::create()`). That mix is kept: the Parser
+logic was not redone, only its new essay-length comments were cut to
+match the same rule. 901 tests total (899 plus the two new qualified-
+parent-call tests already in the unstaged tree), full suite green
+(direct binary and `ctest` both 0 failures) after every file.
+
+HEAD `src/**/*.cpp` ranked by comment percentage (the list the interrupted
+session started from; headers are a different category, mostly API
+docs, and were not this pass):
+
+1. `src/scheduler/Scheduler.cpp` 47.4% (258/544)
+2. `src/object/ObjectManager.cpp` 44.0% (763/1736)
+3. `src/efun/EfunTable.cpp` 43.3% (5409/12492)
+4. `src/main.cpp` 42.8% (80/187)
+5. `src/net/Server.cpp` 37.3% (236/632)
+6. `src/compiler/Lexer.cpp` 36.3% (211/582)
+7. `src/vm/VM.cpp` 35.4% (1130/3193)
+8. `src/compiler/CodeGen.cpp` 34.6% (615/1779)
+9. `src/efun/ParserPackage.cpp` 34.3% (1091/3181)
+10. `src/compiler/Parser.cpp` 33.9% (817/2408)
+
+This session finished ObjectManager (the interrupted first pass had
+stopped mid-file at 34.7%) and continued down that list through Lexer.
+EfunTable.cpp was skipped: 5409 comment lines are per-efun documentation
+of what each efun does, not "here is why I made this change" essays.
+VM.cpp, CodeGen.cpp, and ParserPackage.cpp remain for a later pass.
+
+Per-file comment percentage (pure `//`/`/*` lines over total lines),
+HEAD to after this pass:
+
+- ObjectManager.cpp: 44.0% (763/1736) -> 11.9% (132/1105). Interrupted
+  first pass had reached 34.7% (516/1489).
+- Scheduler.cpp: 47.4% (258/544) -> 17.1% (59/345)
+- main.cpp: 42.8% (80/187) -> 7.8% (9/116)
+- Server.cpp: 37.3% (236/632) -> 15.7% (74/470)
+- Lexer.cpp: 36.3% (211/582) -> 6.3% (25/396)
+
+Cumulative across the whole cleanup effort so far (HEAD vs now, the
+five files above): 1548/3681 = 42.1% -> 299/2432 = 12.3%.
+
+Behavioral quirks and named divergences stayed (one-line citation plus
+what the code does). One accidental logic drop during ObjectManager
+compression (`rebindFilename` / `loaded_` insert in
+`loadVirtualObject`) was caught by
+`testLoadVirtualObjectRebindsFilenameToVirtualPath` and restored before
+any later file was treated as done.
+
+The unstaged Parser work already present: `startsType()` excludes a type
+keyword immediately followed by `::`, and `parsePrimary()` accepts that
+shape via shared `parseQualifiedParentCall()`. That is grammar.y's
+third `function_name` alternative, the Dead Souls 3.8.2
+`lib/interactive.c` `object::create();` form (row 3.10 follow-up). Two
+new tests cover the type-keyword qualifier among multiple inherits and
+the real `autosave::Setup()` / `interface::Setup()` pattern.
+
 **2026-09-04 (a further session, continuing further yet again): the
 `class <name> { <member decls> }` struct-type declaration is built,
 exactly per this session's own prior scoping report, full slice

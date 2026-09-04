@@ -23,6 +23,18 @@ must continue unchanged.
    write it into the file immediately, not left to be relayed secondhand
    in a later session.
 
+4. **An inline source comment states what the code does and, where
+   genuinely non-obvious, a one-line pointer to the real citation**
+   (file:line, or an efun/opcode name) **-- not a re-derivation of the
+   whole scoping process.** The full derivation belongs in STATUS.md and
+   the commit message, which already carry it; writing it a second time,
+   at essay length, above the code itself is what pushed comment density
+   past 40% in files like `src/object/ObjectManager.cpp` (measured
+   2026-09-04: 44%, 763 of 1,736 lines). A comment that explains a real
+   behavioral quirk or a deliberate divergence from upstream is still
+   valuable and stays; a comment that narrates "here is why I made this
+   change" at multi-paragraph length does not.
+
 ## Orientation
 
 - `docs/dev/ROADMAP.md` is the master phase/row tracker. Its checkboxes

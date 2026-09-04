@@ -135,6 +135,10 @@ private:
     AstPtr parsePostfix();
     AstPtr parsePrimary();
 
+    // "qualifier::name(...)" (grammar.y identifier/L_BASIC_TYPE
+    // L_COLON_COLON identifier). Qualifier already consumed; at "::".
+    AstPtr parseQualifiedParentCall(const std::string& qualifier);
+
     // A call argument list, real grammar.y:2470-2510's own
     // expr_list/expr_list2/expr_list_node -- see Ast.hpp's CallExpr::
     // argIsSpread comment. isSpread is empty when no argument here is

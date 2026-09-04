@@ -910,21 +910,23 @@ AstPtr Parser::parsePrimary() {
             if (args.size() < 2) {
                 throw LpcRuntimeError("call_other requires at least (target, function) arguments");
             }
-            // CallOtherExpr has no argIsSpread field this slice (only
-            // CallExpr/ArrayLiteralExpr do -- see their own comments):
-            // rejected outright rather than silently compiled as a plain,
-            // unexpanded array argument, which would parse but run wrong.
-            for (bool s : parsed.isSpread) {
-                if (s) {
-                    throw LpcRuntimeError(
-                        "call_other: argument spread (\"...\") is not implemented yet");
-                }
+            // CallOtherExpr::argIsSpread (Ast.hpp) covers only the
+            // trailing args, positions 2.. here -- target/function
+            // (positions 0/1) have no real corpus use as a spread and no
+            // slot to hold one (they are separately typed fields, not
+            // part of the args vector), so still rejected outright.
+            if (!parsed.isSpread.empty() && (parsed.isSpread[0] || parsed.isSpread[1])) {
+                throw LpcRuntimeError(
+                    "call_other: the target/function argument cannot be spread (\"...\")");
             }
             auto callOther = std::make_unique<CallOtherExpr>();
             callOther->target = std::move(args[0]);
             callOther->function = std::move(args[1]);
             for (size_t i = 2; i < args.size(); ++i) {
                 callOther->args.push_back(std::move(args[i]));
+            }
+            if (!parsed.isSpread.empty()) {
+                callOther->argIsSpread.assign(parsed.isSpread.begin() + 2, parsed.isSpread.end());
             }
             return callOther;
         }
@@ -995,14 +997,6 @@ AstPtr Parser::parsePostfix() {
             expectText("(", "call_other operator arguments");
             auto parsed = parseArgList();
             expectText(")", "call_other operator arguments");
-            // See the plain call_other(...) branch above's identical
-            // comment: CallOtherExpr has no argIsSpread field this slice.
-            for (bool s : parsed.isSpread) {
-                if (s) {
-                    throw LpcRuntimeError(
-                        "->: argument spread (\"...\") is not implemented yet");
-                }
-            }
 
             // "->" always names its function literally in the syntax
             // (there is no "target->(expr)(...)" dynamic-dispatch form),
@@ -1015,6 +1009,13 @@ AstPtr Parser::parsePostfix() {
             callOther->target = std::move(expr);
             callOther->function = std::move(funcNameLit);
             callOther->args = std::move(parsed.args);
+            // Unlike the plain call_other(...) branch above, target is
+            // already consumed (the expr4 before "->") and function is
+            // always a literal identifier, never part of parsed itself
+            // -- so parsed.isSpread already lines up with callOther->args
+            // one-to-one, no offset needed. See CallOtherExpr::
+            // argIsSpread (Ast.hpp) for the real corpus citation.
+            callOther->argIsSpread = std::move(parsed.isSpread);
             expr = std::move(callOther);
             continue;
         }

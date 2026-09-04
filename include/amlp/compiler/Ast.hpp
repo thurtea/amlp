@@ -142,6 +142,16 @@ struct CallOtherExpr : AstNode {
     AstPtr target;
     AstPtr function;
     std::vector<AstPtr> args;
+    // Same "..." spread as CallExpr::argIsSpread above (real grammar's
+    // own expr_list production is shared verbatim by call_other's
+    // argument list, grammar.y:3580's "expr4 L_ARROW identifier '('
+    // expr_list ')'"; confirmed real, not assumed, against
+    // Dead Souls 3.8.2's lib/lib/magic.c:85's own
+    // "spell->eventParse(this_object(), args...)"). Covers only
+    // `args` above, never target/function -- those are separately
+    // typed fields, not part of this vector, and real corpus never
+    // spreads either one.
+    std::vector<bool> argIsSpread;
 };
 
 // sscanf(target, format, ...outputVars). Real LPC gives sscanf() its own

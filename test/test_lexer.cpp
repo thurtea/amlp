@@ -29533,6 +29533,92 @@ static void testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeC
     std::cout << "testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeCallParent OK\n";
 }
 
+// CallOtherExpr::argIsSpread (Ast.hpp), wired into emitCallOtherExpr()'s
+// existing OpCode::CallEfun emission the same way CallExpr's own
+// forceEfun path already does. Exact Dead Souls 3.8.2 shape:
+// lib/lib/magic.c:85's real "spell->eventParse(this_object(), args...)"
+// (a fixed leading argument, then a spread trailing one), the "->name(
+// ...)" operator form specifically -- previously rejected outright with
+// "->: argument spread (\"...\") is not implemented yet".
+static void testCallOtherArrowFormArgumentSpreadExpandsIntoTargetFunction() {
+    ObjectVarHarness harness;
+    harness.writeFile("/spellcaster.c",
+        "int probe() {\n"
+        "    mixed *xs;\n"
+        "    object target;\n"
+        "    xs = ({ 2, 3 });\n"
+        "    target = clone_object(\"/spelltarget\");\n"
+        "    return target->eventParse(1, xs...);\n"
+        "}\n");
+    harness.writeFile("/spelltarget.c",
+        "int eventParse(int a, int b, int c) {\n"
+        "    return a * 100 + b * 10 + c;\n"
+        "}\n");
+
+    auto caster = harness.objects.cloneObject("/spellcaster");
+    assert(caster != nullptr);
+    amlp::Value result = harness.vm.callFunction(caster, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 123);
+
+    std::cout << "testCallOtherArrowFormArgumentSpreadExpandsIntoTargetFunction OK\n";
+}
+
+// Same primitive, the literal call_other(target, "name", ...) function-
+// style form -- a structurally different Parser.cpp branch (target/
+// function are parsed as ordinary leading arguments, not consumed via
+// "->" before the arg list), previously rejected with its own identical
+// "call_other: argument spread (\"...\") is not implemented yet" message.
+static void testCallOtherLiteralFormArgumentSpreadExpandsIntoTrailingArgs() {
+    ObjectVarHarness harness;
+    harness.writeFile("/caller2.c",
+        "int probe() {\n"
+        "    mixed *xs;\n"
+        "    object target;\n"
+        "    xs = ({ 2, 3 });\n"
+        "    target = clone_object(\"/spelltarget2\");\n"
+        "    return call_other(target, \"eventParse\", 1, xs...);\n"
+        "}\n");
+    harness.writeFile("/spelltarget2.c",
+        "int eventParse(int a, int b, int c) {\n"
+        "    return a * 100 + b * 10 + c;\n"
+        "}\n");
+
+    auto caller = harness.objects.cloneObject("/caller2");
+    assert(caller != nullptr);
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 123);
+
+    std::cout << "testCallOtherLiteralFormArgumentSpreadExpandsIntoTrailingArgs OK\n";
+}
+
+// The one case still deliberately rejected: spreading the target or
+// function argument itself in the literal call_other(...) form.
+// CallOtherExpr::target/function are separately typed AST fields, not
+// part of the argIsSpread-covered args vector, and real corpus never
+// does this -- confirmed still a clean, named error, not a crash or a
+// silent misread of the array as the literal target/function value.
+static void testCallOtherSpreadOnTargetOrFunctionArgumentStillThrows() {
+    bool threw = false;
+    try {
+        runProbeMulti(
+            "mixed *probe() {\n"
+            "    mixed *xs;\n"
+            "    xs = ({ \"/x\" });\n"
+            "    return ({ call_other(xs..., \"greet\") });\n"
+            "}\n");
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("call_other: the target/function argument cannot be spread") !=
+               std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testCallOtherSpreadOnTargetOrFunctionArgumentStillThrows OK\n";
+}
+
 // The exact real pattern blocking the Dead Souls 3.8.2 boot (real
 // secure/sefun/sefun.c:113/120: "varargs object clone_object(string
 // name, mixed args...) { ... return efun::clone_object(name,
@@ -30964,6 +31050,9 @@ int main() {
     testCallArgumentSpreadThroughAPlainCallExpandsIntoParameters();
     testCallArgumentSpreadThroughEfunColonColonFormExpandsIntoEfunArgs();
     testCallArgumentSpreadThroughParentCallFormEmitsExpandVarargsBeforeCallParent();
+    testCallOtherArrowFormArgumentSpreadExpandsIntoTargetFunction();
+    testCallOtherLiteralFormArgumentSpreadExpandsIntoTrailingArgs();
+    testCallOtherSpreadOnTargetOrFunctionArgumentStillThrows();
     testVarargsCapturedRestParamImmediatelySpreadIntoAnotherCallMatchesSefunCShape();
     testNeverAssignedLocalIsUndefinedpAndNullpTrueUnderFluffosFalseUnderLdmud();
     testExplicitlyAssignedZeroLocalIsUndefinedpFalseUnderFluffosAndLdmud();

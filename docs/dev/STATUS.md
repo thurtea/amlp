@@ -1,5 +1,118 @@
 # STATUS
 
+**2026-09-04 (a further session, continuing further yet once more):
+`CallOtherExpr` gets a real `argIsSpread`, the named leftover on Dead
+Souls 3.8.2's `lib/lib/magic.c:85` `spell->eventParse(this_object(),
+args...)`.** 911 tests total (908 plus 3), full suite green (direct
+`build/test/amlp_tests` and `ctest` both 0 failures).
+
+1. **Scoped first, as asked, before touching anything.** Re-read
+   `Parser.cpp:1003`'s own comment and the original spread-operator
+   session's STATUS.md entry (2026-09-04, "row 3.10's own named blocker
+   ... is built"): item 3 there states plainly "`CallOtherExpr`
+   (`->`/`call_other()`) and `sscanf()` deliberately reject a spread
+   argument outright rather than silently mishandling it -- named, not
+   implemented this slice." No architectural reason is given, only
+   sequencing -- that session's own real corpus evidence at the time
+   (`secure/sefun/events.c`'s `exclude = ({ exclude..., targets... })`)
+   was array-literal and plain-call spread only; call-other spread had
+   no real corpus site driving it yet. Confirmed a sequencing gap, not
+   an architectural one, before writing anything.
+
+2. **Real grammar and bytecode confirmed directly, not assumed from
+   continuity.** `expr4 L_ARROW identifier '(' expr_list ')'`
+   (`grammar.y:3580-3626`) uses the exact same `expr_list` nonterminal a
+   plain call's argument list does -- the same production the `...`
+   spread grammar rule (`expr_list_node: expr0 | expr0 L_DOT_DOT_DOT`,
+   `grammar.y:2488-2496`) attaches to either way. Real `call_other`
+   compiles through `validate_efun_call(arrow_efun, ...)`
+   (`grammar.y:3614-3623`) into the same `F_SIMUL_EFUN`/efun-call opcode
+   family (`interpret.c:3595-3602`'s own `F_SIMUL_EFUN`, reading
+   `num_varargs` exactly like `interpret.c:3704`'s `F_EFUNV`) that
+   `F_EXPAND_VARARGS` (`interpret.c:2680-2724`) already feeds for any
+   other call. No structurally distinct runtime primitive exists for
+   call_other's own argument list at all.
+
+3. **This driver's own split confirmed narrow too.** `emitCallOtherExpr()`
+   already compiles `target->func(args)` into `OpCode::CallEfun`
+   (`calleeIdx` = "call_other", `argCount` = `2 + args.size()`) -- the
+   identical opcode `CallExpr::forceEfun` already routes through, which
+   `emitSpreadExpansions()`/`pendingVarargsDelta` already fully support
+   (`VM.cpp`'s own `CallEfun` handler already reads `instr.argCount +
+   pendingVarargsDelta`). `CallOtherExpr` (`Ast.hpp`) simply had no
+   `argIsSpread` field to carry a spread flag through parsing to
+   codegen at all -- a real, narrow wiring gap, not a structural one.
+
+4. **Fix.** `CallOtherExpr::argIsSpread` (parallel `vector<bool>`, empty
+   by default, covering only `args` -- never `target`/`function`, which
+   stay separately typed fields with no real corpus evidence of ever
+   being spread). Both `Parser.cpp` call_other sites populate it instead
+   of throwing: the literal `call_other(target, function, ...args)` form
+   slices `parsed.isSpread[2:]` for `args` (positions 0/1 are
+   target/function -- still rejected outright, now with a precise
+   "the target/function argument cannot be spread" message, since
+   spreading either has no real corpus use and no slot in this driver's
+   own AST shape to hold one); the `target->name(...)` operator form
+   sets it directly (`parsed.isSpread` already lines up one-to-one with
+   `args` there, no offset). `emitCallOtherExpr()` gained one
+   `emitSpreadExpansions(callOther.argIsSpread)` call, in the same
+   position `emitCallExpr()` already calls it -- right after emitting
+   `args`, before the argCount-bearing instruction -- since
+   `ExpandVarargs`'s own operand is a stack position counted back from
+   the top (`VM.cpp`), unaffected by `target`/`function` already sitting
+   deeper on the stack.
+
+5. **Tests.** The exact `magic.c:85` shape (`target->name(fixedArg,
+   xs...)`, the `->` operator form); the same primitive through the
+   literal `call_other(target, "name", fixedArg, xs...)` function-style
+   form (a structurally different `Parser.cpp` branch); and confirmation
+   that spreading the target/function position itself in the literal
+   form still throws a clean, specific error rather than silently
+   misreading the array as the literal target/function value. All three
+   verified as new failures against the pre-fix binary before the fix
+   landed (the first two threw the old "not implemented yet" messages;
+   the third's exact new message did not exist yet). Every pre-existing
+   spread test (array-literal, plain-call, `efun::`, `CallParent`) and
+   every pre-existing `call_other`/`->` test still pass unchanged.
+
+6. **Dead Souls 3.8.2 boot re-attempted, live TCP, same method.** The fix
+   confirmed live: `lib/lib/magic.c` now compiles completely, and boot
+   progresses through `living.c`'s own remaining inherits and `player.c`
+   itself. **New blocker reached, a different and unrelated bug, named
+   here and stopped at rather than forced past, per this row's own
+   standing discipline:** `secure/daemon/players.c`'s real `static void
+   UserUpdate(string name, int status){...}` (raw line 728; the driver's
+   own reported "line 708" is the same known include-splice
+   line-counter offset artifact this row has already named before, not
+   a misread) fails with `codegen`'s own "expected \")\" in function
+   declaration parameters ... (got \"status\")". Root-caused with a
+   minimal standalone reproduction (a throwaway `Lexer`+`Parser`-only
+   scratch program linked directly against the already-built
+   `libcompiler.a`, no scratch mudlib root or CMake target needed this
+   time): this driver's own `Lexer.cpp` hardcodes `"status"` as an
+   unconditional keyword (`kKeywords`, citing "lex.c: \"status\" is
+   TYPE_NUMBER, a synonym for int"), so `int status` as a parameter name
+   parses "int" as a complete unnamed parameter and then chokes on a
+   second type keyword where a name or `)` was expected -- reproduced
+   with a bare `void f(int status){}`, independent of `static` or
+   parameter position. Real `lex.c:184`'s own `{"status", L_BASIC_TYPE,
+   TYPE_NUMBER}` is gated behind `#ifdef HAS_STATUS_TYPE`, an optional,
+   explicitly legacy flag ("old MudOS drivers had a 'status' type ...
+   very archaic, but easy to support", `local_options.ds:148-153`'s own
+   comment) -- and Dead Souls 3.8.2's own real, bundled build profile,
+   `fluffos-2.23-ds03/local_options.ds:153`, explicitly `#undef`s it, the
+   same file already cited as this project's own authoritative build
+   config for this exact mudlib. So under Dead Souls' own real, intended
+   build, `status` is not a keyword at all, and `players.c`'s own use of
+   it as an ordinary parameter name is entirely real, valid LPC -- this
+   driver's own hardcoded keyword is simply wrong for this build profile,
+   the same class of bug as the earlier `ARRAY_RESERVED_WORD`/
+   `REF_RESERVED_WORD`-style optional-keyword gaps this project has
+   already fixed, not investigated further this turn since it is a
+   different, unrelated bug from this row's own call-other-spread scope.
+
+`docs/dev/ROADMAP.md` row 3.10 updated in place with this outcome.
+
 **2026-09-04 (a further session, continuing further yet again): `staticClassTypeOf()`
 walks an `IndexExpr`, the named leftover on Dead Souls 3.8.2's
 `lib/lib/body.c:317` `Protection[i]->time`.** 908 tests total (905 plus

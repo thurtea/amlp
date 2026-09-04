@@ -796,6 +796,12 @@ void CodeGen::emitCallOtherExpr(const CallOtherExpr& callOther) {
     for (const auto& argNode : callOther.args) {
         emitExpr(*argNode);
     }
+    // emitSpreadExpansions()'s own operand is a position counted back
+    // from whatever is currently on top of the stack (VM.cpp's own
+    // ExpandVarargs handler), so target/function already pushed above
+    // are unaffected -- same call as emitCallExpr() makes for its own
+    // args, right before building the argCount-bearing instruction.
+    emitSpreadExpansions(callOther.argIsSpread);
 
     int calleeIdx = internString("call_other");
     int32_t argCount = static_cast<int32_t>(2 + callOther.args.size());
